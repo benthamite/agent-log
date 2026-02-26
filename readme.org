@@ -1,5 +1,10 @@
 #+title: claude-log
 #+author: Pablo Stafforini
+#+export_file_name: claude-log
+#+texinfo_filename: claude-log.info
+#+texinfo_dir_category: Emacs misc features
+#+texinfo_dir_title: Claude-Log: (claude-log)
+#+texinfo_dir_desc: Browse Claude Code conversation logs
 
 Browse [[https://docs.anthropic.com/en/docs/claude-code][Claude Code]] conversation logs in Emacs.
 
