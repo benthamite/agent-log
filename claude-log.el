@@ -57,6 +57,10 @@
   "Root directory of Claude Code configuration."
   :type 'directory)
 
+(defcustom claude-log-rendered-directory "~/.claude/rendered"
+  "Directory where rendered Markdown files are stored."
+  :type 'directory)
+
 (defcustom claude-log-show-thinking 'collapsed
   "How to display assistant thinking blocks.
 `hidden' omits them entirely, `collapsed' shows them folded under
@@ -98,10 +102,6 @@ project, then for a session within that project."
 (defcustom claude-log-display-width 60
   "Maximum width of the first-message column in the session browser."
   :type 'integer)
-
-(defcustom claude-log-rendered-directory "~/.claude/rendered"
-  "Directory where rendered Markdown files are stored."
-  :type 'directory)
 
 (defcustom claude-log-slug-max-length 50
   "Maximum length of the slug portion of rendered filenames."
