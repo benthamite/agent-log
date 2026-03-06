@@ -908,6 +908,7 @@ COLLECTION is a list of strings or an alist of (string . value)."
     (define-key map "E" #'claude-log-expand-all)
     (define-key map "g" #'claude-log-refresh)
     (define-key map "w" #'claude-log-copy-turn)
+    (define-key map "r" #'claude-log-resume-session)
     (define-key map "q" #'quit-window)
     map)
   "Keymap for `claude-log-mode'.")
@@ -1287,6 +1288,33 @@ preceding separator."
       (if (re-search-forward "^## " nil t)
           (match-beginning 0)
         (point-max)))))
+
+;;;;; Resume session
+
+(declare-function claude-code--start "claude-code")
+
+(defun claude-log--extract-session-id-from-buffer ()
+  "Extract session ID from the front-matter comment of the current buffer."
+  (save-excursion
+    (goto-char (point-min))
+    (when (re-search-forward "<!-- session: \\([^ ]+\\) -->" nil t)
+      (match-string 1))))
+
+(defun claude-log-resume-session ()
+  "Resume the Claude Code session for the current buffer."
+  (interactive)
+  (unless (require 'claude-code nil t)
+    (user-error "Package `claude-code' is required but not available"))
+  (let ((session-id (or claude-log--session-id
+                        (claude-log--extract-session-id-from-buffer))))
+    (unless session-id
+      (user-error "No session ID found in current buffer"))
+    (let ((default-directory (if (and claude-log--session-project
+                                     (not (string-empty-p claude-log--session-project))
+                                     (file-directory-p claude-log--session-project))
+                                claude-log--session-project
+                              default-directory)))
+      (claude-code--start nil (list "--resume" session-id)))))
 
 (provide 'claude-log)
 ;;; claude-log.el ends here
