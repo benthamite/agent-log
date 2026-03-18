@@ -204,13 +204,8 @@ a project, then for a session within that project."
   (let* ((file (expand-file-name file))
          (session-id (file-name-sans-extension (file-name-nondirectory file)))
          (entries (claude-log--parse-jsonl-file file))
-         (first-msg (seq-find
-                     (lambda (e) (member (plist-get e :type)
-                                         '("user" "assistant")))
-                     entries))
-         (progress (seq-find
-                    (lambda (e) (equal (plist-get e :type) "progress"))
-                    entries))
+         (first-msg (claude-log--find-first-message entries))
+         (progress (claude-log--find-progress-entry entries))
          (ts-iso (when first-msg (plist-get first-msg :timestamp)))
          (epoch-ms (when (stringp ts-iso)
                      (claude-log--iso-to-epoch-ms ts-iso)))
@@ -431,17 +426,12 @@ JSONL-SIZE the source file size in bytes."
 (defun claude-log--extract-session-metadata-from-entries (entries)
   "Extract project and date from ENTRIES as a plist.
 Returns (:project SHORT-NAME :date DATE-STRING)."
-  (let (project date)
-    (when-let* ((first-msg (seq-find
-                            (lambda (e) (member (plist-get e :type)
-                                                '("user" "assistant")))
-                            entries)))
-      (setq date (claude-log--format-iso-timestamp
+  (let* ((first-msg (claude-log--find-first-message entries))
+         (progress (claude-log--find-progress-entry entries))
+         (date (when first-msg
+                 (claude-log--format-iso-timestamp
                   (plist-get first-msg :timestamp))))
-    (when-let* ((progress (seq-find
-                           (lambda (e) (equal (plist-get e :type) "progress"))
-                           entries)))
-      (setq project (or (plist-get progress :cwd) "")))
+         (project (when progress (or (plist-get progress :cwd) ""))))
     (list :project (claude-log--short-project (or project ""))
           :date (or date "unknown"))))
 
@@ -691,6 +681,18 @@ known system XML tag."
     (and (stringp content)
          (string-match-p claude-log--system-tag-regexp content))))
 
+;;;;; Entry helpers
+
+(defun claude-log--find-first-message (entries)
+  "Return the first user or assistant entry from ENTRIES."
+  (seq-find (lambda (e) (member (plist-get e :type) '("user" "assistant")))
+            entries))
+
+(defun claude-log--find-progress-entry (entries)
+  "Return the first progress entry from ENTRIES."
+  (seq-find (lambda (e) (equal (plist-get e :type) "progress"))
+            entries))
+
 ;;;;; Rendering
 
 (defun claude-log--render-full ()
@@ -709,15 +711,10 @@ known system XML tag."
 
 (defun claude-log--extract-session-metadata (entries)
   "Extract project and date from ENTRIES."
-  (when-let* ((first-msg (seq-find
-                           (lambda (e) (member (plist-get e :type)
-                                               '("user" "assistant")))
-                           entries)))
+  (when-let* ((first-msg (claude-log--find-first-message entries)))
     (setq claude-log--session-date
           (claude-log--format-iso-timestamp (plist-get first-msg :timestamp))))
-  (when-let* ((progress (seq-find
-                          (lambda (e) (equal (plist-get e :type) "progress"))
-                          entries)))
+  (when-let* ((progress (claude-log--find-progress-entry entries)))
     (setq claude-log--session-project
           (or (plist-get progress :cwd) ""))))
 
@@ -753,10 +750,7 @@ them without a User heading."
     (let ((text-parts (claude-log--collect-user-text content))
           (tool-parts (claude-log--collect-tool-results content)))
       (cond
-       ((and text-parts (null tool-parts))
-        (concat (format "---\n\n## User — %s\n\n" time-str)
-                (string-join text-parts)))
-       ((and text-parts tool-parts)
+       (text-parts
         (concat (format "---\n\n## User — %s\n\n" time-str)
                 (string-join text-parts)
                 (string-join tool-parts)))
@@ -857,8 +851,8 @@ Returns an empty string if CONTENT produces no visible output."
 (defun claude-log--summarize-tool-input-by-name (name input)
   "Return a summary of tool INPUT specific to tool NAME."
   (pcase name
-    ("Read" (claude-log--summarize-read input))
-    ("Write" (claude-log--summarize-write input))
+    ((or "Read" "Write")
+     (format "> **file_path**: %s" (or (plist-get input :file_path) "?")))
     ("Edit" (claude-log--summarize-edit input))
     ("Bash" (claude-log--summarize-bash input))
     ("Grep" (claude-log--summarize-grep input))
@@ -867,14 +861,6 @@ Returns an empty string if CONTENT produces no visible output."
     ("WebSearch" (claude-log--summarize-web-search input))
     ("Task" (claude-log--summarize-task input))
     (_ "")))
-
-(defun claude-log--summarize-read (input)
-  "Summarize Read tool INPUT."
-  (format "> **file_path**: %s" (or (plist-get input :file_path) "?")))
-
-(defun claude-log--summarize-write (input)
-  "Summarize Write tool INPUT."
-  (format "> **file_path**: %s" (or (plist-get input :file_path) "?")))
 
 (defun claude-log--summarize-edit (input)
   "Summarize Edit tool INPUT."
@@ -1182,7 +1168,7 @@ Returns the position, or nil."
   "Collapse all tool-use, tool-result, and thinking sections."
   (interactive)
   (claude-log--remove-section-overlays)
-  (claude-log--collapse-headings-matching "^####+ "))
+  (claude-log--apply-section-visibility "^####+ " 'collapse))
 
 (defun claude-log-expand-all ()
   "Expand all sections."
@@ -1197,11 +1183,11 @@ Returns the position, or nil."
   "Collapse or hide sections per user configuration."
   (claude-log--remove-section-overlays)
   (pcase claude-log-show-thinking
-    ('collapsed (claude-log--collapse-headings-matching "^#### Thinking$"))
-    ('hidden (claude-log--hide-sections-matching "^#### Thinking$")))
+    ('collapsed (claude-log--apply-section-visibility "^#### Thinking$" 'collapse))
+    ('hidden (claude-log--apply-section-visibility "^#### Thinking$" 'hide)))
   (pcase claude-log-show-tools
-    ('collapsed (claude-log--collapse-headings-matching "^#### Tool"))
-    ('hidden (claude-log--hide-sections-matching "^#### Tool")))
+    ('collapsed (claude-log--apply-section-visibility "^#### Tool" 'collapse))
+    ('hidden (claude-log--apply-section-visibility "^#### Tool" 'hide)))
   (claude-log--hide-empty-turns))
 
 (defun claude-log--find-section-end ()
@@ -1219,87 +1205,43 @@ blank lines before that boundary are included."
       (goto-char limit)
       limit)))
 
-(defun claude-log--collapse-headings-matching (regexp)
-  "Collapse all sections matching REGEXP in the buffer.
-Creates overlays that hide the body while keeping the heading
-visible."
+(defun claude-log--apply-section-visibility (regexp action &optional start end)
+  "Apply visibility ACTION to sections matching REGEXP.
+ACTION is `collapse' (hide body, keep heading) or `hide' (hide
+heading and body).  When START and END are given, restrict the
+search to that region."
   (save-excursion
-    (goto-char (point-min))
-    (while (re-search-forward regexp nil t)
+    (goto-char (or start (point-min)))
+    (while (re-search-forward regexp end t)
       (let* ((heading-start (match-beginning 0))
              (heading-end (save-excursion
                             (goto-char heading-start)
                             (end-of-line) (point)))
              (section-end (save-excursion
                             (goto-char heading-start)
-                            (claude-log--find-section-end))))
-        (when (< heading-end section-end)
-          (let ((ov (make-overlay heading-end section-end nil t)))
-            (overlay-put ov 'invisible 'claude-log-collapsed)
-            (overlay-put ov 'claude-log-section t)))
-        (goto-char section-end)))))
-
-(defun claude-log--hide-sections-matching (regexp)
-  "Completely hide all sections matching REGEXP using overlays.
-Hides both the heading and its body."
-  (save-excursion
-    (goto-char (point-min))
-    (while (re-search-forward regexp nil t)
-      (let* ((heading-start (match-beginning 0))
-             (section-end (save-excursion
-                            (goto-char heading-start)
-                            (claude-log--find-section-end))))
-        (when (< heading-start section-end)
-          (let ((ov (make-overlay heading-start section-end nil t)))
-            (overlay-put ov 'invisible 'claude-log-hidden)
+                            (claude-log--find-section-end)))
+             (ov-start (if (eq action 'collapse) heading-end heading-start))
+             (inv-spec (if (eq action 'collapse)
+                           'claude-log-collapsed
+                         'claude-log-hidden)))
+        (when (< ov-start section-end)
+          (let ((ov (make-overlay ov-start section-end nil t)))
+            (overlay-put ov 'invisible inv-spec)
             (overlay-put ov 'claude-log-section t)))
         (goto-char section-end)))))
 
 (defun claude-log--collapse-region (start end)
   "Collapse or hide new sections between START and END."
   (pcase claude-log-show-thinking
-    ('collapsed (claude-log--collapse-headings-in-region
-                 "^#### Thinking$" start end))
-    ('hidden (claude-log--hide-sections-in-region
-              "^#### Thinking$" start end)))
+    ('collapsed (claude-log--apply-section-visibility
+                 "^#### Thinking$" 'collapse start end))
+    ('hidden (claude-log--apply-section-visibility
+              "^#### Thinking$" 'hide start end)))
   (pcase claude-log-show-tools
-    ('collapsed (claude-log--collapse-headings-in-region
-                 "^#### Tool" start end))
-    ('hidden (claude-log--hide-sections-in-region
-              "^#### Tool" start end))))
-
-(defun claude-log--collapse-headings-in-region (regexp start end)
-  "Collapse sections matching REGEXP between START and END."
-  (save-excursion
-    (goto-char start)
-    (while (re-search-forward regexp end t)
-      (let* ((heading-start (match-beginning 0))
-             (heading-end (save-excursion
-                            (goto-char heading-start)
-                            (end-of-line) (point)))
-             (section-end (save-excursion
-                            (goto-char heading-start)
-                            (claude-log--find-section-end))))
-        (when (< heading-end section-end)
-          (let ((ov (make-overlay heading-end section-end nil t)))
-            (overlay-put ov 'invisible 'claude-log-collapsed)
-            (overlay-put ov 'claude-log-section t)))
-        (goto-char section-end)))))
-
-(defun claude-log--hide-sections-in-region (regexp start end)
-  "Completely hide sections matching REGEXP between START and END."
-  (save-excursion
-    (goto-char start)
-    (while (re-search-forward regexp end t)
-      (let* ((heading-start (match-beginning 0))
-             (section-end (save-excursion
-                            (goto-char heading-start)
-                            (claude-log--find-section-end))))
-        (when (< heading-start section-end)
-          (let ((ov (make-overlay heading-start section-end nil t)))
-            (overlay-put ov 'invisible 'claude-log-hidden)
-            (overlay-put ov 'claude-log-section t)))
-        (goto-char section-end)))))
+    ('collapsed (claude-log--apply-section-visibility
+                 "^#### Tool" 'collapse start end))
+    ('hidden (claude-log--apply-section-visibility
+              "^#### Tool" 'hide start end))))
 
 (defun claude-log--remove-section-overlays ()
   "Remove all section visibility overlays from the current buffer."
