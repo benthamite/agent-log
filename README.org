@@ -1,44 +1,62 @@
-#+title: claude-log
+#+title: claude-log: Browse Claude Code conversation logs in Emacs
 #+author: Pablo Stafforini
+#+email: pablo@stafforini.com
+#+language: en
+#+options: ':t toc:t author:t email:t num:t
+#+startup: content
 #+export_file_name: claude-log.info
 #+texinfo_filename: claude-log.info
 #+texinfo_dir_category: Emacs misc features
 #+texinfo_dir_title: Claude-Log: (claude-log)
-#+texinfo_dir_desc: Browse Claude Code conversation logs
+#+texinfo_dir_desc: Browse Claude Code conversation logs in Emacs
 
-Browse [[https://docs.anthropic.com/en/docs/claude-code][Claude Code]] conversation logs in Emacs.
+This manual describes the features and customization options for the Emacs Lisp file =claude-log.el=.
+
+* Overview
+:PROPERTIES:
+:CUSTOM_ID: h:overview
+:END:
+
+[[https://docs.anthropic.com/en/docs/claude-code][Claude Code]] stores complete conversation transcripts as JSONL files under =~/.claude/projects/=.  While these files contain a full record of every session, they are not human-readable: each line is a JSON object with nested content arrays, tool-use blocks, thinking sections, and system metadata.  =claude-log.el= renders these transcripts into readable Markdown files and provides a dedicated Emacs interface for browsing, searching, and navigating them.
+
+The package maintains a mirror directory of pre-rendered Markdown files under =~/.claude/rendered/=, organized by project.  This means that standard tools such as =consult-ripgrep=, Dired, and =grep= work natively on readable content without any special integration.
+
+The core capabilities of =claude-log.el= are:
+
+- *Session browsing*.  A ~completing-read~ interface lists all sessions, grouped by project or as a flat list, sorted by recency.  Each candidate shows the date, project name, and either an AI-generated summary or the first user message ([[#h:session-browsing][Session browsing]]).
+- *Lazy rendering*.  Sessions are rendered to =.md= files on first access.  The package tracks JSONL file sizes in an index to avoid re-rendering files that have not changed ([[#h:sync-and-rendering][Sync and rendering]]).
+- *Live updates*.  For active sessions, a ~file-notify~ watcher detects JSONL changes and appends new entries to both the =.md= file on disk and the open buffer in real time ([[#h:claude-log-live-update][~claude-log-live-update~]]).
+- *Outline navigation*.  Rendered buffers use ~outline-minor-mode~ for folding tool calls, thinking blocks, and tool results.  Dedicated keybindings jump between conversation turns ([[#h:navigation][Navigation]]).
+- *Smart tool summaries*.  Each tool call is summarized by its most relevant input—the file path for Read/Write, the command for Bash, the pattern for Grep, and so on.
+- *AI-powered session summaries*.  An optional integration with =gptel= generates concise one-line and paragraph summaries for each session, displayed in the browser and at the top of rendered buffers ([[#h:summary-generation][Summary generation]]).
+- *Session resumption*.  You can resume any session directly in Claude Code from within the rendered buffer, provided the =claude-code= package is installed ([[#h:session-resumption][Session resumption]]).
+
+The package requires Emacs 29.1 or later and [[https://jblevins.org/projects/markdown-mode/][markdown-mode]] 2.6 or later.  The optional summary feature requires [[https://github.com/karthink/gptel][gptel]].  Session resumption requires [[https://github.com/stevemolitor/claude-code.el][claude-code]].
 
 The development repository is on [[https://github.com/benthamite/claude-log][GitHub]].
 
-Claude Code stores complete conversation transcripts as JSONL files under =~/.claude/projects/=. This package renders them as readable Markdown files under =~/.claude/rendered/=, so that standard tools (=consult-ripgrep=, Dired, =grep=) work natively on readable content.
-
-* Features
-
-- *Session browser*: browse all sessions, grouped by project or as a flat list, sorted most-recent-first.
-- *Rendered Markdown mirror*: sessions are lazily rendered to =.md= files with readable filenames, organized by project.
-- *Full-text search*: use =consult-ripgrep= or any grep tool directly on the rendered directory.
-- *Live updates*: buffers and =.md= files update in real time via =file-notify= as conversations progress.
-- *Outline navigation*: fold/unfold tool calls, thinking blocks, and tool results using =outline-minor-mode=.
-- *Smart tool summaries*: each tool call is summarized by its most relevant input (file path for Read/Write, command for Bash, pattern for Grep, etc.).
-
-* Requirements
-
-- Emacs 29.1 or later.
-- [[https://jblevins.org/projects/markdown-mode/][markdown-mode]] 2.6 or later.
-
 * Installation
+:PROPERTIES:
+:CUSTOM_ID: h:installation
+:END:
 
-** Manual
+** Manual installation
+:PROPERTIES:
+:CUSTOM_ID: h:manual-installation
+:END:
 
-Clone this repository to your Emacs load path and add the following to your =init.el= file:
+Clone the repository to a directory on your Emacs load path and add the following to your init file:
 
 #+begin_src emacs-lisp
 (require 'claude-log)
 #+end_src
 
-** With =use-package=
+** Installation with use-package
+:PROPERTIES:
+:CUSTOM_ID: h:installation-with-use-package
+:END:
 
-If you use =use-package=, add one of the following snippets to your =init.el= file:
+If you use ~use-package~, add one of the following snippets to your init file:
 
 #+begin_src emacs-lisp
 ;; with vc
@@ -58,106 +76,286 @@ If you use =use-package=, add one of the following snippets to your =init.el= fi
   :quelpa (claude-log :fetcher github :repo "benthamite/claude-log"))
 #+end_src
 
-* Usage
+* User options
+:PROPERTIES:
+:CUSTOM_ID: h:user-options
+:END:
 
-** Browsing sessions
+All user options belong to the ~claude-log~ customization group.  You can browse them interactively with =M-x customize-group RET claude-log RET=.
 
-#+begin_example
-M-x claude-log-browse-sessions
-#+end_example
+** Directory configuration
+:PROPERTIES:
+:CUSTOM_ID: h:directory-configuration
+:END:
 
-When =claude-log-group-by-project= is non-nil (the default), this first prompts for a project, then for a session within that project. Sessions are displayed as:
+#+vindex: claude-log-directory
+#+vindex: claude-log-rendered-directory
+
+The user option ~claude-log-directory~ specifies the root directory of your Claude Code configuration.  The package reads =history.jsonl= in this directory and looks for session files under the =projects/= subdirectory.  The default value is =~/.claude=.  You would change this only if you have configured Claude Code to use a non-standard location.
+
+The user option ~claude-log-rendered-directory~ specifies the directory where rendered Markdown files are stored.  Each project gets its own subdirectory, and each session is rendered as a dated =.md= file within it ([[#h:sync-and-rendering][Sync and rendering]]).  The default value is =~/.claude/rendered=.  You might change this if you want rendered files to live outside the Claude configuration directory, for example on a path indexed by a desktop search tool.
+
+** Display of thinking and tool sections
+:PROPERTIES:
+:CUSTOM_ID: h:display-of-thinking-and-tool-sections
+:END:
+
+#+vindex: claude-log-show-thinking
+#+vindex: claude-log-show-tools
+
+Claude Code conversations contain thinking blocks (the model's chain-of-thought reasoning) and tool-use sections (file reads, bash commands, grep searches, and so on).  These are valuable for understanding what the assistant did, but they can also be verbose and clutter the view when you are reading the high-level conversation.
+
+The user option ~claude-log-show-thinking~ controls how thinking blocks appear.  It accepts one of three symbols:
+
+- ~hidden~: thinking blocks are omitted entirely from the rendered output.
+- ~collapsed~: thinking blocks are rendered but folded under a heading, so you see the heading but not the content until you expand it.
+- ~visible~: thinking blocks are rendered fully expanded.
+
+The default value is ~collapsed~.
+
+The user option ~claude-log-show-tools~ works identically but controls tool-use and tool-result sections.  It also defaults to ~collapsed~.
+
+When both options are set to ~hidden~, assistant turns that contain only tool calls and thinking (no visible text) are hidden entirely, including their heading and separator.
+
+You can toggle individual sections interactively using ~claude-log-toggle-section~ ([[#h:section-visibility][Section visibility]]).
+
+** Timestamps
+:PROPERTIES:
+:CUSTOM_ID: h:timestamps
+:END:
+
+#+vindex: claude-log-timestamp-format
+
+The user option ~claude-log-timestamp-format~ controls the format string used when displaying timestamps in rendered output.  It follows the conventions of ~format-time-string~.  The default value is ="%Y-%m-%d %H:%M:%S"=.
+
+** Tool output limits
+:PROPERTIES:
+:CUSTOM_ID: h:tool-output-limits
+:END:
+
+#+vindex: claude-log-max-tool-input-length
+#+vindex: claude-log-max-tool-result-length
+
+Tool calls can have very long inputs (entire file contents for Write, lengthy commands for Bash) and even longer results.  Two user options control how much of this content is shown in the rendered output.
+
+The user option ~claude-log-max-tool-input-length~ sets the maximum number of characters displayed for tool input summaries.  Text beyond this limit is truncated with an ellipsis.  The default value is ~200~.
+
+The user option ~claude-log-max-tool-result-length~ sets the maximum number of characters displayed for tool result content.  The default value is ~500~.
+
+Increase these values if you find that truncated tool content is hiding information you need.  Decrease them if rendered files are too large or buffers are slow to navigate.
+
+** Session browser options
+:PROPERTIES:
+:CUSTOM_ID: h:session-browser-options
+:END:
+
+#+vindex: claude-log-group-by-project
+#+vindex: claude-log-display-width
+#+vindex: claude-log-slug-max-length
+
+The user option ~claude-log-group-by-project~ controls whether ~claude-log-browse-sessions~ groups sessions by project ([[#h:session-browsing][Session browsing]]).  When non-~nil~ (the default), the command first prompts for a project, then for a session within that project.  When ~nil~, all sessions are presented in a single flat list.  The grouped view is more convenient when you have many sessions across several projects; the flat view is useful for quickly finding a recent session regardless of project.
+
+The user option ~claude-log-display-width~ sets the maximum width of the first-message column in the session browser.  Longer messages are truncated.  The default value is ~60~.
+
+The user option ~claude-log-slug-max-length~ sets the maximum length of the slug portion of rendered filenames.  The slug is derived from the first user message and appears after the date in the filename (e.g., =2026-02-22_11-56_redesign-claude-log-package.md=).  The default value is ~50~.
+
+** Live updates
+:PROPERTIES:
+:CUSTOM_ID: h:live-updates
+:END:
+
+#+vindex: claude-log-live-update
+
+The user option ~claude-log-live-update~ controls whether the package watches the source JSONL file for changes when a rendered buffer is open.  When non-~nil~ (the default), a ~file-notify~ watcher detects new entries appended to the JSONL file and renders them into both the open buffer and the =.md= file on disk.  This means you can have a rendered log open alongside an active Claude Code session and see new turns appear as they happen.
+
+Set this to ~nil~ if you experience performance issues with file watching, or if you are on a system where ~file-notify~ is not reliable (e.g., certain remote filesystems via TRAMP).
+
+** Summary generation
+:PROPERTIES:
+:CUSTOM_ID: h:summary-generation-options
+:END:
+
+#+vindex: claude-log-summary-backend
+#+vindex: claude-log-summary-model
+#+vindex: claude-log-summary-max-content-length
+
+The summary feature uses =gptel= to generate concise descriptions of each session.  Three user options control how summaries are generated.
+
+The user option ~claude-log-summary-backend~ specifies the =gptel= backend name to use for summary requests, for example ="Gemini"= or ="Claude"=.  When ~nil~ (the default), the backend is inferred from ~claude-log-summary-model~ if set, otherwise it falls back to ~gptel-backend~.
+
+The user option ~claude-log-summary-model~ specifies the =gptel= model to use, for example ~claude-haiku-4-5-20251001~.  A smaller, faster model is often sufficient for summarization.  When ~nil~ (the default), it uses ~gptel-model~.
+
+The user option ~claude-log-summary-max-content-length~ sets the maximum number of characters of conversation text sent to the LLM for summarization.  The package extracts the plain text of user and assistant messages (ignoring tool calls and thinking blocks) and truncates the result to this limit.  The default value is ~8000~.  Increase this for longer, more detailed summaries at the cost of higher token usage; decrease it if you want to minimize API costs.
+
+* Commands
+:PROPERTIES:
+:CUSTOM_ID: h:commands
+:END:
+
+** Session browsing
+:PROPERTIES:
+:CUSTOM_ID: h:session-browsing
+:END:
+
+#+findex: claude-log-browse-sessions
+#+findex: claude-log-open-latest
+#+findex: claude-log-open-file
+#+findex: claude-log-open-session-at-point
+
+The command ~claude-log-browse-sessions~ is the primary entry point for exploring your Claude Code history.  It reads =history.jsonl=, resolves each session to its JSONL file on disk, and presents the results in a ~completing-read~ prompt.  Each candidate is formatted as:
 
 #+begin_example
 2026-02-22 14:06  my-project  "Fix the authentication bug in..."
 #+end_example
 
-The selected session is lazily rendered to a =.md= file if needed, then opened in a buffer.
+When ~claude-log-group-by-project~ is non-~nil~ (the default), the command first prompts for a project, then for a session within that project ([[#h:session-browser-options][Session browser options]]).  Sessions are sorted most-recent-first.  If AI summaries have been generated for any sessions ([[#h:summary-generation][Summary generation]]), the summary replaces the quoted first message in the candidate display.
 
-** Opening the latest session
+Selecting a session lazily renders it to a =.md= file if needed, then opens the rendered buffer in ~claude-log-mode~ ([[#h:claude-log-mode][~claude-log-mode~]]).
 
-#+begin_example
-M-x claude-log-open-latest
-#+end_example
+The command ~claude-log-open-latest~ opens the most recent session directly, without prompting.  This is convenient when you want to review the last conversation you had with Claude Code.
 
-Opens the most recent session directly, without prompting.
+The command ~claude-log-open-file~ opens a specific JSONL file by path.  It prompts for a file path interactively.  This is useful for automation, for opening session files you found via the filesystem, or when you know the exact file you want.
 
-** Searching sessions
+The command ~claude-log-open-session-at-point~ opens the log for the Claude Code session running in the current buffer.  The current buffer must be a Claude Code terminal buffer (from the =claude-code= package).  The command identifies the project directory from the buffer name, finds the corresponding session directory under =~/.claude/projects/=, and opens the most recently modified JSONL file.  This lets you quickly jump from an active Claude Code session to its rendered log.
 
-Use =consult-ripgrep= (or any grep tool) on the rendered directory:
+** Rendered directory
+:PROPERTIES:
+:CUSTOM_ID: h:rendered-directory
+:END:
 
-#+begin_example
-M-x claude-log-open-rendered-directory
-#+end_example
+#+findex: claude-log-open-rendered-directory
 
-This opens =~/.claude/rendered/= in Dired. Since rendered files are plain Markdown, standard search tools work natively -- no special integration needed.
+The command ~claude-log-open-rendered-directory~ opens the rendered Markdown directory in Dired.  Since rendered files are plain Markdown organized by project, you can use standard Emacs tools to browse, search, and manage them.  For example, you can run =consult-ripgrep= from this Dired buffer to search across all rendered sessions.
 
-** Bulk rendering
+If the rendered directory does not yet exist, the command creates it.
 
-#+begin_example
-M-x claude-log-sync-all
-#+end_example
+** Sync and rendering
+:PROPERTIES:
+:CUSTOM_ID: h:sync-and-rendering
+:END:
 
-Renders all unrendered or stale sessions. Uses timers to avoid blocking Emacs.
+#+findex: claude-log-sync-all
+#+findex: claude-log-refresh
 
-** Opening a file directly
+By default, rendering is lazy: sessions are rendered to =.md= files on first access via ~claude-log-browse-sessions~ or ~claude-log-open-file~.  The package maintains an index file (=_index.el=) in the rendered directory that maps session IDs to rendered file paths and JSONL file sizes.  When you access a session, the package compares the current JSONL file size against the indexed size; if they differ, the session is re-rendered.
 
-#+begin_example
-M-x claude-log-open-file
-#+end_example
+The command ~claude-log-sync-all~ renders all unrendered or stale sessions in bulk.  It processes sessions one at a time using ~run-with-timer~ to avoid blocking Emacs.  A progress message reports how many sessions were rendered.
 
-Opens a specific JSONL file by path. Useful for automation or when you know the exact file.
-
-** Resuming a session
-
-#+begin_example
-M-x claude-log-resume-session
-#+end_example
-
-Opens Claude Code and resumes the session displayed in the current buffer. Requires the [[https://github.com/stevemolitor/claude-code.el][claude-code]] package.
+The command ~claude-log-refresh~ re-renders the session displayed in the current buffer from its JSONL source.  This is useful if the rendered file appears stale or if you have changed display settings such as ~claude-log-show-thinking~ or ~claude-log-show-tools~ ([[#h:display-of-thinking-and-tool-sections][Display of thinking and tool sections]]).  The keybinding is =g= in ~claude-log-mode~.
 
 ** Navigation
+:PROPERTIES:
+:CUSTOM_ID: h:navigation
+:END:
 
-| Key   | Command                         | Description                             |
-|-------+---------------------------------+-----------------------------------------|
-| =n=   | =claude-log-next-turn=          | Jump to the next User/Assistant heading |
-| =p=   | =claude-log-previous-turn=      | Jump to the previous heading            |
-| =TAB= | =claude-log-toggle-section=     | Toggle fold of section at point         |
-| =C=   | =claude-log-collapse-all-tools= | Collapse all tool/thinking sections     |
-| =E=   | =claude-log-expand-all=         | Expand all sections                     |
-| =g=   | =claude-log-refresh=            | Re-render the buffer from scratch       |
-| =w=   | =claude-log-copy-turn=          | Copy the current turn to the kill ring  |
-| =r=   | =claude-log-resume-session=     | Resume the session in Claude Code       |
-| =q=   | =quit-window=                   | Close the buffer                        |
+#+findex: claude-log-next-turn
+#+findex: claude-log-previous-turn
 
-* Configuration
+The command ~claude-log-next-turn~ moves point to the next User or Assistant heading in the buffer.  The command ~claude-log-previous-turn~ moves to the previous one.  These commands search for =## User= and =## Assistant= headings, skipping over tool calls and thinking sections.
 
-All user options belong to the =claude-log= customization group. You can browse them interactively with =M-x customize-group RET claude-log RET=.
+The keybindings are =n= and =p= in ~claude-log-mode~, making it easy to step through a conversation turn by turn.
 
-| Option                              | Default                | Description                                                       |
-|-------------------------------------+------------------------+-------------------------------------------------------------------|
-| =claude-log-directory=              | ="~/.claude"=          | Root directory of Claude Code configuration.                      |
-| =claude-log-rendered-directory=     | ="~/.claude/rendered"= | Directory where rendered Markdown files are stored.               |
-| =claude-log-slug-max-length=        | =50=                   | Maximum length of the slug portion of rendered filenames.         |
-| =claude-log-show-thinking=          | =collapsed=            | How to display thinking blocks: =hidden=, =collapsed=, =visible=. |
-| =claude-log-show-tools=             | =collapsed=            | How to display tool sections: =hidden=, =collapsed=, =visible=.   |
-| =claude-log-timestamp-format=       | ="%Y-%m-%d %H:%M:%S"= | Format string for timestamps.                                     |
-| =claude-log-max-tool-input-length=  | =200=                  | Max characters for tool input summaries.                          |
-| =claude-log-max-tool-result-length= | =500=                  | Max characters for tool result content.                           |
-| =claude-log-live-update=            | =t=                    | Watch the JSONL file for real-time updates.                       |
-| =claude-log-group-by-project=       | =t=                    | Group sessions by project in the browser.                         |
-| =claude-log-display-width=          | =60=                   | Max width of the first-message column in the session browser.     |
+** Section visibility
+:PROPERTIES:
+:CUSTOM_ID: h:section-visibility
+:END:
+
+#+findex: claude-log-toggle-section
+#+findex: claude-log-collapse-all-tools
+#+findex: claude-log-expand-all
+
+The command ~claude-log-toggle-section~ toggles the visibility of the section at point.  When point is on a =####= heading (tool call, tool result, or thinking block), it collapses or expands just that section.  When point is on any other heading, it delegates to ~outline-toggle-children~.  The keybinding is =TAB=.
+
+The command ~claude-log-collapse-all-tools~ collapses all tool-use, tool-result, and thinking sections in the buffer at once.  This gives you a clean view of just the user messages and assistant text responses.  The keybinding is =C=.
+
+The command ~claude-log-expand-all~ expands all sections, removing all section overlays and showing the full content.  The keybinding is =E=.
+
+** Copying
+:PROPERTIES:
+:CUSTOM_ID: h:copying
+:END:
+
+#+findex: claude-log-copy-turn
+
+The command ~claude-log-copy-turn~ copies the current turn to the kill ring.  A "turn" is delimited by =##= headings: from the current =## User= or =## Assistant= heading up to (but not including) the next one.  This is useful for extracting a specific message from a conversation to paste elsewhere.  The keybinding is =w=.
+
+** Summary generation
+:PROPERTIES:
+:CUSTOM_ID: h:summary-generation
+:END:
+
+#+findex: claude-log-summarize-sessions
+#+findex: claude-log-stop-summarizing
+
+The command ~claude-log-summarize-sessions~ generates AI summaries for all sessions that do not yet have one.  It requires the =gptel= package.  The command processes sessions sequentially, sending each conversation's text to the configured LLM ([[#h:summary-generation-options][Summary generation options]]) and storing the response in the index.
+
+Each summary consists of two parts: a one-line summary (up to 80 characters) used in the session browser display, and a paragraph summary (3--5 sentences) shown at the top of rendered buffers.  The LLM is instructed to return a JSON object with ~oneline~ and ~summary~ fields.
+
+Progress is displayed in the echo area, showing which session is being summarized and the model in use.  If you invoke ~claude-log-summarize-sessions~ while summarization is already running, it stops the current run instead.  You can also stop explicitly with ~claude-log-stop-summarizing~.
+
+Summaries are persisted in the index file, so they survive across Emacs sessions and do not need to be regenerated.  When you open a session that has a summary, the paragraph summary is inserted as a blockquote below the session header.
+
+** Session resumption
+:PROPERTIES:
+:CUSTOM_ID: h:session-resumption
+:END:
+
+#+findex: claude-log-resume-session
+
+The command ~claude-log-resume-session~ resumes the Claude Code session displayed in the current buffer.  It requires the =claude-code= package.  The command extracts the session ID from the buffer (either from the buffer-local variable or from the front-matter comment) and passes it to Claude Code with the =--resume= flag.
+
+If the session's project directory can be determined (from the buffer-local variable or from =history.jsonl=), Claude Code is started in that directory.  The keybinding is =r= in ~claude-log-mode~.
+
+* ~claude-log-mode~
+:PROPERTIES:
+:CUSTOM_ID: h:claude-log-mode
+:END:
+
+#+findex: claude-log-mode
+
+~claude-log-mode~ is the major mode used for rendered session buffers.  It derives from ~markdown-view-mode~, inheriting Markdown fontification in a read-only buffer.  The mode activates ~outline-minor-mode~ with a regexp that matches Markdown headings (=## =, =### =, =#### =), enabling section folding.
+
+Two invisibility specs are added: ~claude-log-collapsed~ (which shows the heading but hides the body) and ~claude-log-hidden~ (which hides both heading and body).  These are used by the section visibility commands ([[#h:section-visibility][Section visibility]]) and the display configuration options ([[#h:display-of-thinking-and-tool-sections][Display of thinking and tool sections]]).
+
+When a buffer in this mode is killed, the file watcher is cleaned up and the index is updated with the final JSONL file size.
+
+The full keymap is:
+
+| Key   | Command                           | Description                             |
+|-------+-----------------------------------+-----------------------------------------|
+| =n=   | ~claude-log-next-turn~            | Jump to the next User/Assistant heading |
+| =p=   | ~claude-log-previous-turn~        | Jump to the previous heading            |
+| =TAB= | ~claude-log-toggle-section~       | Toggle fold of section at point         |
+| =C=   | ~claude-log-collapse-all-tools~   | Collapse all tool/thinking sections     |
+| =E=   | ~claude-log-expand-all~           | Expand all sections                     |
+| =g=   | ~claude-log-refresh~              | Re-render the buffer from scratch       |
+| =w=   | ~claude-log-copy-turn~            | Copy the current turn to the kill ring  |
+| =r=   | ~claude-log-resume-session~       | Resume the session in Claude Code       |
+| =q=   | ~quit-window~                     | Close the buffer                        |
 
 * How it works
+:PROPERTIES:
+:CUSTOM_ID: h:how-it-works
+:END:
+
+** Data sources
+:PROPERTIES:
+:CUSTOM_ID: h:data-sources
+:END:
 
 Claude Code stores conversation data in two places:
 
 1. =~/.claude/history.jsonl=: a global index mapping session IDs to projects and timestamps.
 2. =~/.claude/projects/<encoded-path>/<uuid>.jsonl=: one file per session, containing all messages as JSON lines.
 
-** Rendered directory
+The encoded path replaces =/= and =.= characters with =-=.  The package tries both the expanded path and its ~file-truename~ when locating a session directory, which handles symlinked project paths.
 
-This package maintains a mirror directory of pre-rendered Markdown files:
+** Rendered directory structure
+:PROPERTIES:
+:CUSTOM_ID: h:rendered-directory-structure
+:END:
+
+The rendered directory mirrors the project structure:
 
 #+begin_example
 ~/.claude/rendered/
@@ -169,39 +367,54 @@ This package maintains a mirror directory of pre-rendered Markdown files:
   _index.el
 #+end_example
 
-Each =.md= file contains HTML-comment front matter (session ID, source path, rendered timestamp, JSONL size) followed by the full conversation rendered as Markdown.
+Each =.md= file contains HTML-comment front matter (session ID, source path, rendered timestamp, JSONL size) followed by the full conversation rendered as Markdown.  The =_index.el= file is a hash table mapping session IDs to metadata (rendered file path, JSONL size, and optionally a summary).
 
-** Sync strategy
+** Rendering pipeline
+:PROPERTIES:
+:CUSTOM_ID: h:rendering-pipeline
+:END:
 
-- *Lazy by default*: rendering happens on first access via =claude-log-browse-sessions= or =claude-log-open-file=. The package checks whether the =.md= file exists and is up-to-date (by comparing JSONL size against the index). If missing or stale, it renders from scratch.
-- *Bulk sync*: =claude-log-sync-all= renders all unrendered/stale sessions via timers (non-blocking).
-- *Live updates*: for active sessions, a =file-notify= watcher detects JSONL changes and appends new entries to both the =.md= file on disk and the open buffer.
+Each JSONL entry has a ~type~ field: ~user~, ~assistant~, ~progress~, ~system~, or ~file-history-snapshot~.  The package filters to ~user~ and ~assistant~ entries, further excluding system-generated messages (entries whose content starts with known XML tags such as =<local-command-stdout>= or =<command-name>=).
 
-** Rendering
+Filtered entries are rendered as Markdown with =##= headings for conversation turns and =####= headings for tool calls and thinking blocks.  User turns show any text content followed by tool results.  Assistant turns show thinking blocks, text content, and tool-use summaries.
 
-Each JSONL entry has a =type= field (=user=, =assistant=, =progress=, =system=, or =file-history-snapshot=). The package filters to =user= and =assistant= entries, further excluding system-generated messages (tool notifications, command output, etc.), and renders them as Markdown with =##= headings for turns and =####= headings for tool calls and thinking blocks.
+** Live update mechanism
+:PROPERTIES:
+:CUSTOM_ID: h:live-update-mechanism
+:END:
 
-The rendered buffer uses =markdown-view-mode= as its parent mode for fontification, with =outline-minor-mode= for section folding.
+When ~claude-log-live-update~ is non-~nil~ and a rendered buffer is open, the package registers a ~file-notify~ watcher on the source JSONL file.  When the file grows, the watcher reads only the new bytes (from the previously recorded offset to the new file size), handling incomplete UTF-8 sequences at chunk boundaries.  New complete lines are parsed and rendered incrementally, appended to both the buffer and the =.md= file on disk.
 
 * Troubleshooting
+:PROPERTIES:
+:CUSTOM_ID: h:troubleshooting
+:END:
 
 ** No sessions found
+:PROPERTIES:
+:CUSTOM_ID: h:no-sessions-found
+:END:
 
-Ensure that =claude-log-directory= points to the correct Claude Code configuration directory (default =~/.claude=). The package reads =history.jsonl= in that directory and looks for session files under =projects/=.
+Ensure that ~claude-log-directory~ points to the correct Claude Code configuration directory ([[#h:directory-configuration][Directory configuration]]).  The package reads =history.jsonl= in that directory and looks for session files under =projects/=.
 
 ** Rendered files not updating
+:PROPERTIES:
+:CUSTOM_ID: h:rendered-files-not-updating
+:END:
 
-If a rendered file appears stale, press =g= (=claude-log-refresh=) in the buffer to force a full re-render. You can also delete the index file (=~/.claude/rendered/_index.el=) to force re-rendering of all sessions on next access.
+If a rendered file appears stale, press =g= (~claude-log-refresh~) in the buffer to force a full re-render ([[#h:sync-and-rendering][Sync and rendering]]).  You can also delete the index file (=_index.el= in the rendered directory) to force re-rendering of all sessions on next access.
 
 ** Live updates not working
+:PROPERTIES:
+:CUSTOM_ID: h:live-updates-not-working
+:END:
 
-Verify that =claude-log-live-update= is set to =t=. Live updates rely on =file-notify=, which requires OS-level file watching support. On some systems (e.g., remote filesystems via TRAMP), file notifications may not be available.
-
-** Byte-compilation warnings
-
-The package requires =markdown-mode= to be installed and loadable at compile time. Ensure it is on your =load-path= before byte-compiling.
+Verify that ~claude-log-live-update~ is set to ~t~ ([[#h:live-updates][Live updates]]).  Live updates rely on ~file-notify~, which requires OS-level file watching support.  On some systems (e.g., remote filesystems via TRAMP), file notifications may not be available.
 
 * License
+:PROPERTIES:
+:CUSTOM_ID: h:license
+:END:
 
 GPL-3.0-or-later.
 
