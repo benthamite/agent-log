@@ -48,6 +48,15 @@
 (require 'outline)
 (require 'markdown-mode)
 
+;;;;; Soft dependency: gptel (for session summaries)
+
+(defvar gptel-backend)
+(defvar gptel-model)
+(defvar gptel--known-backends)
+(declare-function gptel-request "gptel")
+(declare-function gptel-get-backend "gptel")
+(declare-function gptel-backend-models "gptel")
+
 ;;;;; Customization
 
 (defgroup claude-log nil
@@ -107,6 +116,23 @@ project, then for a session within that project."
 
 (defcustom claude-log-slug-max-length 50
   "Maximum length of the slug portion of rendered filenames."
+  :type 'integer)
+
+(defcustom claude-log-summary-backend nil
+  "The gptel backend name for summary generation, e.g. \"Gemini\" or \"Claude\".
+When nil, the backend is inferred from `claude-log-summary-model', falling
+back to `gptel-backend'."
+  :type '(choice (const :tag "Infer from model or use gptel default" nil)
+                 (string :tag "Backend name")))
+
+(defcustom claude-log-summary-model nil
+  "The gptel model for summary generation, e.g. `claude-haiku-4-5-20251001'.
+When nil, defaults to `gptel-model'."
+  :type '(choice (const :tag "Use gptel default" nil)
+                 (symbol :tag "Model name")))
+
+(defcustom claude-log-summary-max-content-length 8000
+  "Maximum characters of conversation text sent to the LLM for summarization."
   :type 'integer)
 
 ;;;;; Internal variables
@@ -233,8 +259,8 @@ DONE sessions rendered so far out of TOTAL."
            (meta (cdr session)))
       (condition-case err
           (let ((result (claude-log--render-to-file sid meta)))
-            (puthash sid (list :file (car result) :jsonl-size (cdr result))
-                     index))
+            (claude-log--index-merge
+             index sid (list :file (car result) :jsonl-size (cdr result))))
         (error (message "Failed to render %s: %s"
                         sid (error-message-string err))))
       (run-with-timer 0 nil #'claude-log--sync-next
@@ -294,10 +320,19 @@ if Emacs crashes mid-write."
        (ignore-errors (delete-file tmp))
        (signal (car err) (cdr err))))))
 
+(defun claude-log--index-merge (index session-id props)
+  "Merge PROPS into the INDEX entry for SESSION-ID.
+Existing properties not in PROPS are preserved."
+  (let ((existing (or (gethash session-id index) '())))
+    (cl-loop for (key val) on props by #'cddr
+             do (setq existing (plist-put existing key val)))
+    (puthash session-id existing index)))
+
 (defun claude-log--index-update (session-id rendered-path jsonl-size)
   "Update the index entry for SESSION-ID with RENDERED-PATH and JSONL-SIZE."
   (let ((index (claude-log--read-index)))
-    (puthash session-id (list :file rendered-path :jsonl-size jsonl-size) index)
+    (claude-log--index-merge index session-id
+                             (list :file rendered-path :jsonl-size jsonl-size))
     (claude-log--write-index index)))
 
 ;;;;; Slug and filepath
@@ -427,9 +462,8 @@ Returns the path to the rendered file."
              (= cached-size current-size))
         rendered-path
       (let ((result (claude-log--render-to-file session-id metadata)))
-        (puthash session-id
-                 (list :file (car result) :jsonl-size (cdr result))
-                 index)
+        (claude-log--index-merge
+         index session-id (list :file (car result) :jsonl-size (cdr result)))
         (claude-log--write-index index)
         (car result)))))
 
@@ -448,6 +482,7 @@ METADATA is a plist with :file, :timestamp, :project, :display."
       (when (and claude-log-live-update (not claude-log--watcher))
         (claude-log--start-watcher))
       (claude-log--collapse-as-configured)
+      (claude-log--maybe-insert-summary session-id)
       (goto-char (point-min)))
     (pop-to-buffer buf)))
 
@@ -545,19 +580,28 @@ Projects are sorted by most recent session timestamp."
 
 (defun claude-log--build-candidates (sessions)
   "Build an alist of (display-string . (session-id . metadata)) from SESSIONS."
-  (mapcar
-   (lambda (session)
-     (let* ((session-id (car session))
-            (meta (cdr session))
-            (ts (plist-get meta :timestamp))
-            (date (claude-log--format-epoch-ms ts))
-            (project (claude-log--short-project (plist-get meta :project)))
-            (display (claude-log--normalize-whitespace
-                      (plist-get meta :display)))
-            (display (claude-log--truncate-string display claude-log-display-width))
-            (label (format "%s  %-20s  \"%s\"" date project display)))
-       (cons label (cons session-id meta))))
-   sessions))
+  (let ((index (claude-log--read-index)))
+    (mapcar
+     (lambda (session)
+       (let* ((session-id (car session))
+              (meta (cdr session))
+              (ts (plist-get meta :timestamp))
+              (date (claude-log--format-epoch-ms ts))
+              (project (claude-log--short-project (plist-get meta :project)))
+              (index-entry (gethash session-id index))
+              (oneline (when index-entry
+                         (plist-get index-entry :summary-oneline)))
+              (label (if oneline
+                         (format "%s  %-20s  %s" date project
+                                 (claude-log--truncate-string
+                                  oneline claude-log-display-width))
+                       (let ((display (claude-log--normalize-whitespace
+                                       (plist-get meta :display))))
+                         (format "%s  %-20s  \"%s\"" date project
+                                 (claude-log--truncate-string
+                                  display claude-log-display-width))))))
+         (cons label (cons session-id meta))))
+     sessions)))
 
 (defun claude-log--short-project (path)
   "Extract a short project name from PATH."
@@ -1260,6 +1304,7 @@ preceding separator."
             (insert-file-contents claude-log--rendered-file)
             (goto-char (point-min))
             (claude-log--collapse-as-configured)
+            (claude-log--maybe-insert-summary claude-log--session-id)
             (claude-log--record-offset)))
       (claude-log--render-full))))
 
@@ -1290,6 +1335,204 @@ preceding separator."
       (if (re-search-forward "^## " nil t)
           (match-beginning 0)
         (point-max)))))
+
+;;;;; Session summaries
+
+(defconst claude-log--summary-system-message
+  "You are a concise summarizer. Given a conversation between a user and an AI \
+coding assistant, produce a JSON object with exactly two fields:
+- \"oneline\": A single-line summary (max 80 characters) capturing the main task \
+or topic. Do not use quotes around it.
+- \"summary\": A paragraph of 3-5 sentences describing what was discussed, what \
+was accomplished, and key outcomes.
+Respond with ONLY the JSON object, no markdown formatting, no code fences, \
+no other text."
+  "System message for summary generation.")
+
+(defun claude-log--find-backend-for-model (model)
+  "Return the gptel backend that provides MODEL, or nil."
+  (cl-loop for (_name . backend) in gptel--known-backends
+           when (member model (gptel-backend-models backend))
+           return backend))
+
+(defun claude-log--resolve-summary-backend-and-model ()
+  "Return (backend . model) for summary generation.
+Resolves `claude-log-summary-backend' and `claude-log-summary-model',
+inferring the backend from the model when needed."
+  (let* ((model (or claude-log-summary-model gptel-model))
+         (backend (cond
+                   (claude-log-summary-backend
+                    (gptel-get-backend claude-log-summary-backend))
+                   (claude-log-summary-model
+                    (or (claude-log--find-backend-for-model
+                         claude-log-summary-model)
+                        gptel-backend))
+                   (t gptel-backend))))
+    (cons backend model)))
+
+(defun claude-log--extract-message-text (content)
+  "Extract plain text from message CONTENT, ignoring tool calls and thinking."
+  (cond
+   ((stringp content) content)
+   ((listp content)
+    (let ((texts '()))
+      (dolist (item content)
+        (when (equal (plist-get item :type) "text")
+          (let ((text (plist-get item :text)))
+            (when (and text (not (string-empty-p (string-trim text))))
+              (push text texts)))))
+      (string-join (nreverse texts) "\n")))
+   (t "")))
+
+(defun claude-log--extract-conversation-text (entries)
+  "Extract a condensed text representation of ENTRIES for summarization.
+Returns a string with user and assistant messages, truncated to
+`claude-log-summary-max-content-length'."
+  (let ((parts '())
+        (total 0)
+        (max-len claude-log-summary-max-content-length))
+    (dolist (entry (claude-log--filter-conversation entries))
+      (when (< total max-len)
+        (let* ((message (plist-get entry :message))
+               (role (plist-get message :role))
+               (content (plist-get message :content))
+               (text (claude-log--extract-message-text content))
+               (prefix (if (equal role "user") "User: " "Assistant: "))
+               (line (concat prefix text "\n\n")))
+          (when (and text (not (string-empty-p (string-trim text))))
+            (push line parts)
+            (cl-incf total (length line))))))
+    (let ((result (string-join (nreverse parts))))
+      (if (> (length result) max-len)
+          (substring result 0 max-len)
+        result))))
+
+(defun claude-log--build-summary-prompt (conversation-text)
+  "Build a prompt for summarizing CONVERSATION-TEXT."
+  (format "Summarize this conversation:\n\n---\n%s\n---" conversation-text))
+
+(defun claude-log--parse-summary-response (response)
+  "Parse RESPONSE as a JSON summary object.
+Returns (SUMMARY . ONELINE) or nil."
+  (condition-case nil
+      (let* ((cleaned (string-trim response))
+             ;; Remove markdown code fences if present
+             (cleaned (if (string-match "\\````\\(?:json\\)?[\n\r]+" cleaned)
+                          (replace-regexp-in-string
+                           "[\n\r]+```\\'" ""
+                           (replace-regexp-in-string
+                            "\\````\\(?:json\\)?[\n\r]+" "" cleaned))
+                        cleaned))
+             (parsed (json-parse-string cleaned :object-type 'plist))
+             (summary (plist-get parsed :summary))
+             (oneline (plist-get parsed :oneline)))
+        (when (and (stringp summary) (stringp oneline))
+          (cons summary oneline)))
+    (error nil)))
+
+(defun claude-log--sessions-needing-summary (sessions index)
+  "Return sessions from SESSIONS that lack a summary in INDEX."
+  (seq-filter
+   (lambda (session)
+     (let* ((sid (car session))
+            (entry (gethash sid index)))
+       (not (and entry (plist-get entry :summary-oneline)))))
+   sessions))
+
+;;;###autoload
+(defun claude-log-summarize-sessions ()
+  "Generate AI summaries for all sessions that lack one."
+  (interactive)
+  (unless (require 'gptel nil t)
+    (user-error "Package `gptel' is required for summary generation"))
+  (let* ((sessions (claude-log--read-sessions))
+         (index (claude-log--read-index))
+         (pending (claude-log--sessions-needing-summary sessions index)))
+    (if (null pending)
+        (message "All %d sessions already have summaries" (length sessions))
+      (message "Generating summaries for %d session(s)..." (length pending))
+      (claude-log--summarize-next pending index 0 (length pending)))))
+
+(defun claude-log--summarize-next (remaining index done total)
+  "Generate summary for the next session in REMAINING.
+INDEX is the current index hash table.  DONE sessions processed
+so far out of TOTAL."
+  (if (null remaining)
+      (progn
+        (claude-log--write-index index)
+        (message "Summary generation complete: %d session(s)" total))
+    (let* ((session (car remaining))
+           (sid (car session))
+           (meta (cdr session))
+           (jsonl-file (plist-get meta :file)))
+      (condition-case err
+          (let* ((entries (claude-log--parse-jsonl-file jsonl-file))
+                 (text (claude-log--extract-conversation-text entries)))
+            (if (string-empty-p (string-trim text))
+                (progn
+                  (message "Skipping %s (no conversation text)" sid)
+                  (claude-log--summarize-next
+                   (cdr remaining) index (1+ done) total))
+              (message "Summarizing %d/%d: %s..." (1+ done) total
+                       (claude-log--truncate-string
+                        (or (plist-get meta :display) sid) 40))
+              (let* ((prompt (claude-log--build-summary-prompt text))
+                     (resolved (claude-log--resolve-summary-backend-and-model))
+                     (gptel-backend (car resolved))
+                     (gptel-model (cdr resolved)))
+                (gptel-request prompt
+                  :system claude-log--summary-system-message
+                  :callback
+                  (lambda (response _info)
+                    (when (stringp response)
+                      (let ((parsed (claude-log--parse-summary-response
+                                     response)))
+                        (if parsed
+                            (progn
+                              (claude-log--index-merge
+                               index sid
+                               (list :summary (car parsed)
+                                     :summary-oneline (cdr parsed)))
+                              ;; Write index after each summary for durability
+                              (claude-log--write-index index))
+                          (message "Failed to parse summary for %s" sid))))
+                    (claude-log--summarize-next
+                     (cdr remaining) index (1+ done) total))))))
+        (error
+         (message "Failed to summarize %s: %s"
+                  sid (error-message-string err))
+         (claude-log--summarize-next
+          (cdr remaining) index (1+ done) total))))))
+
+(defun claude-log--maybe-insert-summary (session-id)
+  "Insert the AI summary for SESSION-ID into the current buffer, if available."
+  (let* ((index (claude-log--read-index))
+         (entry (gethash session-id index))
+         (summary (when entry (plist-get entry :summary))))
+    (when summary
+      (let ((inhibit-read-only t))
+        (save-excursion
+          ;; Remove any existing summary first
+          (claude-log--remove-inserted-summary)
+          ;; Insert after the # Session: header
+          (goto-char (point-min))
+          (when (re-search-forward "^# Session:.*\n\n" nil t)
+            (let ((start (point)))
+              (insert (format "> **Summary**: %s\n\n" summary))
+              (put-text-property start (point)
+                                 'claude-log-summary t))))))))
+
+(defun claude-log--remove-inserted-summary ()
+  "Remove any previously inserted summary from the current buffer."
+  (let ((inhibit-read-only t))
+    (save-excursion
+      (goto-char (point-min))
+      (let ((start (text-property-any
+                    (point-min) (point-max) 'claude-log-summary t)))
+        (when start
+          (let ((end (next-single-property-change
+                      start 'claude-log-summary nil (point-max))))
+            (delete-region start end)))))))
 
 ;;;;; Resume session
 
