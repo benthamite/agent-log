@@ -1543,7 +1543,7 @@ does nothing."
                                   display)))
                   (message "Summarizing %d/%d with %s: %s..." (1+ done) total
                            gptel-model
-                           (claude-log--truncate-string display 40))
+                           (claude-log--truncate-string display 70))
                   (setq claude-log--summarize-request-id request-id)
                   (gptel-request prompt
                     :system claude-log--summary-system-message
