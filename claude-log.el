@@ -585,6 +585,9 @@ Projects are sorted by most recent session timestamp."
       (maphash (lambda (project sessions)
                  (push (cons project sessions) result))
                groups)
+      ;; Sort by most recent session timestamp.
+      ;; Each element is (project (sid . plist) ...), so cadr is the
+      ;; first session and cdadr is its metadata plist.
       (sort result (lambda (a b)
                      (let ((ts-a (plist-get (cdadr a) :timestamp))
                            (ts-b (plist-get (cdadr b) :timestamp)))
@@ -866,7 +869,8 @@ Returns an empty string if CONTENT produces no visible output."
   "Summarize Edit tool INPUT."
   (let ((file (or (plist-get input :file_path) "?"))
         (old (claude-log--truncate-string
-              (or (plist-get input :old_string) "") 80)))
+              (or (plist-get input :old_string) "")
+              claude-log-max-tool-input-length)))
     (format "> **file_path**: %s\n> **old_string**: `%s`" file old)))
 
 (defun claude-log--summarize-bash (input)
@@ -899,7 +903,9 @@ Returns an empty string if CONTENT produces no visible output."
   "Summarize Task tool INPUT."
   (let ((desc (or (plist-get input :description) ""))
         (type (or (plist-get input :subagent_type) "")))
-    (format "> **%s**: %s" type desc)))
+    (if (string-empty-p type)
+        (format "> %s" desc)
+      (format "> **%s**: %s" type desc))))
 
 (defun claude-log--summarize-tool-input-generic (input)
   "Return a generic summary of tool INPUT plist.
@@ -1046,6 +1052,7 @@ a complete character boundary."
         (cl-decf i))
       (if (< i 0)
           ;; All bytes are continuations — all are leftover.
+          ;; Cap at 3: a UTF-8 char is at most 4 bytes (1 lead + 3 continuation).
           (min len 3)
         (let* ((lead (aref unibyte-str i))
                (expected (cond
@@ -1258,6 +1265,7 @@ preceding separator."
     (goto-char (point-min))
     (while (re-search-forward "^## Assistant — " nil t)
       (let* ((heading-bol (line-beginning-position))
+             ;; Look for "---\n\n" separator just before the heading (5 chars back).
              (turn-start (save-excursion
                            (goto-char heading-bol)
                            (if (re-search-backward
@@ -1422,7 +1430,7 @@ Returns a string with user and assistant messages, truncated to
 Returns (SUMMARY . ONELINE) or nil."
   (condition-case nil
       (let* ((cleaned (string-trim response))
-             ;; Remove markdown code fences if present
+             ;; Remove markdown code fences (``` or ```json) if present
              (cleaned (if (string-match "\\````\\(?:json\\)?[\n\r]+" cleaned)
                           (replace-regexp-in-string
                            "[\n\r]+```\\'" ""
