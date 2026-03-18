@@ -161,6 +161,9 @@ When nil, defaults to `gptel-model'."
 (defvar-local claude-log--rendered-file nil
   "Path to the rendered .md file for the current session.")
 
+(defvar claude-log--summarize-active nil
+  "Non-nil when summary generation is in progress.")
+
 (defvar claude-log--summarize-stop nil
   "When non-nil, stop summary generation after the current request.")
 
@@ -1449,24 +1452,31 @@ If summary generation is already in progress, stop it instead."
   (interactive)
   (unless (require 'gptel nil t)
     (user-error "Package `gptel' is required for summary generation"))
-  (if claude-log--summarize-stop
-      (message "Stop already requested, waiting for current request to finish")
+  (cond
+   (claude-log--summarize-active
+    (setq claude-log--summarize-stop t)
+    (message "Summary generation will stop after the current request"))
+   (t
     (let* ((sessions (claude-log--read-sessions))
            (index (claude-log--read-index))
            (pending (claude-log--sessions-needing-summary sessions index)))
       (if (null pending)
           (message "All %d sessions already have summaries" (length sessions))
-        (setq claude-log--summarize-stop nil)
+        (setq claude-log--summarize-active t
+              claude-log--summarize-stop nil)
         (message "Generating summaries for %d session(s)... (run again to stop)"
                  (length pending))
-        (claude-log--summarize-next pending index 0 (length pending))))))
+        (claude-log--summarize-next pending index 0 (length pending)))))))
 
 ;;;###autoload
 (defun claude-log-stop-summarizing ()
   "Stop summary generation after the current request finishes."
   (interactive)
-  (setq claude-log--summarize-stop t)
-  (message "Summary generation will stop after the current request"))
+  (if claude-log--summarize-active
+      (progn
+        (setq claude-log--summarize-stop t)
+        (message "Summary generation will stop after the current request"))
+    (message "No summary generation in progress")))
 
 (defun claude-log--summarize-next (remaining index done total)
   "Generate summary for the next session in REMAINING.
@@ -1475,12 +1485,11 @@ so far out of TOTAL."
   (if (or (null remaining) claude-log--summarize-stop)
       (progn
         (claude-log--write-index index)
-        (if claude-log--summarize-stop
-            (progn
-              (setq claude-log--summarize-stop nil)
-              (message "Summary generation stopped: %d/%d session(s) done"
-                       done total))
-          (message "Summary generation complete: %d session(s)" total)))
+        (let ((stopped claude-log--summarize-stop))
+          (setq claude-log--summarize-active nil
+                claude-log--summarize-stop nil)
+          (message "Summary generation %s: %d/%d session(s) done"
+                   (if stopped "stopped" "complete") done total)))
     (let* ((session (car remaining))
            (sid (car session))
            (meta (cdr session))
