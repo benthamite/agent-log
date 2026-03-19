@@ -1700,10 +1700,28 @@ Try both the expanded path and its `file-truename'."
           (setq latest f latest-time mtime))))
     latest))
 
+(defun claude-log--find-session-for-project (directory sessions)
+  "Find the latest session in SESSIONS whose project matches DIRECTORY.
+SESSIONS should be sorted newest-first (as from `claude-log--read-sessions').
+DIRECTORY is compared against each session's :project field using
+both the expanded path and `file-truename'."
+  (let ((targets (delete-dups
+                  (mapcar #'directory-file-name
+                          (list (expand-file-name directory)
+                                (file-truename (expand-file-name directory)))))))
+    (cl-loop for session in sessions
+             for project = (plist-get (cdr session) :project)
+             when (and (stringp project) (not (string-empty-p project))
+                       (member (directory-file-name (expand-file-name project))
+                               targets))
+             return session)))
+
 ;;;###autoload
 (defun claude-log-open-session-at-point ()
   "Open the log for the Claude Code session in the current buffer.
-The current buffer must be a Claude Code terminal buffer."
+The current buffer must be a Claude Code terminal buffer.
+If no session directory is found via direct path lookup, fall back
+to searching `history.jsonl' for sessions matching the project."
   (interactive)
   (unless (require 'claude-code nil t)
     (user-error "Package `claude-code' is required but not available"))
@@ -1712,9 +1730,14 @@ The current buffer must be a Claude Code terminal buffer."
   (let* ((dir (claude-code--extract-directory-from-buffer-name (buffer-name)))
          (session-dir (and dir (claude-log--find-project-session-dir dir)))
          (jsonl (and session-dir (claude-log--find-latest-jsonl session-dir))))
-    (unless jsonl
-      (user-error "No session log found for %s" (or dir "this buffer")))
-    (claude-log-open-file jsonl)))
+    (if jsonl
+        (claude-log-open-file jsonl)
+      ;; Fallback: search history.jsonl for sessions matching this project
+      (let ((match (claude-log--find-session-for-project
+                    dir (claude-log--read-sessions))))
+        (unless match
+          (user-error "No session log found for %s" (or dir "this buffer")))
+        (claude-log--open-rendered (car match) (cdr match))))))
 
 ;;;;; Transient menu
 
