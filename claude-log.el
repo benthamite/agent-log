@@ -47,6 +47,7 @@
 (require 'filenotify)
 (require 'outline)
 (require 'markdown-mode)
+(require 'transient)
 
 ;;;;; Soft dependency: gptel (for session summaries)
 
@@ -237,6 +238,15 @@ a project, then for a session within that project."
     (unless (file-directory-p dir)
       (make-directory dir t))
     (dired dir)))
+
+;;;###autoload
+(defun claude-log-open-session (session-id)
+  "Open the Claude Code session with SESSION-ID."
+  (interactive "sSession ID: ")
+  (let ((file (claude-log--find-session-file session-id)))
+    (unless file
+      (user-error "No JSONL file found for session %s" session-id))
+    (claude-log-open-file file)))
 
 ;;;###autoload
 (defun claude-log-sync-all ()
@@ -970,6 +980,7 @@ COLLECTION is a list of strings or an alist of (string . value)."
     (define-key map "g" #'claude-log-refresh)
     (define-key map "w" #'claude-log-copy-turn)
     (define-key map "r" #'claude-log-resume-session)
+    (define-key map "?" #'claude-log-menu)
     (define-key map "q" #'quit-window)
     map)
   "Keymap for `claude-log-mode'.")
@@ -1704,6 +1715,88 @@ The current buffer must be a Claude Code terminal buffer."
     (unless jsonl
       (user-error "No session log found for %s" (or dir "this buffer")))
     (claude-log-open-file jsonl)))
+
+;;;;; Transient menu
+
+(transient-define-suffix claude-log-cycle-show-thinking ()
+  "Cycle `claude-log-show-thinking' through hidden → collapsed → visible."
+  :description (lambda ()
+                 (format "Show thinking: %s" claude-log-show-thinking))
+  :transient t
+  (interactive)
+  (setq claude-log-show-thinking
+        (pcase claude-log-show-thinking
+          ('hidden 'collapsed)
+          ('collapsed 'visible)
+          ('visible 'hidden)))
+  (when (derived-mode-p 'claude-log-mode)
+    (claude-log--collapse-as-configured))
+  (message "Show thinking → %s" claude-log-show-thinking))
+
+(transient-define-suffix claude-log-cycle-show-tools ()
+  "Cycle `claude-log-show-tools' through hidden → collapsed → visible."
+  :description (lambda ()
+                 (format "Show tools: %s" claude-log-show-tools))
+  :transient t
+  (interactive)
+  (setq claude-log-show-tools
+        (pcase claude-log-show-tools
+          ('hidden 'collapsed)
+          ('collapsed 'visible)
+          ('visible 'hidden)))
+  (when (derived-mode-p 'claude-log-mode)
+    (claude-log--collapse-as-configured))
+  (message "Show tools → %s" claude-log-show-tools))
+
+(transient-define-suffix claude-log-toggle-live-update ()
+  "Toggle `claude-log-live-update'."
+  :description (lambda ()
+                 (format "Live update: %s"
+                         (if claude-log-live-update "on" "off")))
+  :transient t
+  (interactive)
+  (setq claude-log-live-update (not claude-log-live-update))
+  (message "Live update → %s" (if claude-log-live-update "on" "off")))
+
+(transient-define-suffix claude-log-toggle-group-by-project ()
+  "Toggle `claude-log-group-by-project'."
+  :description (lambda ()
+                 (format "Group by project: %s"
+                         (if claude-log-group-by-project "on" "off")))
+  :transient t
+  (interactive)
+  (setq claude-log-group-by-project (not claude-log-group-by-project))
+  (message "Group by project → %s"
+           (if claude-log-group-by-project "on" "off")))
+
+;;;###autoload (autoload 'claude-log-menu "claude-log" nil t)
+(transient-define-prefix claude-log-menu ()
+  "Transient menu for Claude Log commands."
+  ["Open"
+   ("b" "Browse sessions" claude-log-browse-sessions)
+   ("l" "Open latest" claude-log-open-latest)
+   ("f" "Open file" claude-log-open-file)
+   ("d" "Open rendered directory" claude-log-open-rendered-directory)
+   ("." "Open session at point" claude-log-open-session-at-point)]
+  ["Sync & AI"
+   ("S" "Sync all" claude-log-sync-all)
+   ("s" "Summarize sessions" claude-log-summarize-sessions)
+   ("x" "Stop summarizing" claude-log-stop-summarizing)]
+  ["Navigate"
+   :if (lambda () (derived-mode-p 'claude-log-mode))
+   ("n" "Next turn" claude-log-next-turn)
+   ("p" "Previous turn" claude-log-previous-turn)
+   ("TAB" "Toggle section" claude-log-toggle-section)
+   ("C" "Collapse all tools" claude-log-collapse-all-tools)
+   ("E" "Expand all" claude-log-expand-all)
+   ("g" "Refresh" claude-log-refresh)
+   ("w" "Copy turn" claude-log-copy-turn)
+   ("r" "Resume session" claude-log-resume-session)]
+  ["Settings"
+   ("t" claude-log-cycle-show-thinking)
+   ("o" claude-log-cycle-show-tools)
+   ("u" claude-log-toggle-live-update)
+   ("G" claude-log-toggle-group-by-project)])
 
 (provide 'claude-log)
 ;;; claude-log.el ends here
