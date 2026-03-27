@@ -520,7 +520,10 @@ METADATA is a plist with :file, :timestamp, :project, :display."
 
 (defun claude-log--read-sessions ()
   "Parse `history.jsonl' and return alist of session-id to metadata.
-Each value is a plist (:display :timestamp :project :file)."
+Each value is a plist (:display :timestamp :project :file :file-dir).
+The :project field reflects the most recent CWD among sessions
+sharing the same file directory, so it stays correct after project
+renames or profile migrations."
   (let ((history-file (expand-file-name "history.jsonl" claude-log-directory))
         (sessions (make-hash-table :test #'equal))
         (file-index (claude-log--build-session-file-index)))
@@ -530,22 +533,41 @@ Each value is a plist (:display :timestamp :project :file)."
       (let ((sid (plist-get entry :sessionId)))
         (when sid
           (puthash sid entry sessions))))
-    (let (result)
+    ;; For each file directory, find the most recent CWD.
+    (let ((dir-best-project (make-hash-table :test #'equal)))
       (maphash
        (lambda (sid entry)
-         (when-let* ((file (gethash sid file-index)))
-           (push (list sid
-                       :display (or (plist-get entry :display) "")
-                       :timestamp (plist-get entry :timestamp)
-                       :project (or (plist-get entry :project) "")
-                       :file file)
-                 result)))
+         (when-let* ((file (gethash sid file-index))
+                     (dir (file-name-directory file))
+                     (proj (plist-get entry :project))
+                     (ts (plist-get entry :timestamp)))
+           (let ((existing (gethash dir dir-best-project)))
+             (when (or (null existing)
+                       (> (if (numberp ts) ts 0)
+                          (if (numberp (car existing)) (car existing) 0)))
+               (puthash dir (cons ts proj) dir-best-project)))))
        sessions)
-      (sort result (lambda (a b)
-                     (let ((ts-a (plist-get (cdr a) :timestamp))
-                           (ts-b (plist-get (cdr b) :timestamp)))
-                       (> (if (numberp ts-a) ts-a 0)
-                          (if (numberp ts-b) ts-b 0))))))))
+      (let (result)
+        (maphash
+         (lambda (sid entry)
+           (when-let* ((file (gethash sid file-index)))
+             (let* ((dir (file-name-directory file))
+                    (best (gethash dir dir-best-project))
+                    (project (if best (cdr best)
+                               (or (plist-get entry :project) ""))))
+               (push (list sid
+                           :display (or (plist-get entry :display) "")
+                           :timestamp (plist-get entry :timestamp)
+                           :project project
+                           :file-dir dir
+                           :file file)
+                     result))))
+         sessions)
+        (sort result (lambda (a b)
+                       (let ((ts-a (plist-get (cdr a) :timestamp))
+                             (ts-b (plist-get (cdr b) :timestamp)))
+                         (> (if (numberp ts-a) ts-a 0)
+                            (if (numberp ts-b) ts-b 0)))))))))
 
 (defun claude-log--build-session-file-index ()
   "Build a hash table mapping session-id to JSONL file path.
@@ -603,16 +625,18 @@ probing per session."
 
 (defun claude-log--group-by-project (sessions)
   "Group SESSIONS into an alist of (project-name . sessions).
+Groups by the full :project path so sessions that share a
+project stay together even across file directories.
 Projects are sorted by most recent session timestamp."
   (let ((groups (make-hash-table :test #'equal)))
     (dolist (session sessions)
-      (let* ((project (claude-log--short-project
-                       (plist-get (cdr session) :project)))
+      (let* ((project (or (plist-get (cdr session) :project) ""))
              (existing (gethash project groups)))
         (puthash project (append existing (list session)) groups)))
     (let (result)
-      (maphash (lambda (project sessions)
-                 (push (cons project sessions) result))
+      (maphash (lambda (project group-sessions)
+                 (let ((name (claude-log--short-project project)))
+                   (push (cons name group-sessions) result)))
                groups)
       ;; Sort by most recent session timestamp.
       ;; Each element is (project (sid . plist) ...), so cadr is the
