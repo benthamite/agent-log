@@ -1711,7 +1711,7 @@ consumes the request guard and advances the chain."
   "Handle a Claude Code event MESSAGE, triggering sync on session end.
 Intended for use in `claude-code-event-hook'.  Runs `claude-log-sync-all'
 followed by `claude-log-summarize-sessions' when `:type' is \"Stop\"."
-  (when (equal (plist-get message :type) "Stop")
+  (when (eq (plist-get message :type) 'stop)
     ;; Delay briefly to let the JSONL file finish writing.
     (run-with-timer
      1 nil
