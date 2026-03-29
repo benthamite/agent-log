@@ -1825,8 +1825,17 @@ Sessions must be summarized first via `claude-log-summarize-sessions'."
                (claude-log--session-has-custom-title-p jsonl-file))
           (cl-incf skipped))
          (t
-          (claude-log--append-custom-title jsonl-file sid oneline)
+          (let ((entry-json (json-serialize
+                             (list :type "custom-title"
+                                   :customTitle oneline
+                                   :sessionId sid))))
+            (write-region (concat entry-json "\n") nil jsonl-file t 'quiet)
+            (when-let* ((new-size (file-attribute-size
+                                   (file-attributes jsonl-file))))
+              (claude-log--index-merge index sid (list :jsonl-size new-size))))
           (cl-incf renamed)))))
+    (when (> renamed 0)
+      (claude-log--write-index index))
     (message "Renamed %d session(s), skipped %d (already named), %d without summary"
              renamed skipped no-summary)))
 

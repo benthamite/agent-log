@@ -325,7 +325,7 @@ The command ~claude-log-rename-sessions~ renames all sessions that lack a custom
 
 This is a purely local, offline operation — no API calls are made.  Sessions must be summarized first via ~claude-log-summarize-sessions~ ([[#h:summary-generation][Summary generation]]).  Sessions that already have a custom title (e.g. from Claude Code's =/rename= command) are skipped.
 
-After writing each custom-title entry, the cached JSONL file size in the index is updated so that ~claude-log-sync-all~ does not treat the modified files as stale and trigger unnecessary re-renders.
+After writing custom-title entries, the cached JSONL file sizes in the index are updated in a single bulk write so that ~claude-log-sync-all~ does not treat the modified files as stale and trigger unnecessary re-renders.
 
 The command reports how many sessions were renamed, how many were skipped, and how many lacked a summary.
 
