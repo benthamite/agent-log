@@ -1263,11 +1263,15 @@ Appends to both the buffer and the rendered .md file on disk."
             (inhibit-read-only t))
         (when claude-log--rendered-file
           (claude-log--append-to-file claude-log--rendered-file rendered))
+        ;; Sync modtime BEFORE buffer insert to prevent the
+        ;; supersession check in `prepare_to_modify_buffer'.
+        (set-visited-file-modtime)
         (save-excursion
           (goto-char (point-max))
           (insert rendered)
           (claude-log--collapse-region
-           (- (point-max) (length rendered)) (point-max)))))))
+           (- (point-max) (length rendered)) (point-max)))
+        (set-buffer-modified-p nil)))))
 
 (defun claude-log--try-parse-json (line)
   "Parse LINE as JSON, returning nil if it is not valid JSON."
