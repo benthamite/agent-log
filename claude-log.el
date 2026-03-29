@@ -53,6 +53,7 @@
 
 (defvar gptel-backend)
 (defvar gptel-model)
+(defvar gptel-tools)
 (defvar gptel--known-backends)
 (declare-function gptel-request "gptel")
 (declare-function gptel-get-backend "gptel")
@@ -1647,6 +1648,7 @@ chain-continuation state for `claude-log--summarize-next'."
          (resolved (claude-log--resolve-summary-backend-and-model))
          (gptel-backend (car resolved))
          (gptel-model (cdr resolved))
+         (gptel-tools nil)
          (request-id (cl-gensym "summarize-"))
          (display (claude-log--summarize-display-name meta text sid)))
     (message "Summarizing %d/%d with %s: %s..." (1+ done) total
