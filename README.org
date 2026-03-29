@@ -287,7 +287,7 @@ The command ~claude-log-copy-turn~ copies the current turn to the kill ring.  A 
 #+findex: claude-log-summarize-sessions
 #+findex: claude-log-stop-summarizing
 
-The command ~claude-log-summarize-sessions~ generates AI summaries for all sessions that do not yet have one.  It requires the =gptel= package.  The command processes sessions sequentially, sending each conversation's text to the configured LLM ([[#h:summary-generation-options][Summary generation options]]) and storing the response in the index.
+The command ~claude-log-summarize-sessions~ generates AI summaries for all sessions that do not yet have one.  It requires the =gptel= package.  The command processes sessions sequentially, sending each conversation's text to the configured LLM ([[#h:summary-generation-options][Summary generation options]]) and storing the response in the index.  Summary requests disable ~gptel-use-tools~ so that globally configured tools (e.g. MCP servers) are not included in the request.
 
 Each summary consists of two parts: a one-line summary (up to 80 characters) used in the session browser display, and a paragraph summary (3--5 sentences) shown at the top of rendered buffers.  The LLM is instructed to return a JSON object with ~oneline~ and ~summary~ fields.
 
