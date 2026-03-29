@@ -652,9 +652,11 @@ Projects are sorted by most recent session timestamp."
       (let* ((project (or (plist-get (cdr session) :project) ""))
              (existing (gethash project groups)))
         (puthash project (append existing (list session)) groups)))
-    (let (result)
+    (let* ((full-paths (hash-table-keys groups))
+           (display-names (claude-log--unique-project-names full-paths))
+           result)
       (maphash (lambda (project group-sessions)
-                 (let ((name (claude-log--short-project project)))
+                 (let ((name (cdr (assoc project display-names))))
                    (push (cons name group-sessions) result)))
                groups)
       ;; Sort by most recent session timestamp.
@@ -711,6 +713,34 @@ Projects are sorted by most recent session timestamp."
   (if (or (null path) (string-empty-p path))
       "unknown"
     (file-name-nondirectory (directory-file-name path))))
+
+(defun claude-log--unique-project-names (paths)
+  "Return an alist of (PATH . DISPLAY-NAME) with unique display names.
+Short names are used when unique; parent/name when collisions occur."
+  (let ((counts (make-hash-table :test #'equal)))
+    (dolist (path paths)
+      (cl-incf (gethash (claude-log--short-project path) counts 0)))
+    (mapcar (lambda (path)
+              (let ((short (claude-log--short-project path)))
+                (cons path
+                      (if (> (gethash short counts) 1)
+                          (claude-log--long-project-name path)
+                        short))))
+            paths)))
+
+(defun claude-log--long-project-name (path)
+  "Return a parent/name string from PATH for disambiguation."
+  (if (or (null path) (string-empty-p path))
+      "unknown"
+    (let* ((dir (directory-file-name path))
+           (name (file-name-nondirectory dir))
+           (parent-dir (file-name-directory dir))
+           (parent (when parent-dir
+                     (file-name-nondirectory
+                      (directory-file-name parent-dir)))))
+      (if (and parent (not (string-empty-p parent)))
+          (format "%s/%s" parent name)
+        name))))
 
 (defun claude-log--format-epoch-ms (ms)
   "Format millisecond epoch timestamp MS as a date-time string."
@@ -1160,21 +1190,25 @@ a complete character boundary."
 Handles incomplete UTF-8 sequences at chunk boundaries by saving
 trailing partial bytes in `claude-log--partial-bytes' and
 prepending any previously saved bytes."
-  (with-temp-buffer
-    (set-buffer-multibyte nil)
-    (when claude-log--partial-bytes
-      (insert claude-log--partial-bytes))
-    (let ((coding-system-for-read 'raw-text))
-      (insert-file-contents file nil start end))
-    (let ((tail (claude-log--incomplete-utf8-tail-length
-                 (buffer-substring-no-properties (point-min) (point-max)))))
-      (if (> tail 0)
-          (progn
-            (setq claude-log--partial-bytes
-                  (buffer-substring-no-properties (- (point-max) tail) (point-max)))
-            (delete-region (- (point-max) tail) (point-max)))
-        (setq claude-log--partial-bytes nil))
-      (decode-coding-region (point-min) (point-max) 'utf-8 t))))
+  (let ((saved-partial claude-log--partial-bytes)
+        result new-partial)
+    (with-temp-buffer
+      (set-buffer-multibyte nil)
+      (when saved-partial
+        (insert saved-partial))
+      (let ((coding-system-for-read 'raw-text))
+        (insert-file-contents file nil start end))
+      (let ((tail (claude-log--incomplete-utf8-tail-length
+                   (buffer-substring-no-properties (point-min) (point-max)))))
+        (if (> tail 0)
+            (progn
+              (setq new-partial
+                    (buffer-substring-no-properties (- (point-max) tail) (point-max)))
+              (delete-region (- (point-max) tail) (point-max)))
+          (setq new-partial nil))
+        (setq result (decode-coding-region (point-min) (point-max) 'utf-8 t))))
+    (setq claude-log--partial-bytes new-partial)
+    result))
 
 (defun claude-log--process-incremental-text (text at-end)
   "Parse new TEXT from the JSONL file and append rendered entries.
@@ -1392,7 +1426,8 @@ preceding separator."
   "Re-render from JSONL source and reload buffer."
   (interactive)
   (when claude-log--source-file
-    (setq claude-log--partial-line "")
+    (setq claude-log--partial-line ""
+          claude-log--partial-bytes nil)
     (if (and claude-log--session-id claude-log--rendered-file)
         (let ((metadata (list :file claude-log--source-file
                               :timestamp nil
@@ -1761,7 +1796,7 @@ JSONL file, making it visible in Claude Code's /resume picker."
   (with-temp-buffer
     (insert-file-contents jsonl-file)
     (goto-char (point-min))
-    (search-forward "\"type\":\"custom-title\"" nil t)))
+    (re-search-forward "\"type\"\\s-*:\\s-*\"custom-title\"" nil t)))
 
 (defun claude-log--append-custom-title (jsonl-file session-id title)
   "Append a custom-title entry to JSONL-FILE for SESSION-ID with TITLE.
