@@ -1693,9 +1693,12 @@ an error (nil) consumes the request guard and advances the chain."
                  (= gen claude-log--summarize-generation))
         (let ((parsed (claude-log--parse-summary-response response)))
           (if parsed
-              (claude-log--index-update-props
-               sid (list :summary (car parsed)
-                         :summary-oneline (cdr parsed)))
+              (progn
+                (claude-log--index-update-props
+                 sid (list :summary (car parsed)
+                           :summary-oneline (cdr parsed)))
+                (when claude-log-auto-rename-sessions
+                  (claude-log--maybe-rename-session sid (cdr parsed))))
             (message "Failed to parse summary for %s" sid)))
         (run-with-timer
          0.1 nil
@@ -1746,6 +1749,13 @@ an error (nil) consumes the request guard and advances the chain."
 
 ;;;;; Session rename
 
+(defcustom claude-log-auto-rename-sessions nil
+  "When non-nil, rename sessions automatically after summarization.
+Each time a session receives an AI summary, its one-line summary
+is slugified and written as a custom-title entry in the session
+JSONL file, making it visible in Claude Code's /resume picker."
+  :type 'boolean)
+
 (defun claude-log--session-has-custom-title-p (jsonl-file)
   "Return non-nil if JSONL-FILE already contains a custom-title entry."
   (with-temp-buffer
@@ -1760,6 +1770,19 @@ an error (nil) consumes the request guard and advances the chain."
                       :customTitle title
                       :sessionId session-id))))
     (write-region (concat entry "\n") nil jsonl-file t 'quiet)))
+
+(defun claude-log--maybe-rename-session (session-id oneline)
+  "Rename SESSION-ID from ONELINE summary if appropriate.
+Finds the session JSONL file, checks it has no custom-title yet,
+and appends one derived from ONELINE.  Does nothing if
+ONELINE is nil, empty, or the sentinel value."
+  (when (and oneline
+             (not (string-empty-p oneline))
+             (not (equal oneline "(no conversation)")))
+    (when-let* ((jsonl-file (claude-log--find-session-file session-id)))
+      (unless (claude-log--session-has-custom-title-p jsonl-file)
+        (claude-log--append-custom-title
+         jsonl-file session-id (claude-log--slugify oneline))))))
 
 ;;;###autoload
 (defun claude-log-rename-sessions ()
@@ -1792,9 +1815,9 @@ Sessions must be summarized first via `claude-log-summarize-sessions'."
          ((claude-log--session-has-custom-title-p jsonl-file)
           (cl-incf skipped))
          (t
-          (let ((slug (claude-log--slugify oneline)))
-            (claude-log--append-custom-title jsonl-file sid slug)
-            (cl-incf renamed))))))
+          (claude-log--append-custom-title jsonl-file sid
+                                           (claude-log--slugify oneline))
+          (cl-incf renamed)))))
     (message "Renamed %d session(s), skipped %d (already named), %d without summary"
              renamed skipped no-summary)))
 
