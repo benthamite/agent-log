@@ -1764,12 +1764,17 @@ JSONL file, making it visible in Claude Code's /resume picker."
     (search-forward "\"type\":\"custom-title\"" nil t)))
 
 (defun claude-log--append-custom-title (jsonl-file session-id title)
-  "Append a custom-title entry to JSONL-FILE for SESSION-ID with TITLE."
+  "Append a custom-title entry to JSONL-FILE for SESSION-ID with TITLE.
+Also updates the cached JSONL size in the index so that
+`claude-log--ensure-rendered' does not treat the file as stale."
   (let ((entry (json-serialize
                 (list :type "custom-title"
                       :customTitle title
                       :sessionId session-id))))
-    (write-region (concat entry "\n") nil jsonl-file t 'quiet)))
+    (write-region (concat entry "\n") nil jsonl-file t 'quiet)
+    (when-let* ((new-size (file-attribute-size (file-attributes jsonl-file))))
+      (claude-log--index-update-props
+       session-id (list :jsonl-size new-size)))))
 
 (defun claude-log--maybe-rename-session (session-id oneline)
   "Rename SESSION-ID from ONELINE summary if appropriate.
