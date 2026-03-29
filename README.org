@@ -304,7 +304,7 @@ Summaries are persisted in the index file, so they survive across Emacs sessions
 
 When ~claude-log-sync-on-session-end~ is non-nil, ~claude-log-sync-all~ and ~claude-log-summarize-sessions~ run automatically each time a Claude Code session terminates.  This requires the =claude-code= package and a =Stop= hook configured in Claude Code's settings (see the =claude-code= documentation for hook setup).
 
-Sessions whose project directory matches a currently active Claude Code buffer are excluded from summarization, so in-progress conversations are never summarized prematurely.  If summarization is already running when another session ends, the in-progress batch continues undisturbed.
+Sessions with a live Claude Code process are excluded from summarization by session ID (via =claude-code-extras=), so in-progress conversations are never summarized prematurely.  If summarization is already running when another session ends, the in-progress batch continues undisturbed.
 
 ** Session resumption
 :PROPERTIES:

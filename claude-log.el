@@ -1534,32 +1534,35 @@ Returns (SUMMARY . ONELINE) or nil."
 
 (declare-function claude-code--buffer-p "claude-code")
 
-(defun claude-log--active-project-dirs ()
-  "Return a list of normalized project directories with live Claude Code sessions."
+(defvar-local claude-code-extras--status-data nil)
+
+(defun claude-log--active-session-ids ()
+  "Return a list of session IDs for live Claude Code sessions.
+Requires `claude-code' and `claude-code-extras' for session ID
+extraction.  Returns nil if either is unavailable."
   (when (require 'claude-code nil t)
-    (let (dirs)
+    (let (ids)
       (dolist (buf (buffer-list))
         (when (and (buffer-live-p buf)
                    (claude-code--buffer-p buf)
                    (when-let* ((proc (get-buffer-process buf)))
                      (process-live-p proc)))
-          (when-let* ((dir (buffer-local-value 'default-directory buf)))
-            (push (directory-file-name (file-truename dir)) dirs))))
-      (delete-dups dirs))))
+          (when-let* ((data (buffer-local-value
+                             'claude-code-extras--status-data buf))
+                      (sid (plist-get data :session_id)))
+            (push sid ids))))
+      (delete-dups ids))))
 
 (defun claude-log--sessions-needing-summary (sessions index)
   "Return sessions from SESSIONS that lack a summary in INDEX.
-Sessions whose project matches an active Claude Code buffer are excluded."
-  (let ((active-dirs (claude-log--active-project-dirs)))
+Sessions with a live Claude Code process are excluded by session ID."
+  (let ((active-ids (claude-log--active-session-ids)))
     (seq-filter
      (lambda (session)
        (let* ((sid (car session))
-              (entry (gethash sid index))
-              (project (plist-get (cdr session) :project)))
+              (entry (gethash sid index)))
          (and (not (and entry (plist-get entry :summary-oneline)))
-              (not (and project
-                        (member (directory-file-name (file-truename project))
-                                active-dirs))))))
+              (not (member sid active-ids)))))
      sessions)))
 
 ;;;###autoload
