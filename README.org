@@ -219,7 +219,7 @@ The command ~claude-log-open-file~ opens a specific JSONL file by path.  It prom
 
 The command ~claude-log-open-session~ opens a session by its ID.  It prompts for the session ID interactively.
 
-The command ~claude-log-open-session-at-point~ opens the log for the Claude Code session running in the current buffer.  The current buffer must be a Claude Code terminal buffer (from the =claude-code= package).  The command reads the session ID from the Claude Code status file (written to =/tmp/claude-code-status/=), which uniquely identifies the session even when multiple sessions share the same project directory.  If the status file is unavailable, it falls back to the most recently modified JSONL file in the project's session directory, or to searching =history.jsonl=.  This lets you quickly jump from an active Claude Code session to its rendered log.
+The command ~claude-log-open-session-at-point~ opens the log for the Claude Code session running in the current buffer.  The current buffer must be a Claude Code terminal buffer (from the =claude-code= package).  The command reads the status file that Claude Code writes to =/tmp/claude-code-status/= and uses the =transcript_path= field to locate the exact JSONL file for the session.  This uniquely identifies the session even when multiple sessions (including branches created with ~/branch~) share the same project directory.  If the status file is unavailable, it falls back to the most recently modified JSONL file in the project's session directory, or to searching =history.jsonl=.  This lets you quickly jump from an active Claude Code session to its rendered log.
 
 ** Rendered directory
 :PROPERTIES:
@@ -392,7 +392,7 @@ Claude Code stores conversation data in two places:
 1. =~/.claude/history.jsonl=: a global index mapping session IDs to projects and timestamps.
 2. =~/.claude/projects/<encoded-path>/<uuid>.jsonl=: one file per session, containing all messages as JSON lines.
 
-The encoded path replaces =/= and =.= characters with =-=.  The package tries both the expanded path and its ~file-truename~ when locating a session directory, which handles symlinked project paths.
+The encoded path replaces =/=, =.=, and space characters with =-=.  The package tries both the expanded path and its ~file-truename~ when locating a session directory, which handles symlinked project paths.
 
 ** Rendered directory structure
 :PROPERTIES:

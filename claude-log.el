@@ -1970,9 +1970,9 @@ Try the buffer-local variable first, then fall back to history.jsonl."
 
 (defun claude-log--encode-project-path (directory)
   "Encode DIRECTORY as Claude Code does for its projects subdirectory.
-Replaces `/' and `.' characters with `-'."
+Replaces `/', `.', and space characters with `-'."
   (replace-regexp-in-string
-   "[/.]" "-"
+   "[/. ]" "-"
    (directory-file-name (expand-file-name directory))))
 
 (defun claude-log--find-project-session-dir (directory)
@@ -2000,9 +2000,10 @@ Try both the expanded path and its `file-truename'."
 (defconst claude-log--status-directory "/tmp/claude-code-status/"
   "Directory where Claude Code writes per-buffer JSON status files.")
 
-(defun claude-log--session-id-from-buffer ()
-  "Return the session ID for the Claude session in the current buffer.
-Read it from the status file that Claude Code writes to
+(defun claude-log--read-status-file ()
+  "Read the status file for the Claude session in the current buffer.
+Return a plist with :session_id and :transcript_path, or nil.
+The status file is written by Claude Code to
 `claude-log--status-directory', keyed by sanitized buffer name."
   (when-let* ((file (claude-log--status-file-for-buffer))
               ((file-exists-p file)))
@@ -2012,10 +2013,17 @@ Read it from the status file that Claude Code writes to
                         (insert-file-contents file)
                         (buffer-string))
                       :object-type 'plist))
-               (sid (plist-get json :session_id)))
+               (sid (plist-get json :session_id))
+               (path (plist-get json :transcript_path)))
           (when (and (stringp sid) (not (string-empty-p sid)))
-            sid))
+            (list :session_id sid :transcript_path path)))
       (error nil))))
+
+(defun claude-log--session-id-from-buffer ()
+  "Return the session ID for the Claude session in the current buffer.
+Read it from the status file that Claude Code writes to
+`claude-log--status-directory', keyed by sanitized buffer name."
+  (plist-get (claude-log--read-status-file) :session_id))
 
 (defun claude-log--status-file-for-buffer ()
   "Return the status file path for the current buffer."
@@ -2058,14 +2066,21 @@ directory or to `history.jsonl'."
   (unless (claude-code--buffer-p (current-buffer))
     (user-error "Not in a Claude Code buffer"))
   (let* ((dir (claude-code--extract-directory-from-buffer-name (buffer-name)))
-         (session-dir (and dir (claude-log--find-project-session-dir dir)))
-         ;; Try to identify the exact session from the process tree.
-         (session-id (claude-log--session-id-from-buffer))
-         (jsonl (or (and session-id session-dir
-                         (let ((f (expand-file-name
-                                   (concat session-id ".jsonl") session-dir)))
-                           (and (file-exists-p f) f)))
-                    (and session-dir (claude-log--find-latest-jsonl session-dir)))))
+         (status (claude-log--read-status-file))
+         ;; Primary: use transcript_path from the status file directly.
+         (transcript (plist-get status :transcript_path))
+         (session-id (plist-get status :session_id))
+         (jsonl (or (and transcript (file-exists-p transcript) transcript)
+                    ;; Secondary: construct from session-dir + session-id.
+                    (let ((session-dir
+                           (and dir (claude-log--find-project-session-dir dir))))
+                      (or (and session-id session-dir
+                               (let ((f (expand-file-name
+                                         (concat session-id ".jsonl")
+                                         session-dir)))
+                                 (and (file-exists-p f) f)))
+                          (and session-dir
+                               (claude-log--find-latest-jsonl session-dir)))))))
     (if jsonl
         (claude-log-open-file jsonl)
       ;; Fallback: search history.jsonl for sessions matching this project
