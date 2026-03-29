@@ -550,7 +550,8 @@ METADATA is a plist with :file, :timestamp, :project, :display."
         (claude-log--start-watcher))
       (claude-log--collapse-as-configured)
       (claude-log--maybe-insert-summary session-id)
-      (goto-char (point-min)))
+      (goto-char (point-min))
+      (set-buffer-modified-p nil))
     (pop-to-buffer buf)))
 
 (defun claude-log--append-to-file (file text)

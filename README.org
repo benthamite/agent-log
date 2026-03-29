@@ -347,7 +347,7 @@ If the session's project directory can be determined (from the buffer-local vari
 
 #+findex: claude-log-mode
 
-~claude-log-mode~ is the major mode used for rendered session buffers.  It derives from ~markdown-view-mode~, inheriting Markdown fontification in a read-only buffer.  The mode activates ~outline-minor-mode~ with a regexp that matches Markdown headings (=## =, =### =, =#### =), enabling section folding.
+~claude-log-mode~ is the major mode used for rendered session buffers.  It derives from ~markdown-view-mode~, inheriting Markdown fontification in a read-only buffer.  Buffers are never marked as modified, so =q= (~quit-window~) closes them without prompting to save.  The mode activates ~outline-minor-mode~ with a regexp that matches Markdown headings (=## =, =### =, =#### =), enabling section folding.
 
 Two invisibility specs are added: ~claude-log-collapsed~ (which shows the heading but hides the body) and ~claude-log-hidden~ (which hides both heading and body).  These are used by the section visibility commands ([[#h:section-visibility][Section visibility]]) and the display configuration options ([[#h:display-of-thinking-and-tool-sections][Display of thinking and tool sections]]).
 
