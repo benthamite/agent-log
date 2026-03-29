@@ -200,6 +200,7 @@ The user option ~claude-log-summary-max-content-length~ sets the maximum number 
 #+findex: claude-log-browse-sessions
 #+findex: claude-log-open-latest
 #+findex: claude-log-open-file
+#+findex: claude-log-open-session
 #+findex: claude-log-open-session-at-point
 
 The command ~claude-log-browse-sessions~ is the primary entry point for exploring your Claude Code history.  It reads =history.jsonl=, resolves each session to its JSONL file on disk, and presents the results in a ~completing-read~ prompt.  Each candidate is formatted as:
@@ -215,6 +216,8 @@ Selecting a session lazily renders it to a =.md= file if needed, then opens the 
 The command ~claude-log-open-latest~ opens the most recent session directly, without prompting.  This is convenient when you want to review the last conversation you had with Claude Code.
 
 The command ~claude-log-open-file~ opens a specific JSONL file by path.  It prompts for a file path interactively.  This is useful for automation, for opening session files you found via the filesystem, or when you know the exact file you want.
+
+The command ~claude-log-open-session~ opens a session by its ID.  It prompts for the session ID interactively.
 
 The command ~claude-log-open-session-at-point~ opens the log for the Claude Code session running in the current buffer.  The current buffer must be a Claude Code terminal buffer (from the =claude-code= package).  The command identifies the project directory from the buffer name, finds the corresponding session directory under =~/.claude/projects/=, and opens the most recently modified JSONL file.  This lets you quickly jump from an active Claude Code session to its rendered log.
 
@@ -362,7 +365,17 @@ The full keymap is:
 | =g=   | ~claude-log-refresh~              | Re-render the buffer from scratch       |
 | =w=   | ~claude-log-copy-turn~            | Copy the current turn to the kill ring  |
 | =r=   | ~claude-log-resume-session~       | Resume the session in Claude Code       |
+| =?=   | ~claude-log-menu~                 | Open the transient menu                 |
 | =q=   | ~quit-window~                     | Close the buffer                        |
+
+** Transient menu
+:PROPERTIES:
+:CUSTOM_ID: h:transient-menu
+:END:
+
+#+findex: claude-log-menu
+
+The command ~claude-log-menu~ opens a transient menu that groups all ~claude-log~ commands into four columns: Open, Sync & AI, Navigate (shown only inside a ~claude-log-mode~ buffer), and Settings.  The keybinding is =?= in ~claude-log-mode~.  The menu is also available globally via its autoload, so you can bind it to a key of your choice outside of ~claude-log-mode~.
 
 * How it works
 :PROPERTIES:

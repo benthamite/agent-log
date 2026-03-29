@@ -4,7 +4,7 @@
 
 ;; Author: Pablo Stafforini
 ;; URL: https://github.com/benthamite/claude-log
-;; Version: 0.2.0
+;; Version: 0.3.0
 ;; Package-Requires: ((emacs "29.1") (markdown-mode "2.6"))
 ;; Keywords: tools
 
