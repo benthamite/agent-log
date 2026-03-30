@@ -1965,17 +1965,20 @@ Returns a plist with:
              (entry (gethash sid index))
              (ts (plist-get meta :timestamp))
              (project (claude-log--short-project (plist-get meta :project))))
-        (if (and entry (plist-get entry :summary-oneline)
-                 (not (equal (plist-get entry :summary-oneline)
-                             claude-log--no-conversation-sentinel)))
-            (progn
-              (cl-incf summarized)
-              (cl-incf (gethash project project-counts 0))
-              (when (or (null earliest) (and (numberp ts) (< ts earliest)))
-                (setq earliest ts))
-              (when (or (null latest) (and (numberp ts) (> ts latest)))
-                (setq latest ts)))
-          (cl-incf unsummarized))))
+        (let ((oneline (and entry (plist-get entry :summary-oneline))))
+          (cond
+           ;; Has a real summary: count it and track its metadata.
+           ((and oneline (not (equal oneline claude-log--no-conversation-sentinel)))
+            (cl-incf summarized)
+            (cl-incf (gethash project project-counts 0))
+            (when (or (null earliest) (and (numberp ts) (< ts earliest)))
+              (setq earliest ts))
+            (when (or (null latest) (and (numberp ts) (> ts latest)))
+              (setq latest ts)))
+           ;; Empty session (sentinel): already processed, silently skip.
+           ((equal oneline claude-log--no-conversation-sentinel) nil)
+           ;; No summary at all: genuinely unsummarized.
+           (t (cl-incf unsummarized))))))
     (let (projects)
       (maphash (lambda (name count) (push (cons name count) projects))
                project-counts)
