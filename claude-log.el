@@ -2212,7 +2212,9 @@ Session references are clickable links that open the rendered log."
 (defun claude-log--search-buttonize-links ()
   "Make session UUIDs in the buffer clickable.
 First pass: replace markdown links `[text](UUID)' with clickable TEXT.
-Second pass: buttonize any remaining bare UUIDs."
+Second pass: buttonize any remaining bare UUIDs.
+Uses overlays for the link face so that `markdown-mode' font-lock
+does not overwrite it."
   (save-excursion
     ;; Pass 1: markdown links [desc](UUID) — work backward.
     (goto-char (point-max))
@@ -2224,7 +2226,7 @@ Second pass: buttonize any remaining bare UUIDs."
               (end (match-end 0)))
           (delete-region beg end)
           (goto-char beg)
-          (insert (claude-log--search-make-link desc sid)))))
+          (claude-log--search-insert-link desc sid))))
     ;; Pass 2: bare UUIDs not already buttonized — work backward.
     (goto-char (point-max))
     (while (re-search-backward claude-log--uuid-regexp nil t)
@@ -2234,16 +2236,21 @@ Second pass: buttonize any remaining bare UUIDs."
               (end (match-end 0)))
           (delete-region beg end)
           (goto-char beg)
-          (insert (claude-log--search-make-link sid sid)))))))
+          (claude-log--search-insert-link sid sid))))))
 
-(defun claude-log--search-make-link (text session-id)
-  "Return TEXT propertized as a clickable link to SESSION-ID."
-  (propertize text
-              'claude-log-search-session-id session-id
-              'face 'link
-              'mouse-face 'highlight
-              'help-echo (format "mouse-1: open session %s" session-id)
-              'keymap claude-log-search-link-map))
+(defun claude-log--search-insert-link (text session-id)
+  "Insert TEXT as a clickable link to SESSION-ID.
+Text properties handle interaction (click, keymap, help-echo).
+An overlay handles the face so that font-lock cannot overwrite it."
+  (let ((start (point)))
+    (insert (propertize text
+                        'claude-log-search-session-id session-id
+                        'mouse-face 'highlight
+                        'help-echo (format "mouse-1: open session %s" session-id)
+                        'keymap claude-log-search-link-map))
+    (let ((ov (make-overlay start (point) nil t nil)))
+      (overlay-put ov 'face 'link)
+      (overlay-put ov 'evaporate t))))
 
 (defun claude-log-search-follow-link ()
   "Open the session log for the link at point."
