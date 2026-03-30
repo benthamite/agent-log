@@ -58,6 +58,7 @@
 (declare-function gptel-request "gptel")
 (declare-function gptel-get-backend "gptel")
 (declare-function gptel-backend-models "gptel")
+(declare-function gptel-plus-compute-cost "gptel-plus")
 
 ;;;;; Customization
 
@@ -156,6 +157,49 @@ is slugified and written as a custom-title entry in the session
 JSONL file, making it visible in Claude Code's /resume picker."
   :type 'boolean)
 
+;;;;; AI search
+
+(defcustom claude-log-search-scope-backend nil
+  "The gptel backend name for search scope narrowing (stage 1).
+When nil, the backend is inferred from `claude-log-search-scope-model',
+falling back to `gptel-backend'."
+  :type '(choice (const :tag "Infer from model or use gptel default" nil)
+                 (string :tag "Backend name")))
+
+(defcustom claude-log-search-scope-model nil
+  "The gptel model for search scope narrowing (stage 1).
+When nil, defaults to `gptel-model'.  A small, fast model (e.g.
+`claude-haiku-4-5-20251001') is recommended."
+  :type '(choice (const :tag "Use gptel default" nil)
+                 (symbol :tag "Model name")))
+
+(defcustom claude-log-search-backend nil
+  "The gptel backend name for search selection (stage 2).
+When nil, the backend is inferred from `claude-log-search-model',
+falling back to `gptel-backend'."
+  :type '(choice (const :tag "Infer from model or use gptel default" nil)
+                 (string :tag "Backend name")))
+
+(defcustom claude-log-search-model nil
+  "The gptel model for search selection (stage 2).
+When nil, defaults to `gptel-model'."
+  :type '(choice (const :tag "Use gptel default" nil)
+                 (symbol :tag "Model name")))
+
+(defcustom claude-log-search-budget '(tokens . 50000)
+  "Per-request budget threshold for AI search, as a (TYPE . LIMIT) cons cell.
+TYPE is `tokens' or `dollars'.
+
+Before stage 2, the estimated cost of the prompt is compared to
+this threshold.  If it exceeds the limit, the user is asked to
+confirm via `y-or-n-p'.
+
+In `tokens' mode, usage is estimated heuristically at one token
+per four characters.  In `dollars' mode, cost estimation requires
+the `gptel-plus' package; if unavailable, the budget is not enforced."
+  :type '(choice (cons :tag "Token limit" (const :tag "" tokens) integer)
+                 (cons :tag "Dollar limit" (const :tag "" dollars) number)))
+
 ;;;;; Internal variables
 
 (defvar-local claude-log--source-file nil
@@ -214,6 +258,14 @@ and are silently ignored, preventing chain forking from streaming.")
 ;; invalidates an entire run when the user stops or restarts, while the
 ;; request-id nonce ensures only the *first* callback per request advances
 ;; the chain.  Both must match for a callback to take effect.
+
+(defvar claude-log--search-sessions-cache nil
+  "Cached sessions alist for the current search.
+Used when following links in the result buffer.")
+
+(defvar claude-log--search-index-cache nil
+  "Cached index hash table for the current search.
+Used when following links in the result buffer.")
 
 ;;;;; Entry points
 
@@ -1821,6 +1873,423 @@ an error (nil) consumes the request guard and advances the chain."
                       start 'claude-log-summary nil (point-max))))
             (delete-region start end)))))))
 
+;;;;; AI search
+
+(defconst claude-log--search-scope-system-message
+  "You are a search-scope assistant for a conversation log archive.  Given a \
+user's natural language query plus metadata about the archive (available \
+projects with session counts, and the date range), return a JSON object that \
+narrows which sessions to search.
+
+Return ONLY a JSON object with these fields:
+- \"projects\": an array of project short-names to include, or the string \
+\"all\" to include every project.
+- \"date_after\": an ISO 8601 date string (YYYY-MM-DD) for the earliest date \
+to include, or null for no lower bound.
+- \"date_before\": an ISO 8601 date string (YYYY-MM-DD) for the latest date \
+to include, or null for no upper bound.
+
+Be inclusive rather than exclusive.  If the query does not mention a specific \
+project or date range, use \"all\" and null dates.  Only narrow when the query \
+clearly indicates a scope.
+
+Respond with ONLY the JSON object, no markdown formatting, no code fences."
+  "System message for search scope narrowing (stage 1).")
+
+(defconst claude-log--search-system-message
+  "You are a search assistant for a conversation log archive.  You receive a \
+user's query and a set of session summaries.  Each summary has a SESSION_ID, \
+a one-line summary, and a paragraph summary.
+
+Your task: identify the sessions most relevant to the query and produce a \
+markdown narrative describing what you found.  Use markdown links of the form \
+[description](SESSION_ID) to reference sessions.  The SESSION_ID is a UUID; \
+use it verbatim as the link target.
+
+Guidelines:
+- Lead with the most relevant sessions.
+- Explain WHY each session is relevant to the query.
+- Group related sessions when appropriate.
+- If no sessions are relevant, say so clearly.
+- Be concise but informative.
+- Do not fabricate session content; only reference what the summaries describe."
+  "System message for search selection (stage 2).")
+
+(defun claude-log--resolve-search-scope-backend-and-model ()
+  "Return (backend . model) for search scope narrowing (stage 1).
+Resolves `claude-log-search-scope-backend' and
+`claude-log-search-scope-model', inferring the backend from the
+model when needed."
+  (let* ((model (or claude-log-search-scope-model gptel-model))
+         (backend (cond
+                   (claude-log-search-scope-backend
+                    (gptel-get-backend claude-log-search-scope-backend))
+                   (claude-log-search-scope-model
+                    (or (claude-log--find-backend-for-model
+                         claude-log-search-scope-model)
+                        gptel-backend))
+                   (t gptel-backend))))
+    (cons backend model)))
+
+(defun claude-log--resolve-search-backend-and-model ()
+  "Return (backend . model) for search selection (stage 2).
+Resolves `claude-log-search-backend' and `claude-log-search-model',
+inferring the backend from the model when needed."
+  (let* ((model (or claude-log-search-model gptel-model))
+         (backend (cond
+                   (claude-log-search-backend
+                    (gptel-get-backend claude-log-search-backend))
+                   (claude-log-search-model
+                    (or (claude-log--find-backend-for-model
+                         claude-log-search-model)
+                        gptel-backend))
+                   (t gptel-backend))))
+    (cons backend model)))
+
+(defun claude-log--search-gather-metadata (sessions index)
+  "Compute metadata for SESSIONS and INDEX needed by the search pipeline.
+Returns a plist with:
+  :projects     - alist of (SHORT-NAME . COUNT) for projects with summaries
+  :date-earliest - earliest timestamp (epoch-ms) among summarized sessions
+  :date-latest   - latest timestamp (epoch-ms) among summarized sessions
+  :summarized    - count of sessions with summaries
+  :unsummarized  - count of sessions without summaries"
+  (let ((project-counts (make-hash-table :test #'equal))
+        (earliest nil)
+        (latest nil)
+        (summarized 0)
+        (unsummarized 0))
+    (dolist (session sessions)
+      (let* ((sid (car session))
+             (meta (cdr session))
+             (entry (gethash sid index))
+             (ts (plist-get meta :timestamp))
+             (project (claude-log--short-project (plist-get meta :project))))
+        (if (and entry (plist-get entry :summary-oneline)
+                 (not (equal (plist-get entry :summary-oneline)
+                             claude-log--no-conversation-sentinel)))
+            (progn
+              (cl-incf summarized)
+              (cl-incf (gethash project project-counts 0))
+              (when (or (null earliest) (and (numberp ts) (< ts earliest)))
+                (setq earliest ts))
+              (when (or (null latest) (and (numberp ts) (> ts latest)))
+                (setq latest ts)))
+          (cl-incf unsummarized))))
+    (let (projects)
+      (maphash (lambda (name count) (push (cons name count) projects))
+               project-counts)
+      (setq projects (sort projects (lambda (a b) (> (cdr a) (cdr b)))))
+      (list :projects projects
+            :date-earliest earliest
+            :date-latest latest
+            :summarized summarized
+            :unsummarized unsummarized))))
+
+(defun claude-log--search-build-scope-prompt (query metadata)
+  "Build the stage 1 scope-narrowing prompt from QUERY and METADATA."
+  (let* ((projects (plist-get metadata :projects))
+         (earliest (plist-get metadata :date-earliest))
+         (latest (plist-get metadata :date-latest))
+         (summarized (plist-get metadata :summarized))
+         (project-lines
+          (mapconcat (lambda (p) (format "  - %s (%d sessions)" (car p) (cdr p)))
+                     projects "\n"))
+         (date-from (if earliest
+                        (format-time-string "%Y-%m-%d" (/ earliest 1000))
+                      "unknown"))
+         (date-to (if latest
+                      (format-time-string "%Y-%m-%d" (/ latest 1000))
+                    "unknown")))
+    (format "User query: %S\n\nArchive metadata:\n- Projects:\n%s\n- Date range: %s to %s\n- Total sessions with summaries: %d"
+            query project-lines date-from date-to summarized)))
+
+(defun claude-log--search-parse-scope-response (response)
+  "Parse RESPONSE as a JSON scope object.
+Returns a plist (:projects LIST-OR-ALL :date-after EPOCH-OR-NIL
+:date-before EPOCH-OR-NIL), or nil on parse failure."
+  (when (stringp response)
+    (let ((text (string-trim response)))
+      ;; Strip markdown code fences if present.
+      (when (string-match "\\````\\(?:json\\)?\n?" text)
+        (setq text (substring text (match-end 0))))
+      (when (string-match "\n?```\\'" text)
+        (setq text (substring text 0 (match-beginning 0))))
+      (condition-case nil
+          (let* ((json-object-type 'plist)
+                 (json-array-type 'list)
+                 (obj (json-read-from-string text))
+                 (projects (plist-get obj :projects))
+                 (date-after (plist-get obj :date_after))
+                 (date-before (plist-get obj :date_before)))
+            (list :projects (if (and (stringp projects)
+                                     (equal projects "all"))
+                                "all"
+                              (if (listp projects) projects "all"))
+                  :date-after (claude-log--search-parse-date date-after)
+                  :date-before (claude-log--search-parse-date date-before)))
+        (error nil)))))
+
+(defun claude-log--search-parse-date (date-string)
+  "Parse DATE-STRING (YYYY-MM-DD) to epoch milliseconds, or nil."
+  (when (and (stringp date-string)
+             (string-match "\\`\\([0-9]\\{4\\}\\)-\\([0-9]\\{2\\}\\)-\\([0-9]\\{2\\}\\)\\'" date-string))
+    (let ((time (encode-time 0 0 0
+                             (string-to-number (match-string 3 date-string))
+                             (string-to-number (match-string 2 date-string))
+                             (string-to-number (match-string 1 date-string)))))
+      (* (float-time time) 1000))))
+
+(defun claude-log--search-apply-scope (sessions index scope)
+  "Filter SESSIONS using INDEX and SCOPE criteria.
+Returns sessions that match the project filter, fall within the
+date range, and have a summary in the INDEX."
+  (let ((projects (plist-get scope :projects))
+        (date-after (plist-get scope :date-after))
+        (date-before (plist-get scope :date-before)))
+    (seq-filter
+     (lambda (session)
+       (let* ((sid (car session))
+              (meta (cdr session))
+              (entry (gethash sid index))
+              (ts (plist-get meta :timestamp))
+              (project (claude-log--short-project (plist-get meta :project))))
+         (and
+          ;; Must have a summary.
+          entry
+          (plist-get entry :summary-oneline)
+          (not (equal (plist-get entry :summary-oneline)
+                      claude-log--no-conversation-sentinel))
+          ;; Project filter.
+          (or (equal projects "all")
+              (member project projects))
+          ;; Date range.
+          (or (null date-after)
+              (and (numberp ts) (>= ts date-after)))
+          (or (null date-before)
+              ;; Add 86400000 ms (one day) to make the upper bound
+              ;; inclusive of the entire day.
+              (and (numberp ts) (<= ts (+ date-before 86400000)))))))
+     sessions)))
+
+(defun claude-log--search-estimate-tokens (text)
+  "Return a rough token estimate for TEXT (one token per four characters)."
+  (if (and text (stringp text) (> (length text) 0))
+      (/ (length text) 4)
+    0))
+
+(defun claude-log--search-check-budget (prompt-text system-text model)
+  "Check if the estimated cost of PROMPT-TEXT and SYSTEM-TEXT exceeds the budget.
+MODEL is the gptel model symbol for pricing lookup.
+Returns non-nil if the user approves or the budget is not exceeded."
+  (let* ((estimated-tokens (+ (claude-log--search-estimate-tokens prompt-text)
+                              (claude-log--search-estimate-tokens system-text)))
+         (budget-type (car claude-log-search-budget))
+         (budget-limit (cdr claude-log-search-budget)))
+    (pcase budget-type
+      ('tokens
+       (if (> estimated-tokens budget-limit)
+           (y-or-n-p
+            (format "Estimated ~%d tokens (budget: %d). Continue? "
+                    estimated-tokens budget-limit))
+         t))
+      ('dollars
+       (if (and (require 'gptel-plus nil t)
+                (fboundp 'gptel-plus-compute-cost))
+           (let ((input-rate (get model :input-cost)))
+             (if input-rate
+                 (let ((estimated-cost (/ (* estimated-tokens input-rate) 1000000.0)))
+                   (if (> estimated-cost budget-limit)
+                       (y-or-n-p
+                        (format "Estimated ~$%.4f (budget: $%.2f). Continue? "
+                                estimated-cost budget-limit))
+                     t))
+               ;; No pricing data for this model; proceed.
+               (message "claude-log: no pricing data for %s; budget not enforced" model)
+               t))
+         ;; gptel-plus not available; proceed with warning.
+         (message "claude-log: dollar budget requires gptel-plus; budget not enforced")
+         t))
+      (_ t))))
+
+(defun claude-log--search-build-selection-prompt (query filtered-sessions index)
+  "Build the stage 2 selection prompt from QUERY, FILTERED-SESSIONS and INDEX."
+  (let ((session-blocks
+         (mapconcat
+          (lambda (session)
+            (let* ((sid (car session))
+                   (meta (cdr session))
+                   (entry (gethash sid index))
+                   (ts (plist-get meta :timestamp))
+                   (project (claude-log--short-project (plist-get meta :project)))
+                   (date (if (numberp ts)
+                             (format-time-string "%Y-%m-%d %H:%M" (/ ts 1000))
+                           "unknown"))
+                   (oneline (or (plist-get entry :summary-oneline) ""))
+                   (summary (or (plist-get entry :summary) "")))
+              (format "### %s\n**Project**: %s | **Date**: %s\n**Summary**: %s\n%s"
+                      sid project date oneline summary)))
+          filtered-sessions "\n\n")))
+    (format "User query: %S\n\n## Sessions\n\n%s" query session-blocks)))
+
+(defun claude-log--search-send-selection (query filtered-sessions index)
+  "Send the stage 2 selection request for QUERY over FILTERED-SESSIONS.
+INDEX is the session index for looking up summaries."
+  (let* ((prompt (claude-log--search-build-selection-prompt
+                  query filtered-sessions index))
+         (system claude-log--search-system-message)
+         (resolved (claude-log--resolve-search-backend-and-model))
+         (gptel-backend (car resolved))
+         (gptel-model (cdr resolved))
+         (gptel-use-tools nil))
+    (if (claude-log--search-check-budget prompt system gptel-model)
+        (progn
+          (message "Searching %d sessions with %s..."
+                   (length filtered-sessions) gptel-model)
+          (gptel-request prompt
+            :system system
+            :callback
+            (lambda (response _info)
+              (claude-log--search-selection-callback response))))
+      (message "Search aborted"))))
+
+(defun claude-log--search-selection-callback (response)
+  "Handle the stage 2 RESPONSE."
+  (cond
+   ((stringp response)
+    (claude-log--search-display-results response))
+   ((null response)
+    (message "claude-log: search request failed (nil response)"))))
+
+(defvar claude-log-search-link-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map [mouse-1] #'claude-log-search-follow-link)
+    (define-key map (kbd "RET") #'claude-log-search-follow-link)
+    map)
+  "Keymap for clickable session links in search results.")
+
+(defvar claude-log-search-mode-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "q") #'quit-window)
+    (define-key map (kbd "RET") #'claude-log-search-follow-link)
+    map)
+  "Keymap for `claude-log-search-mode'.")
+
+(define-derived-mode claude-log-search-mode markdown-view-mode "Claude-Log-Search"
+  "Mode for displaying AI search results over Claude Code session logs.
+Session references are clickable links that open the rendered log."
+  :group 'claude-log
+  (setq-local buffer-read-only t))
+
+(defun claude-log--search-display-results (narrative)
+  "Display NARRATIVE in the `*claude-log-search*' buffer."
+  (let ((buf (get-buffer-create "*claude-log-search*")))
+    (with-current-buffer buf
+      (let ((inhibit-read-only t))
+        (erase-buffer)
+        (insert narrative)
+        (claude-log--search-buttonize-links)
+        (goto-char (point-min)))
+      (let ((markdown-mode-hook nil)
+            (markdown-view-mode-hook nil)
+            (after-change-major-mode-hook
+             (remq 'flycheck-global-mode-enable-in-buffers
+                   after-change-major-mode-hook)))
+        (claude-log-search-mode))
+      (set-buffer-modified-p nil))
+    (pop-to-buffer buf)))
+
+(defun claude-log--search-buttonize-links ()
+  "Replace markdown links to session UUIDs with clickable buttons.
+Scans the buffer for `[text](UUID)' patterns and replaces each
+with TEXT bearing text properties that make it a clickable link."
+  (save-excursion
+    (goto-char (point-max))
+    ;; Work backward to avoid invalidating match positions.
+    (while (re-search-backward
+            "\\[\\([^]]+\\)](\\([0-9a-f]\\{8\\}-[0-9a-f]\\{4\\}-[0-9a-f]\\{4\\}-[0-9a-f]\\{4\\}-[0-9a-f]\\{12\\}\\))"
+            nil t)
+      (let ((desc (match-string 1))
+            (sid (match-string 2))
+            (beg (match-beginning 0))
+            (end (match-end 0)))
+        (delete-region beg end)
+        (goto-char beg)
+        (insert (propertize desc
+                            'claude-log-search-session-id sid
+                            'face 'link
+                            'mouse-face 'highlight
+                            'help-echo (format "mouse-1: open session %s" sid)
+                            'keymap claude-log-search-link-map))))))
+
+(defun claude-log-search-follow-link ()
+  "Open the session log for the link at point."
+  (interactive)
+  (let ((sid (get-text-property (point) 'claude-log-search-session-id)))
+    (if (null sid)
+        (user-error "No session link at point")
+      (let ((session (assoc sid claude-log--search-sessions-cache)))
+        (if session
+            (claude-log--open-rendered (car session) (cdr session))
+          (claude-log-open-session sid))))))
+
+;;;###autoload
+(defun claude-log-search (query)
+  "Search session logs using AI with natural language QUERY.
+Stage 1 narrows the search scope by project and date range.
+Stage 2 selects relevant sessions and produces a narrative with
+clickable links to the matching logs."
+  (interactive "sSearch logs: ")
+  (unless (require 'gptel nil t)
+    (user-error "Package `gptel' is required for AI search"))
+  (let* ((sessions (claude-log--read-sessions))
+         (index (claude-log--read-index))
+         (metadata (claude-log--search-gather-metadata sessions index))
+         (unsummarized (plist-get metadata :unsummarized))
+         (summarized (plist-get metadata :summarized)))
+    (when (zerop summarized)
+      (user-error "No sessions have summaries; run `claude-log-summarize-sessions' first"))
+    (when (> unsummarized 0)
+      (unless (y-or-n-p
+               (format "%d session(s) lack summaries and will be excluded. Continue? "
+                       unsummarized))
+        (user-error "Search aborted")))
+    (setq claude-log--search-sessions-cache sessions
+          claude-log--search-index-cache index)
+    (message "Analyzing search scope...")
+    (let* ((scope-prompt (claude-log--search-build-scope-prompt query metadata))
+           (resolved (claude-log--resolve-search-scope-backend-and-model))
+           (gptel-backend (car resolved))
+           (gptel-model (cdr resolved))
+           (gptel-use-tools nil))
+      (gptel-request scope-prompt
+        :system claude-log--search-scope-system-message
+        :callback
+        (lambda (response _info)
+          (claude-log--search-scope-callback
+           response query sessions index))))))
+
+(defun claude-log--search-scope-callback (response query sessions index)
+  "Handle the stage 1 scope RESPONSE.
+QUERY is the original search query.  SESSIONS and INDEX are the
+full session list and index for filtering."
+  (let ((scope (or (and (stringp response)
+                        (claude-log--search-parse-scope-response response))
+                   ;; Fallback: include everything.
+                   (list :projects "all" :date-after nil :date-before nil))))
+    (let ((filtered (claude-log--search-apply-scope sessions index scope)))
+      (if (null filtered)
+          (claude-log--search-display-results
+           "No sessions with summaries matched the search scope.")
+        ;; Cap at 100 most recent sessions.
+        (let ((truncated (> (length filtered) 100)))
+          (when truncated
+            (setq filtered (seq-take filtered 100)))
+          (message "Found %d matching session(s)%s, selecting relevant ones..."
+                   (length filtered)
+                   (if truncated " (capped at 100 most recent)" ""))
+          (claude-log--search-send-selection query filtered index))))))
+
 ;;;;; Session rename
 
 (defun claude-log--session-has-custom-title-p (jsonl-file)
@@ -2160,6 +2629,7 @@ directory or to `history.jsonl'."
   ["Sync & AI"
    ("S" "Sync all" claude-log-sync-all)
    ("s" "Summarize sessions" claude-log-summarize-sessions)
+   ("/" "AI search" claude-log-search)
    ("R" "Rename from summaries" claude-log-rename-sessions)
    ("x" "Stop summarizing" claude-log-stop-summarizing)]
   ["Navigate"

@@ -29,6 +29,7 @@ The core capabilities of =claude-log.el= are:
 - *Outline navigation*.  Rendered buffers use ~outline-minor-mode~ for folding tool calls, thinking blocks, and tool results.  Dedicated keybindings jump between conversation turns ([[#h:navigation][Navigation]]).
 - *Smart tool summaries*.  Each tool call is summarized by its most relevant input—the file path for Read/Write, the command for Bash, the pattern for Grep, and so on.
 - *AI-powered session summaries*.  An optional integration with =gptel= generates concise one-line and paragraph summaries for each session, displayed in the browser and at the top of rendered buffers ([[#h:summary-generation][Summary generation]]).
+- *AI-powered search*.  A two-stage LLM pipeline lets you search your session history with natural language queries.  A scope-narrowing model filters sessions by project and date range, then a selection model identifies the most relevant sessions and presents a narrative with clickable links ([[#h:ai-search][AI search]]).
 - *Session resumption*.  You can resume any session directly in Claude Code from within the rendered buffer, provided the =claude-code= package is installed ([[#h:session-resumption][Session resumption]]).
 
 The package requires Emacs 29.1 or later and [[https://jblevins.org/projects/markdown-mode/][markdown-mode]] 2.6 or later.  The optional summary feature requires [[https://github.com/karthink/gptel][gptel]].  Session resumption requires [[https://github.com/stevemolitor/claude-code.el][claude-code]].
@@ -187,6 +188,31 @@ The user option ~claude-log-summary-model~ specifies the =gptel= model to use, f
 
 The user option ~claude-log-summary-max-content-length~ sets the maximum number of characters of conversation text sent to the LLM for summarization.  The package extracts the plain text of user and assistant messages (ignoring tool calls and thinking blocks) and truncates the result to this limit.  The default value is ~8000~.  Increase this for longer, more detailed summaries at the cost of higher token usage; decrease it if you want to minimize API costs.
 
+** AI search options
+:PROPERTIES:
+:CUSTOM_ID: h:ai-search-options
+:END:
+
+#+vindex: claude-log-search-scope-backend
+#+vindex: claude-log-search-scope-model
+#+vindex: claude-log-search-backend
+#+vindex: claude-log-search-model
+#+vindex: claude-log-search-budget
+
+The AI search feature ([[#h:ai-search][AI search]]) uses two LLM calls: a scope-narrowing stage and a selection stage.  Each stage has its own backend and model options, allowing you to use a cheap, fast model for scope narrowing and a more capable model for the selection narrative.
+
+The user option ~claude-log-search-scope-backend~ specifies the =gptel= backend for stage 1 (scope narrowing), for example ="Gemini"= or ="Claude"=.  When ~nil~ (the default), the backend is inferred from ~claude-log-search-scope-model~ if set, otherwise it falls back to ~gptel-backend~.
+
+The user option ~claude-log-search-scope-model~ specifies the model for stage 1.  A small, fast model (e.g. ~claude-haiku-4-5-20251001~) is recommended since the task is simple classification.  When ~nil~ (the default), it uses ~gptel-model~.
+
+The user option ~claude-log-search-backend~ specifies the =gptel= backend for stage 2 (selection and narrative).  When ~nil~ (the default), the backend is inferred from ~claude-log-search-model~ if set, otherwise it falls back to ~gptel-backend~.
+
+The user option ~claude-log-search-model~ specifies the model for stage 2.  This model receives all filtered session summaries and must reason over them, so a more capable model may produce better results.  When ~nil~ (the default), it uses ~gptel-model~.
+
+The user option ~claude-log-search-budget~ sets a per-request cost threshold as a =(TYPE . LIMIT)= cons cell, where =TYPE= is either ~tokens~ or ~dollars~.  Before stage 2 sends the filtered summaries to the LLM, the package estimates the prompt's token count (heuristically, one token per four characters).  If the estimate exceeds the limit, the user is asked to confirm with ~y-or-n-p~.  The default value is ~(tokens . 50000)~.
+
+In ~dollars~ mode, cost estimation requires the =gptel-plus= package.  If =gptel-plus= is not available, the budget is not enforced and a warning is displayed.  Dollar estimates use the model's input pricing from =gptel-plus= to convert the estimated token count to a dollar amount.
+
 * Commands
 :PROPERTIES:
 :CUSTOM_ID: h:commands
@@ -329,6 +355,26 @@ After writing custom-title entries, the cached JSONL file sizes in the index are
 
 The command reports how many sessions were renamed, how many were skipped, and how many lacked a summary.
 
+** AI search
+:PROPERTIES:
+:CUSTOM_ID: h:ai-search
+:END:
+
+#+findex: claude-log-search
+#+findex: claude-log-search-follow-link
+
+The command ~claude-log-search~ searches your session history using natural language.  It prompts for a query string (e.g., "how did I implement the caching layer?" or "conversations about authentication in my web app last month") and uses a two-stage LLM pipeline to find relevant sessions.
+
+*Stage 1: scope narrowing.*  The query, along with a summary of the archive's metadata (project names with session counts, date range), is sent to a scope-narrowing model.  This model returns structured JSON specifying which projects and date range to include.  If the query does not mention a specific project or timeframe, all sessions are included.  The model and backend for this stage are configured via ~claude-log-search-scope-model~ and ~claude-log-search-scope-backend~ ([[#h:ai-search-options][AI search options]]).
+
+*Stage 2: selection and narrative.*  The filtered session summaries (one-line and paragraph, from ~claude-log-summarize-sessions~) are sent to a selection model along with the original query.  This model produces a Markdown narrative explaining which sessions are relevant and why, with inline links to specific sessions.  If more than 100 sessions pass the scope filter, only the 100 most recent are sent.  The model and backend for this stage are configured via ~claude-log-search-model~ and ~claude-log-search-backend~ ([[#h:ai-search-options][AI search options]]).
+
+The result is displayed in a =*claude-log-search*= buffer in ~claude-log-search-mode~ ([[#h:claude-log-search-mode][~claude-log-search-mode~]]).  Session references in the narrative are rendered as clickable links.  Pressing =RET= or clicking on a link opens the corresponding rendered session log.
+
+Before starting, the command checks for unsummarized sessions.  If any exist, it warns the user that those sessions will be excluded and asks for confirmation.  If no sessions have summaries at all, the command aborts with a message to run ~claude-log-summarize-sessions~ first ([[#h:summary-generation][Summary generation]]).
+
+Before stage 2, the estimated token cost is compared against ~claude-log-search-budget~ ([[#h:ai-search-options][AI search options]]).  If the estimate exceeds the threshold, the user is asked to confirm.
+
 ** Session resumption
 :PROPERTIES:
 :CUSTOM_ID: h:session-resumption
@@ -368,6 +414,22 @@ The full keymap is:
 | =?=   | ~claude-log-menu~                 | Open the transient menu                 |
 | =q=   | ~quit-window~                     | Close the buffer                        |
 
+** ~claude-log-search-mode~
+:PROPERTIES:
+:CUSTOM_ID: h:claude-log-search-mode
+:END:
+
+#+findex: claude-log-search-mode
+
+~claude-log-search-mode~ is the major mode used for the =*claude-log-search*= result buffer.  It derives from ~markdown-view-mode~, providing Markdown fontification in a read-only buffer.  Session references in the LLM's narrative are replaced with clickable links: pressing =RET= or clicking on them opens the corresponding rendered session log via ~claude-log-search-follow-link~.
+
+The keymap is minimal:
+
+| Key   | Command                           | Description                       |
+|-------+-----------------------------------+-----------------------------------|
+| =RET= | ~claude-log-search-follow-link~   | Open the session link at point    |
+| =q=   | ~quit-window~                     | Close the buffer                  |
+
 ** Transient menu
 :PROPERTIES:
 :CUSTOM_ID: h:transient-menu
@@ -376,6 +438,8 @@ The full keymap is:
 #+findex: claude-log-menu
 
 The command ~claude-log-menu~ opens a transient menu that groups all ~claude-log~ commands into four columns: Open, Sync & AI, Navigate (shown only inside a ~claude-log-mode~ buffer), and Settings.  The keybinding is =?= in ~claude-log-mode~.  The menu is also available globally via its autoload, so you can bind it to a key of your choice outside of ~claude-log-mode~.
+
+The Sync & AI column includes the ~claude-log-search~ command, bound to =/=.
 
 * How it works
 :PROPERTIES:
