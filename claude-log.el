@@ -2205,28 +2205,45 @@ Session references are clickable links that open the rendered log."
       (set-buffer-modified-p nil))
     (pop-to-buffer buf)))
 
+(defconst claude-log--uuid-regexp
+  "[0-9a-f]\\{8\\}-[0-9a-f]\\{4\\}-[0-9a-f]\\{4\\}-[0-9a-f]\\{4\\}-[0-9a-f]\\{12\\}"
+  "Regexp matching a UUID.")
+
 (defun claude-log--search-buttonize-links ()
-  "Replace markdown links to session UUIDs with clickable buttons.
-Scans the buffer for `[text](UUID)' patterns and replaces each
-with TEXT bearing text properties that make it a clickable link."
+  "Make session UUIDs in the buffer clickable.
+First pass: replace markdown links `[text](UUID)' with clickable TEXT.
+Second pass: buttonize any remaining bare UUIDs."
   (save-excursion
+    ;; Pass 1: markdown links [desc](UUID) — work backward.
     (goto-char (point-max))
-    ;; Work backward to avoid invalidating match positions.
-    (while (re-search-backward
-            "\\[\\([^]]+\\)](\\([0-9a-f]\\{8\\}-[0-9a-f]\\{4\\}-[0-9a-f]\\{4\\}-[0-9a-f]\\{4\\}-[0-9a-f]\\{12\\}\\))"
-            nil t)
-      (let ((desc (match-string 1))
-            (sid (match-string 2))
-            (beg (match-beginning 0))
-            (end (match-end 0)))
-        (delete-region beg end)
-        (goto-char beg)
-        (insert (propertize desc
-                            'claude-log-search-session-id sid
-                            'face 'link
-                            'mouse-face 'highlight
-                            'help-echo (format "mouse-1: open session %s" sid)
-                            'keymap claude-log-search-link-map))))))
+    (let ((md-re (concat "\\[\\([^]]+\\)](\\(" claude-log--uuid-regexp "\\))")))
+      (while (re-search-backward md-re nil t)
+        (let ((desc (match-string 1))
+              (sid (match-string 2))
+              (beg (match-beginning 0))
+              (end (match-end 0)))
+          (delete-region beg end)
+          (goto-char beg)
+          (insert (claude-log--search-make-link desc sid)))))
+    ;; Pass 2: bare UUIDs not already buttonized — work backward.
+    (goto-char (point-max))
+    (while (re-search-backward claude-log--uuid-regexp nil t)
+      (unless (get-text-property (match-beginning 0) 'claude-log-search-session-id)
+        (let ((sid (match-string 0))
+              (beg (match-beginning 0))
+              (end (match-end 0)))
+          (delete-region beg end)
+          (goto-char beg)
+          (insert (claude-log--search-make-link sid sid)))))))
+
+(defun claude-log--search-make-link (text session-id)
+  "Return TEXT propertized as a clickable link to SESSION-ID."
+  (propertize text
+              'claude-log-search-session-id session-id
+              'face 'link
+              'mouse-face 'highlight
+              'help-echo (format "mouse-1: open session %s" session-id)
+              'keymap claude-log-search-link-map))
 
 (defun claude-log-search-follow-link ()
   "Open the session log for the link at point."
