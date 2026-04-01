@@ -439,7 +439,7 @@ The keymap is minimal:
 
 The command ~claude-log-menu~ opens a transient menu that groups all ~claude-log~ commands into four columns: Open, Sync & AI, Navigate (shown only inside a ~claude-log-mode~ buffer), and Settings.  The keybinding is =?= in ~claude-log-mode~.  The menu is also available globally via its autoload, so you can bind it to a key of your choice outside of ~claude-log-mode~.
 
-The Sync & AI column includes the ~claude-log-search~ command, bound to =/=.
+The Open column includes ~claude-log-resume-session~ (bound to =r=), which resumes the session displayed in the current buffer in Claude Code.  The Sync & AI column includes the ~claude-log-search~ command, bound to =/=.
 
 The Settings column displays the current value of each option (e.g., ~collapsed~, ~on~, ~off~) highlighted with the ~transient-value~ face, matching the convention used by =magit= and other transient-based menus.  In the Navigate column, =G= refreshes the buffer; in the Settings column, =g= toggles grouping by project.
 

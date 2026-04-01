@@ -2663,7 +2663,8 @@ directory or to `history.jsonl'."
    ("l" "Open latest" claude-log-open-latest)
    ("f" "Open file" claude-log-open-file)
    ("d" "Open rendered directory" claude-log-open-rendered-directory)
-   ("." "Open session at point" claude-log-open-session-at-point)]
+   ("." "Open session at point" claude-log-open-session-at-point)
+   ("r" "Resume session" claude-log-resume-session)]
   ["Sync & AI"
    ("S" "Sync all" claude-log-sync-all)
    ("s" "Summarize sessions" claude-log-summarize-sessions)
@@ -2678,8 +2679,7 @@ directory or to `history.jsonl'."
    ("C" "Collapse all tools" claude-log-collapse-all-tools)
    ("E" "Expand all" claude-log-expand-all)
    ("G" "Refresh" claude-log-refresh)
-   ("w" "Copy turn" claude-log-copy-turn)
-   ("r" "Resume session" claude-log-resume-session)]
+   ("w" "Copy turn" claude-log-copy-turn)]
   ["Settings"
    ("t" claude-log-cycle-show-thinking)
    ("o" claude-log-cycle-show-tools)
