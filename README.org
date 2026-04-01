@@ -441,6 +441,8 @@ The command ~claude-log-menu~ opens a transient menu that groups all ~claude-log
 
 The Sync & AI column includes the ~claude-log-search~ command, bound to =/=.
 
+The Settings column displays the current value of each option (e.g., ~collapsed~, ~on~, ~off~) highlighted with the ~transient-value~ face, matching the convention used by =magit= and other transient-based menus.  In the Navigate column, =G= refreshes the buffer; in the Settings column, =g= toggles grouping by project.
+
 * How it works
 :PROPERTIES:
 :CUSTOM_ID: h:how-it-works

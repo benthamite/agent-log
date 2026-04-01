@@ -2596,7 +2596,9 @@ directory or to `history.jsonl'."
 (transient-define-suffix claude-log-cycle-show-thinking ()
   "Cycle `claude-log-show-thinking' through hidden → collapsed → visible."
   :description (lambda ()
-                 (format "Show thinking: %s" claude-log-show-thinking))
+                 (format "Show thinking: %s"
+                         (propertize (symbol-name claude-log-show-thinking)
+                                     'face 'transient-value)))
   :transient t
   (interactive)
   (setq claude-log-show-thinking
@@ -2611,7 +2613,9 @@ directory or to `history.jsonl'."
 (transient-define-suffix claude-log-cycle-show-tools ()
   "Cycle `claude-log-show-tools' through hidden → collapsed → visible."
   :description (lambda ()
-                 (format "Show tools: %s" claude-log-show-tools))
+                 (format "Show tools: %s"
+                         (propertize (symbol-name claude-log-show-tools)
+                                     'face 'transient-value)))
   :transient t
   (interactive)
   (setq claude-log-show-tools
@@ -2627,7 +2631,8 @@ directory or to `history.jsonl'."
   "Toggle `claude-log-live-update'."
   :description (lambda ()
                  (format "Live update: %s"
-                         (if claude-log-live-update "on" "off")))
+                         (propertize (if claude-log-live-update "on" "off")
+                                     'face 'transient-value)))
   :transient t
   (interactive)
   (setq claude-log-live-update (not claude-log-live-update))
@@ -2637,7 +2642,8 @@ directory or to `history.jsonl'."
   "Toggle `claude-log-group-by-project'."
   :description (lambda ()
                  (format "Group by project: %s"
-                         (if claude-log-group-by-project "on" "off")))
+                         (propertize (if claude-log-group-by-project "on" "off")
+                                     'face 'transient-value)))
   :transient t
   (interactive)
   (setq claude-log-group-by-project (not claude-log-group-by-project))
@@ -2666,14 +2672,14 @@ directory or to `history.jsonl'."
    ("TAB" "Toggle section" claude-log-toggle-section)
    ("C" "Collapse all tools" claude-log-collapse-all-tools)
    ("E" "Expand all" claude-log-expand-all)
-   ("g" "Refresh" claude-log-refresh)
+   ("G" "Refresh" claude-log-refresh)
    ("w" "Copy turn" claude-log-copy-turn)
    ("r" "Resume session" claude-log-resume-session)]
   ["Settings"
    ("t" claude-log-cycle-show-thinking)
    ("o" claude-log-cycle-show-tools)
    ("u" claude-log-toggle-live-update)
-   ("G" claude-log-toggle-group-by-project)])
+   ("g" claude-log-toggle-group-by-project)])
 
 (provide 'claude-log)
 ;;; claude-log.el ends here
