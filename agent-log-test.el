@@ -1307,5 +1307,388 @@ Only truly unparseable inputs that signal errors return nil."
       (should (assq 'display-sort-function (cdr meta)))
       (should (assq 'cycle-sort-function (cdr meta))))))
 
+;;;;; Codex backend
+
+(require 'agent-log-codex)
+
+(defvar agent-log-test--codex-backend agent-log-codex--instance
+  "Codex backend instance for use in tests.")
+
+;;;;;; Entry normalization
+
+(ert-deftest agent-log-test-codex-normalize/session-meta ()
+  "Normalizes session_meta to a progress entry."
+  (let* ((raw (list :type "session_meta"
+                    :timestamp "2026-04-01T18:00:00Z"
+                    :payload (list :id "abc" :cwd "/tmp/project"
+                                   :timestamp "2026-04-01T18:00:00Z")))
+         (result (agent-log--normalize-entries agent-log-test--codex-backend
+                                               (list raw))))
+    (should (= (length result) 1))
+    (should (equal (plist-get (car result) :type) "progress"))
+    (should (equal (plist-get (car result) :cwd) "/tmp/project"))))
+
+(ert-deftest agent-log-test-codex-normalize/user-message ()
+  "Normalizes a user message response_item."
+  (let* ((raw (list :type "response_item"
+                    :timestamp "2026-04-01T18:00:00Z"
+                    :payload (list :type "message" :role "user"
+                                   :content (list (list :type "input_text"
+                                                        :text "Fix the bug")))))
+         (result (agent-log--normalize-entries agent-log-test--codex-backend
+                                               (list raw))))
+    (should (= (length result) 1))
+    (let ((entry (car result)))
+      (should (equal (plist-get entry :type) "user"))
+      (should (equal (plist-get (plist-get entry :message) :role) "user"))
+      (let ((content (plist-get (plist-get entry :message) :content)))
+        (should (equal (plist-get (car content) :type) "text"))
+        (should (equal (plist-get (car content) :text) "Fix the bug"))))))
+
+(ert-deftest agent-log-test-codex-normalize/assistant-message ()
+  "Normalizes an assistant message response_item."
+  (let* ((raw (list :type "response_item"
+                    :timestamp "2026-04-01T18:00:00Z"
+                    :payload (list :type "message" :role "assistant"
+                                   :content (list (list :type "output_text"
+                                                        :text "I'll fix it"))
+                                   :phase "commentary")))
+         (result (agent-log--normalize-entries agent-log-test--codex-backend
+                                               (list raw))))
+    (should (= (length result) 1))
+    (let ((entry (car result)))
+      (should (equal (plist-get entry :type) "assistant"))
+      (let ((content (plist-get (plist-get entry :message) :content)))
+        (should (equal (plist-get (car content) :text) "I'll fix it"))))))
+
+(ert-deftest agent-log-test-codex-normalize/developer-message-skipped ()
+  "Skips developer messages during normalization."
+  (let* ((raw (list :type "response_item"
+                    :timestamp "2026-04-01T18:00:00Z"
+                    :payload (list :type "message" :role "developer"
+                                   :content (list (list :type "input_text"
+                                                        :text "system instructions")))))
+         (result (agent-log--normalize-entries agent-log-test--codex-backend
+                                               (list raw))))
+    (should (null result))))
+
+(ert-deftest agent-log-test-codex-normalize/function-call ()
+  "Normalizes a function_call to a tool_use entry."
+  (let* ((raw (list :type "response_item"
+                    :timestamp "2026-04-01T18:00:00Z"
+                    :payload (list :type "function_call"
+                                   :name "exec_command"
+                                   :arguments "{\"cmd\":\"ls\",\"workdir\":\"/tmp\"}"
+                                   :call_id "call_123")))
+         (result (agent-log--normalize-entries agent-log-test--codex-backend
+                                               (list raw))))
+    (should (= (length result) 1))
+    (let* ((entry (car result))
+           (content (plist-get (plist-get entry :message) :content))
+           (tool-use (car content)))
+      (should (equal (plist-get entry :type) "assistant"))
+      (should (equal (plist-get tool-use :type) "tool_use"))
+      (should (equal (plist-get tool-use :name) "exec_command"))
+      (should (equal (plist-get (plist-get tool-use :input) :cmd) "ls")))))
+
+(ert-deftest agent-log-test-codex-normalize/function-call-output ()
+  "Normalizes a function_call_output to a tool_result entry."
+  (let* ((raw (list :type "response_item"
+                    :timestamp "2026-04-01T18:00:00Z"
+                    :payload (list :type "function_call_output"
+                                   :call_id "call_123"
+                                   :output "file.txt")))
+         (result (agent-log--normalize-entries agent-log-test--codex-backend
+                                               (list raw))))
+    (should (= (length result) 1))
+    (let* ((entry (car result))
+           (content (plist-get (plist-get entry :message) :content))
+           (tool-result (car content)))
+      (should (equal (plist-get entry :type) "user"))
+      (should (equal (plist-get tool-result :type) "tool_result"))
+      (should (equal (plist-get tool-result :content) "file.txt")))))
+
+(ert-deftest agent-log-test-codex-normalize/event-msg-skipped ()
+  "Skips event_msg entries during normalization."
+  (let* ((raw (list :type "event_msg"
+                    :timestamp "2026-04-01T18:00:00Z"
+                    :payload (list :type "task_started")))
+         (result (agent-log--normalize-entries agent-log-test--codex-backend
+                                               (list raw))))
+    (should (null result))))
+
+(ert-deftest agent-log-test-codex-normalize/turn-context-skipped ()
+  "Skips turn_context entries during normalization."
+  (let* ((raw (list :type "turn_context"
+                    :timestamp "2026-04-01T18:00:00Z"
+                    :payload (list :turn_id "t1" :cwd "/tmp")))
+         (result (agent-log--normalize-entries agent-log-test--codex-backend
+                                               (list raw))))
+    (should (null result))))
+
+(ert-deftest agent-log-test-codex-normalize/system-xml-filtered ()
+  "Filters out system XML text items during normalization."
+  (let* ((raw (list :type "response_item"
+                    :timestamp "2026-04-01T18:00:00Z"
+                    :payload (list :type "message" :role "user"
+                                   :content (list (list :type "input_text"
+                                                        :text "<environment_context>\n  <cwd>/tmp</cwd>\n</environment_context>")))))
+         (result (agent-log--normalize-entries agent-log-test--codex-backend
+                                               (list raw))))
+    ;; The entry should be skipped entirely since all text was system XML.
+    (should (null result))))
+
+(ert-deftest agent-log-test-codex-normalize/mixed-system-and-user-text ()
+  "Keeps user text when mixed with system XML in the same message."
+  (let* ((raw (list :type "response_item"
+                    :timestamp "2026-04-01T18:00:00Z"
+                    :payload (list :type "message" :role "user"
+                                   :content (list (list :type "input_text"
+                                                        :text "<environment_context>\n  <cwd>/tmp</cwd>\n</environment_context>")
+                                                  (list :type "input_text"
+                                                        :text "Fix the bug")))))
+         (result (agent-log--normalize-entries agent-log-test--codex-backend
+                                               (list raw))))
+    (should (= (length result) 1))
+    (let* ((content (plist-get (plist-get (car result) :message) :content)))
+      ;; Only the non-system text should remain.
+      (should (= (length content) 1))
+      (should (equal (plist-get (car content) :text) "Fix the bug")))))
+
+;;;;;; Turn merging
+
+(ert-deftest agent-log-test-codex-normalize/consecutive-assistant-merged ()
+  "Merges consecutive assistant entries into a single turn."
+  (let* ((entries (list (list :type "response_item"
+                              :timestamp "2026-04-01T18:00:00Z"
+                              :payload (list :type "message" :role "assistant"
+                                             :content (list (list :type "output_text"
+                                                                  :text "Checking..."))))
+                        (list :type "response_item"
+                              :timestamp "2026-04-01T18:00:01Z"
+                              :payload (list :type "function_call"
+                                             :name "exec_command"
+                                             :arguments "{\"cmd\":\"ls\"}"
+                                             :call_id "call_1"))))
+         (result (agent-log--normalize-entries agent-log-test--codex-backend entries)))
+    ;; Should merge into a single assistant turn.
+    (should (= (length result) 1))
+    (let* ((entry (car result))
+           (content (plist-get (plist-get entry :message) :content)))
+      (should (equal (plist-get entry :type) "assistant"))
+      ;; Should have both the text and the tool_use.
+      (should (= (length content) 2))
+      (should (equal (plist-get (car content) :type) "text"))
+      (should (equal (plist-get (cadr content) :type) "tool_use")))))
+
+(ert-deftest agent-log-test-codex-normalize/user-assistant-not-merged ()
+  "Does not merge user and assistant entries."
+  (let* ((entries (list (list :type "response_item"
+                              :timestamp "2026-04-01T18:00:00Z"
+                              :payload (list :type "message" :role "user"
+                                             :content (list (list :type "input_text"
+                                                                  :text "Hello"))))
+                        (list :type "response_item"
+                              :timestamp "2026-04-01T18:00:01Z"
+                              :payload (list :type "message" :role "assistant"
+                                             :content (list (list :type "output_text"
+                                                                  :text "Hi"))))))
+         (result (agent-log--normalize-entries agent-log-test--codex-backend entries)))
+    (should (= (length result) 2))
+    (should (equal (plist-get (car result) :type) "user"))
+    (should (equal (plist-get (cadr result) :type) "assistant"))))
+
+;;;;;; Conversation filtering
+
+(ert-deftest agent-log-test-codex-conversation-entry-p/user ()
+  "Recognizes user entries."
+  (let ((entry (list :type "user" :message (list :content "hello"))))
+    (should (agent-log--conversation-entry-p agent-log-test--codex-backend entry))))
+
+(ert-deftest agent-log-test-codex-conversation-entry-p/assistant ()
+  "Recognizes assistant entries."
+  (let ((entry (list :type "assistant" :message (list :content "hi"))))
+    (should (agent-log--conversation-entry-p agent-log-test--codex-backend entry))))
+
+(ert-deftest agent-log-test-codex-conversation-entry-p/progress-excluded ()
+  "Excludes progress entries."
+  (let ((entry (list :type "progress")))
+    (should-not (agent-log--conversation-entry-p agent-log-test--codex-backend entry))))
+
+(ert-deftest agent-log-test-codex-system-entry-p/environment-context ()
+  "Detects <environment_context> system tag."
+  (let ((entry (list :message (list :content "<environment_context><cwd>/tmp</cwd></environment_context>"))))
+    (should (agent-log--system-entry-p agent-log-test--codex-backend entry))))
+
+(ert-deftest agent-log-test-codex-system-entry-p/turn-aborted ()
+  "Detects <turn_aborted> system tag."
+  (let ((entry (list :message (list :content "<turn_aborted>interrupted</turn_aborted>"))))
+    (should (agent-log--system-entry-p agent-log-test--codex-backend entry))))
+
+(ert-deftest agent-log-test-codex-system-entry-p/normal-message ()
+  "Does not flag normal user messages as system."
+  (let ((entry (list :message (list :content "Fix the bug"))))
+    (should-not (agent-log--system-entry-p agent-log-test--codex-backend entry))))
+
+(ert-deftest agent-log-test-codex-system-entry-p/list-content-all-system ()
+  "Detects system entries with list content where all items are system XML."
+  (let ((entry (list :message
+                     (list :content
+                           (list (list :type "text"
+                                       :text "<environment_context><cwd>/tmp</cwd></environment_context>")
+                                 (list :type "text"
+                                       :text "<permissions instructions>...</permissions>"))))))
+    (should (agent-log--system-entry-p agent-log-test--codex-backend entry))))
+
+(ert-deftest agent-log-test-codex-system-entry-p/list-content-mixed ()
+  "Non-system entry when list content has a non-system text item."
+  (let ((entry (list :message
+                     (list :content
+                           (list (list :type "text"
+                                       :text "<environment_context><cwd>/tmp</cwd></environment_context>")
+                                 (list :type "text"
+                                       :text "Fix the bug"))))))
+    (should-not (agent-log--system-entry-p agent-log-test--codex-backend entry))))
+
+;;;;;; First user text
+
+(ert-deftest agent-log-test-codex-first-user-text/basic ()
+  "Extracts first genuine user text after normalization."
+  (let* ((entries (list (list :type "user"
+                              :message (list :content
+                                             (list (list :type "text"
+                                                         :text "Fix the bug")))))))
+    (should (equal (agent-log--first-user-text agent-log-test--codex-backend entries)
+                   "Fix the bug"))))
+
+(ert-deftest agent-log-test-codex-first-user-text/skips-system ()
+  "Skips system user entries to find first genuine text."
+  (let* ((entries (list (list :type "user"
+                              :message (list :content "<environment_context>...</environment_context>"))
+                        (list :type "user"
+                              :message (list :content
+                                             (list (list :type "text"
+                                                         :text "Real question")))))))
+    (should (equal (agent-log--first-user-text agent-log-test--codex-backend entries)
+                   "Real question"))))
+
+;;;;;; Tool input summaries
+
+(ert-deftest agent-log-test-codex-summarize-tool/exec-command ()
+  "Summarizes exec_command tool input."
+  (let ((result (agent-log--summarize-tool-input-by-name
+                 agent-log-test--codex-backend
+                 "exec_command"
+                 (list :cmd "ls -la" :workdir "/tmp"))))
+    (should (string-match-p "ls -la" result))
+    (should (string-match-p "/tmp" result))))
+
+(ert-deftest agent-log-test-codex-summarize-tool/exec-command-no-workdir ()
+  "Summarizes exec_command without workdir."
+  (let ((result (agent-log--summarize-tool-input-by-name
+                 agent-log-test--codex-backend
+                 "exec_command"
+                 (list :cmd "pwd"))))
+    (should (string-match-p "pwd" result))
+    (should-not (string-match-p "workdir" result))))
+
+(ert-deftest agent-log-test-codex-summarize-tool/unknown-tool-empty ()
+  "Returns empty string for unknown tools."
+  (let ((result (agent-log--summarize-tool-input-by-name
+                 agent-log-test--codex-backend
+                 "unknown_tool"
+                 (list :foo "bar"))))
+    (should (string-empty-p result))))
+
+;;;;;; Message text extraction
+
+(ert-deftest agent-log-test-codex-extract-message-text/string ()
+  "Extracts text from string content."
+  (should (equal (agent-log--extract-message-text
+                  agent-log-test--codex-backend "hello")
+                 "hello")))
+
+(ert-deftest agent-log-test-codex-extract-message-text/list ()
+  "Extracts text from list content, ignoring tool_use items."
+  (let ((content (list (list :type "text" :text "Fix it")
+                       (list :type "tool_use" :name "exec_command"))))
+    (should (equal (agent-log--extract-message-text
+                    agent-log-test--codex-backend content)
+                   "Fix it"))))
+
+;;;;;; Session file index
+
+(ert-deftest agent-log-test-codex-session-id-regexp ()
+  "Extracts session UUID from Codex rollout filename."
+  (let ((filename "rollout-2026-03-29T08-34-07-019d395f-687b-73c2-a8f5-384bdafbc3e0.jsonl"))
+    (should (string-match agent-log-codex--session-id-regexp filename))
+    (should (equal (match-string 1 filename)
+                   "019d395f-687b-73c2-a8f5-384bdafbc3e0"))))
+
+;;;;;; Content helpers
+
+(ert-deftest agent-log-test-codex-content-non-empty-p/string ()
+  "Non-empty string is truthy."
+  (should (agent-log-codex--content-non-empty-p "hello")))
+
+(ert-deftest agent-log-test-codex-content-non-empty-p/empty-string ()
+  "Empty or blank string is falsy."
+  (should-not (agent-log-codex--content-non-empty-p ""))
+  (should-not (agent-log-codex--content-non-empty-p "  ")))
+
+(ert-deftest agent-log-test-codex-content-non-empty-p/list ()
+  "Non-empty list is truthy, empty list is falsy."
+  (should (agent-log-codex--content-non-empty-p '((:type "text" :text "hi"))))
+  (should-not (agent-log-codex--content-non-empty-p nil)))
+
+(ert-deftest agent-log-test-codex-parse-arguments/valid ()
+  "Parses valid JSON arguments string."
+  (let ((result (agent-log-codex--parse-arguments "{\"cmd\":\"ls\"}")))
+    (should (equal (plist-get result :cmd) "ls"))))
+
+(ert-deftest agent-log-test-codex-parse-arguments/invalid ()
+  "Returns nil for invalid JSON."
+  (should (null (agent-log-codex--parse-arguments "not json"))))
+
+(ert-deftest agent-log-test-codex-parse-arguments/nil ()
+  "Returns nil for nil input."
+  (should (null (agent-log-codex--parse-arguments nil))))
+
+;;;;;; Web search and custom tool normalization
+
+(ert-deftest agent-log-test-codex-normalize/web-search ()
+  "Normalizes web_search_call to a tool_use entry."
+  (let* ((raw (list :type "response_item"
+                    :timestamp "2026-04-01T18:00:00Z"
+                    :payload (list :type "web_search_call"
+                                   :status "completed"
+                                   :action (list :type "search"
+                                                 :query "emacs codex integration"))))
+         (result (agent-log--normalize-entries agent-log-test--codex-backend
+                                               (list raw))))
+    (should (= (length result) 1))
+    (let* ((entry (car result))
+           (content (plist-get (plist-get entry :message) :content))
+           (tool-use (car content)))
+      (should (equal (plist-get tool-use :name) "WebSearch"))
+      (should (equal (plist-get (plist-get tool-use :input) :query)
+                     "emacs codex integration")))))
+
+(ert-deftest agent-log-test-codex-normalize/custom-tool-call ()
+  "Normalizes custom_tool_call to a tool_use entry."
+  (let* ((raw (list :type "response_item"
+                    :timestamp "2026-04-01T18:00:00Z"
+                    :payload (list :type "custom_tool_call"
+                                   :name "apply_patch"
+                                   :input "*** Begin Patch\n*** Add File: /tmp/test.txt"
+                                   :call_id "call_456")))
+         (result (agent-log--normalize-entries agent-log-test--codex-backend
+                                               (list raw))))
+    (should (= (length result) 1))
+    (let* ((entry (car result))
+           (content (plist-get (plist-get entry :message) :content))
+           (tool-use (car content)))
+      (should (equal (plist-get tool-use :name) "apply_patch")))))
+
 (provide 'agent-log-test)
 ;;; agent-log-test.el ends here

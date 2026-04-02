@@ -403,7 +403,7 @@ Before stage 2, the estimated token cost is compared against ~agent-log-search-b
 
 #+findex: agent-log-resume-session
 
-The command ~agent-log-resume-session~ resumes the session displayed in the current buffer in the coding agent.  The command extracts the session ID from the buffer (either from the buffer-local variable or from the front-matter comment) and dispatches to the buffer's backend via the ~agent-log--resume-session~ generic function.  For Claude Code sessions, this requires the =claude-code= package and passes the session ID with the =--resume= flag, starting in the session's project directory when possible.  The keybinding is =r= in ~agent-log-mode~.
+The command ~agent-log-resume-session~ resumes the session displayed in the current buffer in the coding agent.  The command extracts the session ID from the buffer (either from the buffer-local variable or from the front-matter comment) and dispatches to the buffer's backend via the ~agent-log--resume-session~ generic function.  For Claude Code sessions, this requires the =claude-code= package and passes the session ID with the =--resume= flag, starting in the session's project directory when possible.  For Codex sessions, the command runs ~codex --resume~ in a compilation buffer, using the session's project directory as the default directory.  The keybinding is =r= in ~agent-log-mode~.
 
 * ~agent-log-mode~
 :PROPERTIES:
@@ -476,19 +476,38 @@ The package uses a generic interface to support multiple AI coding agents.  The 
 
 Backend files are loaded lazily.  When a backend is first accessed (e.g. during ~agent-log-browse-sessions~), the package calls ~require~ on the backend's feature name and the backend registers a singleton instance in a global registry.  The registry maps backend key symbols to struct instances, so all dispatch goes through the struct's type.
 
-The rendering pipeline, session browser, live update mechanism, AI summaries, and AI search all operate on a normalized intermediate representation.  Each backend's ~agent-log--normalize-entries~ method converts its native JSONL format into canonical plists that the generic code expects.  Core functions such as ~agent-log--render-to-file~ and ~agent-log--extract-conversation-text~ receive a backend instance and thread it through to generic dispatch points (conversation filtering, entry classification, tool summarization, text extraction).  The convenience function ~agent-log--read-all-sessions~ returns sessions from the first active backend; individual buffers store their backend in the buffer-local variable ~agent-log--backend~, set when a session is opened.  This means the core of the package is backend-agnostic: adding a new backend requires only implementing the generic functions, with no changes to the core file.
+The rendering pipeline, session browser, live update mechanism, AI summaries, and AI search all operate on a normalized intermediate representation.  Each backend's ~agent-log--normalize-entries~ method converts its native JSONL format into canonical plists that the generic code expects.  Core functions such as ~agent-log--render-to-file~ and ~agent-log--extract-conversation-text~ receive a backend instance and thread it through to generic dispatch points (conversation filtering, entry classification, tool summarization, text extraction).  The convenience function ~agent-log--read-all-sessions~ returns merged sessions from all active backends, sorted most-recent-first; individual buffers store their backend in the buffer-local variable ~agent-log--backend~, set when a session is opened.  This means the core of the package is backend-agnostic: adding a new backend requires only implementing the generic functions, with no changes to the core file.
 
 ** Data sources
 :PROPERTIES:
 :CUSTOM_ID: h:data-sources
 :END:
 
-The Claude Code backend reads conversation data from two places:
+Each backend reads conversation data from a different directory layout.
+
+*** Claude Code
+:PROPERTIES:
+:CUSTOM_ID: h:data-sources-claude-code
+:END:
+
+The Claude Code backend reads from two places:
 
 1. =~/.claude/history.jsonl=: a global index mapping session IDs to projects and timestamps.
 2. =~/.claude/projects/<encoded-path>/<uuid>.jsonl=: one file per session, containing all messages as JSON lines.
 
 The encoded path replaces =/=, =.=, and space characters with =-=.  The package tries both the expanded path and its ~file-truename~ when locating a session directory, which handles symlinked project paths.
+
+*** Codex
+:PROPERTIES:
+:CUSTOM_ID: h:data-sources-codex
+:END:
+
+The Codex backend reads from:
+
+1. =~/.codex/history.jsonl=: a global index with one line per user message, containing the session ID, a Unix epoch timestamp, and the message text.
+2. =~/.codex/sessions/YYYY/MM/DD/rollout-<date>-<uuid>.jsonl=: one file per session, organized by date in a nested directory tree.
+
+Each line in a Codex session file is an envelope ~{timestamp, type, payload}~.  The ~type~ field determines how the entry is processed: ~session_meta~ entries provide session metadata (working directory, model, CLI version); ~response_item~ entries carry the conversation content (user and assistant messages, function calls and their outputs, web searches, reasoning blocks); ~event_msg~ and ~turn_context~ entries are internal bookkeeping and are skipped during rendering.  The normalization step converts this envelope format to the canonical flat representation used by the rendering pipeline.
 
 ** Rendered directory structure
 :PROPERTIES:
@@ -514,7 +533,7 @@ Each =.md= file contains HTML-comment front matter (session ID, source path, ren
 :CUSTOM_ID: h:rendering-pipeline
 :END:
 
-Each JSONL entry has a ~type~ field: ~user~, ~assistant~, ~progress~, ~system~, or ~file-history-snapshot~.  The package filters entries via the backend's ~agent-log--filter-conversation~ and ~agent-log--conversation-entry-p~ methods, which select ~user~ and ~assistant~ entries while excluding system-generated messages.  For Claude Code, system entries are those whose content starts with known XML tags such as =<local-command-stdout>= or =<command-name>=.
+The rendering pipeline operates in three stages: parse, normalize, filter.  First, the JSONL file is parsed into raw plists.  Then each backend's ~agent-log--normalize-entries~ method converts the raw entries to a canonical format (for Claude Code this is a no-op since the native format is already canonical; for Codex it unwraps the envelope, converts content types, strips system XML, and merges consecutive entries of the same role into single turns).  Finally, the backend's ~agent-log--filter-conversation~ and ~agent-log--conversation-entry-p~ methods select ~user~ and ~assistant~ entries while excluding system-generated messages.  For Claude Code, system entries are those whose content starts with known XML tags such as =<local-command-stdout>= or =<command-name>=.  For Codex, system entries are those starting with =<environment_context>=, =<permissions>=, =<turn_aborted>=, or =<collaboration_mode>=.
 
 Filtered entries are rendered as Markdown with =##= headings for conversation turns and =####= headings for tool calls and thinking blocks.  User turns show any text content followed by tool results.  Assistant turns show thinking blocks, text content, and tool-use summaries.
 
