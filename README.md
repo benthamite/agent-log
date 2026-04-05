@@ -22,21 +22,22 @@ Key capabilities:
 ### package-vc (built-in since Emacs 30)
 
 ```emacs-lisp
-(package-vc-install "https://github.com/benthamite/agent-log")
+(use-package agent-log
+  :vc (:url "https://github.com/benthamite/agent-log"))
 ```
 
 ### Elpaca
 
 ```emacs-lisp
 (use-package agent-log
-  :ensure (agent-log :host github :repo "benthamite/agent-log"))
+  :ensure (:host github :repo "benthamite/agent-log"))
 ```
 
 ### straight.el
 
 ```emacs-lisp
-(straight-use-package
- '(agent-log :type git :host github :repo "benthamite/agent-log"))
+(use-package agent-log
+  :straight (:host github :repo "benthamite/agent-log"))
 ```
 
 ## Quick start
