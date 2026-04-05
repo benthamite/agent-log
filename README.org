@@ -251,7 +251,7 @@ In ~dollars~ mode, cost estimation requires the =gptel-plus= package.  If =gptel
 #+findex: agent-log-open-latest
 #+findex: agent-log-open-file
 #+findex: agent-log-open-session
-#+findex: agent-log-open-session-at-point
+#+findex: agent-log-open-from-session
 
 The command ~agent-log-browse-sessions~ is the primary entry point for exploring your session history.  It reads =history.jsonl=, resolves each session to its JSONL file on disk, and presents the results in a ~completing-read~ prompt.  Each candidate is formatted as:
 
@@ -271,16 +271,16 @@ The command ~agent-log-open-file~ opens a specific JSONL file by path.  It promp
 
 The command ~agent-log-open-session~ opens a session by its ID.  It prompts for the session ID interactively.
 
-The command ~agent-log-open-session-at-point~ opens the log for the Claude Code session running in the current buffer.  This command is defined in =agent-log-claude.el= and requires the =claude-code= package; the current buffer must be a Claude Code terminal buffer.  The command reads the status file that Claude Code writes to =/tmp/claude-code-status/= and uses the =transcript_path= field to locate the exact JSONL file for the session.  This uniquely identifies the session even when multiple sessions (including branches created with ~/branch~) share the same project directory.  If the status file is unavailable, it falls back to the most recently modified JSONL file in the project's session directory, or to searching =history.jsonl=.  This lets you quickly jump from an active Claude Code session to its rendered log.
+The command ~agent-log-open-from-session~ opens the log for the Claude Code session running in the current buffer.  This command is defined in =agent-log-claude.el= and requires the =claude-code= package; the current buffer must be a Claude Code terminal buffer.  The command reads the status file that Claude Code writes to =/tmp/claude-code-status/= and uses the =transcript_path= field to locate the exact JSONL file for the session.  This uniquely identifies the session even when multiple sessions (including branches created with ~/branch~) share the same project directory.  If the status file is unavailable, it falls back to the most recently modified JSONL file in the project's session directory, or to searching =history.jsonl=.  This lets you quickly jump from an active Claude Code session to its rendered log.
 
 ** Rendered directory
 :PROPERTIES:
 :CUSTOM_ID: h:rendered-directory
 :END:
 
-#+findex: agent-log-open-rendered-directory
+#+findex: agent-log-open-directory
 
-The command ~agent-log-open-rendered-directory~ opens the rendered Markdown directory in Dired.  Since rendered files are plain Markdown organized by project, you can use standard Emacs tools to browse, search, and manage them.  For example, you can run =consult-ripgrep= from this Dired buffer to search across all rendered sessions.
+The command ~agent-log-open-directory~ opens the rendered Markdown directory in Dired.  Since rendered files are plain Markdown organized by project, you can use standard Emacs tools to browse, search, and manage them.  For example, you can run =consult-ripgrep= from this Dired buffer to search across all rendered sessions.
 
 If the rendered directory does not yet exist, the command creates it.
 
@@ -316,12 +316,12 @@ The keybindings are =n= and =p= in ~agent-log-mode~, making it easy to step thro
 :END:
 
 #+findex: agent-log-toggle-section
-#+findex: agent-log-collapse-all-tools
+#+findex: agent-log-collapse-all
 #+findex: agent-log-expand-all
 
 The command ~agent-log-toggle-section~ toggles the visibility of the section at point.  When point is on a =####= heading (tool call, tool result, or thinking block), it collapses or expands just that section.  When point is on any other heading, it delegates to ~outline-toggle-children~.  The keybinding is =TAB=.
 
-The command ~agent-log-collapse-all-tools~ collapses all tool-use, tool-result, and thinking sections in the buffer at once.  This gives you a clean view of just the user messages and assistant text responses.  The keybinding is =C=.
+The command ~agent-log-collapse-all~ collapses all tool-use, tool-result, and thinking sections in the buffer at once.  This gives you a clean view of just the user messages and assistant text responses.  The keybinding is =C=.
 
 The command ~agent-log-expand-all~ expands all sections, removing all section overlays and showing the full content.  The keybinding is =E=.
 
@@ -430,7 +430,7 @@ The full keymap is:
 | =n=   | ~agent-log-next-turn~            | Jump to the next User/Assistant heading |
 | =p=   | ~agent-log-previous-turn~        | Jump to the previous heading            |
 | =TAB= | ~agent-log-toggle-section~       | Toggle fold of section at point         |
-| =C=   | ~agent-log-collapse-all-tools~   | Collapse all tool/thinking sections     |
+| =C=   | ~agent-log-collapse-all~         | Collapse all tool/thinking sections     |
 | =E=   | ~agent-log-expand-all~           | Expand all sections                     |
 | =g=   | ~agent-log-refresh~              | Re-render the buffer from scratch       |
 | =w=   | ~agent-log-copy-turn~            | Copy the current turn to the kill ring  |
@@ -463,9 +463,11 @@ The keymap is minimal:
 
 The command ~agent-log-menu~ opens a transient menu that arranges all ~agent-log~ commands in side-by-side columns: Open, Sync & AI, and Settings are always visible; a fourth Navigate column appears when the current buffer is in ~agent-log-mode~.  The keybinding is =?= in ~agent-log-mode~.  The menu is also available globally via its autoload, so you can bind it to a key of your choice outside of ~agent-log-mode~.
 
-The Open column includes ~agent-log-resume-session~ (bound to =r=), which resumes the session displayed in the current buffer in the coding agent.  The Sync & AI column includes the ~agent-log-search~ command, bound to =/=.
+The Open column includes ~agent-log-resume-session~ (bound to =s=), which opens the session displayed in the current log in the coding agent.  The Sync & AI column includes the ~agent-log-search~ command, bound to =/=.
 
-The Settings column displays the current value of each option (e.g., ~collapsed~, ~on~, ~off~) highlighted with the ~transient-value~ face, matching the convention used by =magit= and other transient-based menus.  In the Navigate column, =G= refreshes the buffer; in the Settings column, =g= toggles grouping by project.
+The Navigate column groups movement commands (=n=, =p= for stepping through turns), section folding (=TAB= to toggle at point, =C= to collapse all, =E= to expand all), and buffer operations (=G= to re-render, =w= to copy the current turn).  Note that the collapse and expand commands are one-shot operations on the current buffer view; the persistent per-type visibility defaults (hidden, collapsed, visible) are controlled by the Settings toggles (=-t= for thinking, =-o= for tools).
+
+The Settings column displays the current value of each option (e.g., ~collapsed~, ~on~, ~off~) highlighted with the ~transient-value~ face, matching the convention used by =magit= and other transient-based menus.
 
 * How it works
 :PROPERTIES:
