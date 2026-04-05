@@ -2433,33 +2433,33 @@ full session list and index for filtering."
 ;;;###autoload (autoload 'agent-log-menu "agent-log" nil t)
 (transient-define-prefix agent-log-menu ()
   "Transient menu for Agent Log commands."
-  ["Open"
-   ("b" "Browse sessions" agent-log-browse-sessions)
-   ("l" "Open latest" agent-log-open-latest)
-   ("f" "Open file" agent-log-open-file)
-   ("d" "Open rendered directory" agent-log-open-rendered-directory)
-   ("." "Open session at point" agent-log-open-session-at-point)
-   ("r" "Resume session" agent-log-resume-session)]
-  ["Sync & AI"
-   ("S" "Sync all" agent-log-sync-all)
-   ("s" "Summarize sessions" agent-log-summarize-sessions)
-   ("/" "AI search" agent-log-search)
-   ("R" "Rename from summaries" agent-log-rename-sessions)
-   ("x" "Stop summarizing" agent-log-stop-summarizing)]
-  ["Navigate"
-   :if (lambda () (derived-mode-p 'agent-log-mode))
-   ("n" "Next turn" agent-log-next-turn)
-   ("p" "Previous turn" agent-log-previous-turn)
-   ("TAB" "Toggle section" agent-log-toggle-section)
-   ("C" "Collapse all tools" agent-log-collapse-all-tools)
-   ("E" "Expand all" agent-log-expand-all)
-   ("G" "Refresh" agent-log-refresh)
-   ("w" "Copy turn" agent-log-copy-turn)]
-  ["Settings"
-   ("t" agent-log-cycle-show-thinking)
-   ("o" agent-log-cycle-show-tools)
-   ("u" agent-log-toggle-live-update)
-   ("g" agent-log-toggle-group-by-project)])
+  [["Open"
+    ("b" "Browse sessions" agent-log-browse-sessions)
+    ("l" "Open latest" agent-log-open-latest)
+    ("f" "Open file" agent-log-open-file)
+    ("d" "Open rendered directory" agent-log-open-rendered-directory)
+    ("." "Open session at point" agent-log-open-session-at-point)
+    ("r" "Resume session" agent-log-resume-session)]
+   ["Sync & AI"
+    ("S" "Sync all" agent-log-sync-all)
+    ("s" "Summarize sessions" agent-log-summarize-sessions)
+    ("/" "AI search" agent-log-search)
+    ("R" "Rename from summaries" agent-log-rename-sessions)
+    ("x" "Stop summarizing" agent-log-stop-summarizing)]
+   ["Navigate"
+    :if (lambda () (derived-mode-p 'agent-log-mode))
+    ("n" "Next turn" agent-log-next-turn)
+    ("p" "Previous turn" agent-log-previous-turn)
+    ("TAB" "Toggle section" agent-log-toggle-section)
+    ("C" "Collapse all tools" agent-log-collapse-all-tools)
+    ("E" "Expand all" agent-log-expand-all)
+    ("G" "Refresh" agent-log-refresh)
+    ("w" "Copy turn" agent-log-copy-turn)]
+   ["Settings"
+    ("t" agent-log-cycle-show-thinking)
+    ("o" agent-log-cycle-show-tools)
+    ("u" agent-log-toggle-live-update)
+    ("g" agent-log-toggle-group-by-project)]])
 
 (provide 'agent-log)
 ;;; agent-log.el ends here
