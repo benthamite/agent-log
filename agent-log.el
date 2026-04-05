@@ -73,7 +73,39 @@ conversations."
   (key nil :type symbol :documentation "Backend key, e.g. `claude-code'.")
   (directory nil :type string :documentation "Root configuration directory.")
   (rendered-directory nil :type string
-                      :documentation "Where rendered Markdown files go."))
+                      :documentation "Where rendered Markdown files go.")
+  (icon-svg nil :type (or string null)
+            :documentation "SVG source string for the backend icon.
+Should use \"currentColor\" for fill/stroke to inherit face colors,
+or hardcode a brand color (e.g. \"#D97757\").")
+  (icon-fallback nil :type (or string null)
+                 :documentation "Short text fallback when SVG is unavailable, e.g. \"CC\"."))
+
+;;;;;; Icons
+
+(defun agent-log--svg-icon (svg-data &optional face)
+  "Return a propertized string displaying SVG-DATA as an inline icon.
+FACE determines the color and height (default `default').
+\"currentColor\" in the SVG is replaced with the foreground of FACE.
+Returns an empty string when SVG support is unavailable."
+  (if (not (image-type-available-p 'svg))
+      ""
+    (let* ((face (or face 'default))
+           (fg (face-foreground face nil t))
+           (h (window-font-height nil face))
+           (colored (replace-regexp-in-string
+                     "currentColor" (or fg "#000") svg-data t t))
+           (img (create-image colored 'svg t :height h :ascent 'center)))
+      (propertize " " 'display img 'rear-nonsticky '(display)))))
+
+(defun agent-log--backend-icon (backend)
+  "Return an icon string for BACKEND.
+Uses the SVG icon when available, otherwise the text fallback."
+  (if-let* ((svg (agent-log-backend-icon-svg backend))
+            (rendered (agent-log--svg-icon svg))
+            ((not (string-empty-p rendered))))
+      rendered
+    (or (agent-log-backend-icon-fallback backend) "")))
 
 ;;;;;; Generic functions
 
@@ -829,8 +861,10 @@ Projects are sorted by most recent session timestamp."
   "Build an alist of (display-string . (session-id . metadata)) from SESSIONS."
   (let* ((index (agent-log--read-index))
          (proj-width (agent-log--max-project-width sessions))
-         ;; date (16) + 2 gaps (2+2) + project + 2 padding = fixed cols
-         (fixed-cols (+ 16 2 proj-width 2))
+         ;; Icon column: SVG renders as 1 char, text fallback is typically 2.
+         (icon-width (if (image-type-available-p 'svg) 1 2))
+         ;; icon + gap + date (16) + 2 gaps (2+2) + project = fixed cols
+         (fixed-cols (+ icon-width 1 16 2 proj-width 2))
          ;; Ensure the summary column is wide enough to be useful even
          ;; in narrow frames; below ~20 chars summaries become unreadable.
          (summary-width (max 20 (- (frame-width) fixed-cols 1)))
@@ -839,22 +873,25 @@ Projects are sorted by most recent session timestamp."
      (lambda (session)
        (let* ((session-id (car session))
               (meta (cdr session))
+              (backend (plist-get meta :backend))
+              (icon (if backend (agent-log--backend-icon backend) ""))
               (ts (plist-get meta :timestamp))
               (date (agent-log--format-epoch-ms ts))
               (project (agent-log--short-project (plist-get meta :project)))
               (index-entry (gethash session-id index))
               (oneline (when index-entry
                          (plist-get index-entry :summary-oneline)))
-              (label (if oneline
-                         (format fmt date project
-                                 (agent-log--truncate-string
-                                  oneline summary-width))
-                       (let ((display (agent-log--normalize-whitespace
+              (body (if oneline
+                        (format fmt date project
+                                (agent-log--truncate-string
+                                 oneline summary-width))
+                      (let ((display (agent-log--normalize-whitespace
                                        (plist-get meta :display))))
-                         (format fmt date project
-                                 (concat "\"" (agent-log--truncate-string
-                                               display (- summary-width 2))
-                                         "\""))))))
+                        (format fmt date project
+                                (concat "\"" (agent-log--truncate-string
+                                              display (- summary-width 2))
+                                        "\"")))))
+              (label (concat icon " " body)))
          (cons label (cons session-id meta))))
      sessions)))
 

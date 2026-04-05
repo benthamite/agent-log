@@ -26,7 +26,7 @@ The package maintains a mirror directory of pre-rendered Markdown files, organiz
 
 The core capabilities of =agent-log.el= are:
 
-- *Session browsing*.  A ~completing-read~ interface lists all sessions, grouped by project or as a flat list, sorted by recency.  Each candidate shows the date, project name, and either an AI-generated summary or the first user message ([[#h:session-browsing][Session browsing]]).
+- *Session browsing*.  A ~completing-read~ interface lists all sessions, grouped by project or as a flat list, sorted by recency.  Each candidate shows a backend-specific icon (SVG in GUI frames, a short text label in terminal frames), the date, project name, and either an AI-generated summary or the first user message ([[#h:session-browsing][Session browsing]]).
 - *Lazy rendering*.  Sessions are rendered to =.md= files on first access.  The package tracks JSONL file sizes in an index to avoid re-rendering files that have not changed ([[#h:sync-and-rendering][Sync and rendering]]).
 - *Live updates*.  For active sessions, a ~file-notify~ watcher detects JSONL changes and appends new entries to both the =.md= file on disk and the open buffer in real time ([[#h:live-updates][Live updates]]).
 - *Outline navigation*.  Rendered buffers use ~outline-minor-mode~ for folding tool calls, thinking blocks, and tool results.  Dedicated keybindings jump between conversation turns ([[#h:navigation][Navigation]]).
@@ -254,8 +254,10 @@ In ~dollars~ mode, cost estimation requires the =gptel-plus= package.  If =gptel
 The command ~agent-log-browse-sessions~ is the primary entry point for exploring your session history.  It reads =history.jsonl=, resolves each session to its JSONL file on disk, and presents the results in a ~completing-read~ prompt.  Each candidate is formatted as:
 
 #+begin_example
-2026-02-22 14:06  my-project  "Fix the authentication bug in..."
+[icon] 2026-02-22 14:06  my-project  "Fix the authentication bug in..."
 #+end_example
+
+Each candidate is prefixed with a backend-specific icon so you can tell at a glance which agent a session belongs to.  In GUI frames the icon is an inline SVG image; in terminal frames it falls back to a short text label (e.g. =CC= for Claude Code, =CX= for Codex).
 
 When ~agent-log-group-by-project~ is non-~nil~ (the default), the command first prompts for a project, then for a session within that project ([[#h:session-browser-options][Session browser options]]).  Sessions are sorted most-recent-first.  If AI summaries have been generated for any sessions ([[#h:summary-generation][Summary generation]]), the summary replaces the quoted first message in the candidate display.
 
