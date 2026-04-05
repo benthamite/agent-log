@@ -551,7 +551,7 @@ The session header (the =# Session: ...= line at the top of each rendered file) 
 :CUSTOM_ID: h:live-update-mechanism
 :END:
 
-When ~agent-log-live-update~ is non-~nil~ and a rendered buffer is open, the package registers a ~file-notify~ watcher on the source JSONL file.  When the file grows, the watcher reads only the new bytes (from the previously recorded offset to the new file size), handling incomplete UTF-8 sequences at chunk boundaries.  New complete lines are parsed and rendered incrementally, appended to both the buffer and the =.md= file on disk.
+When ~agent-log-live-update~ is non-~nil~ and a rendered buffer is open, the package registers a ~file-notify~ watcher on the source JSONL file.  When the file grows, the watcher reads only the new bytes (from the previously recorded offset to the new file size), handling incomplete UTF-8 sequences at chunk boundaries.  New complete lines are parsed and rendered incrementally, appended to both the buffer and the =.md= file on disk.  Partial lines (those not terminated by a newline) are buffered and completed when the next chunk arrives.
 
 * Troubleshooting
 :PROPERTIES:

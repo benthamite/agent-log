@@ -1212,6 +1212,7 @@ Only truly unparseable inputs that signal errors return nil."
   (with-temp-buffer
     (agent-log-mode)
     (let ((agent-log--partial-line "")
+          (agent-log--backend agent-log-test--claude-backend)
           (agent-log--source-file nil)
           (agent-log--rendered-file nil)
           (inhibit-read-only t))
@@ -1241,6 +1242,7 @@ Only truly unparseable inputs that signal errors return nil."
   (with-temp-buffer
     (agent-log-mode)
     (let ((agent-log--partial-line "{\"type\":\"us")
+          (agent-log--backend agent-log-test--claude-backend)
           (agent-log--source-file nil)
           (agent-log--rendered-file nil)
           (inhibit-read-only t))

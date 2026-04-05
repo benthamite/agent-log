@@ -1378,7 +1378,8 @@ single entry before checking whether it is a conversation entry."
               (agent-log--append-to-file agent-log--rendered-file rendered))
             ;; Sync modtime BEFORE buffer insert to prevent the
             ;; supersession check in `prepare_to_modify_buffer'.
-            (set-visited-file-modtime)
+            (when buffer-file-name
+              (set-visited-file-modtime))
             (save-excursion
               (goto-char (point-max))
               (insert rendered)
