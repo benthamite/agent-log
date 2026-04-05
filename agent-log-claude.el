@@ -476,7 +476,7 @@ followed by `agent-log-summarize-sessions' when `:type' is \"Stop\"."
 ;;;;; Interactive commands
 
 ;;;###autoload
-(defun agent-log-open-session-at-point ()
+(defun agent-log-open-from-session ()
   "Open the log for the Claude Code session in the current buffer.
 The current buffer must be a Claude Code terminal buffer.
 When possible, identify the exact session via the status file;

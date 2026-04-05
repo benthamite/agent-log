@@ -32,13 +32,13 @@
 ;; natively on readable content.
 ;;
 ;; Entry points:
-;;   `agent-log-browse-sessions'        - pick a session from history
-;;   `agent-log-open-latest'            - open the most recent session
-;;   `agent-log-open-rendered-directory' - browse rendered files in Dired
-;;   `agent-log-sync-all'               - render all unrendered/stale sessions
-;;   `agent-log-open-file'              - open a specific JSONL file
-;;   `agent-log-resume-session'         - resume session in the coding agent
-;;   `agent-log-open-session-at-point'  - open log for session in current buffer
+;;   `agent-log-browse-sessions'    - pick a session from history
+;;   `agent-log-open-latest'        - open the most recent session
+;;   `agent-log-open-from-session'  - open log for session in current buffer
+;;   `agent-log-open-directory'     - browse rendered files in Dired
+;;   `agent-log-open-file'          - open a specific JSONL file
+;;   `agent-log-resume-session'     - resume session in the coding agent
+;;   `agent-log-sync-all'           - render all unrendered/stale sessions
 
 ;;; Code:
 
@@ -228,7 +228,7 @@ Returns nil if KEY is not in `agent-log-backends'."
 
 ;;;;;; Forward declarations for agent-log-claude.el
 
-(declare-function agent-log-open-session-at-point "agent-log-claude")
+(declare-function agent-log-open-from-session "agent-log-claude")
 (declare-function agent-log-rename-sessions "agent-log-claude")
 (declare-function agent-log-claude--session-end-handler "agent-log-claude")
 (declare-function agent-log-claude--maybe-rename-session "agent-log-claude")
@@ -514,7 +514,7 @@ a project, then for a session within that project."
       (agent-log--open-rendered session-id metadata))))
 
 ;;;###autoload
-(defun agent-log-open-rendered-directory ()
+(defun agent-log-open-directory ()
   "Open the rendered Markdown directory in Dired."
   (interactive)
   (let ((dir (expand-file-name agent-log-rendered-directory)))
@@ -1216,7 +1216,7 @@ COLLECTION is a list of strings or an alist of (string . value)."
     (define-key map "n" #'agent-log-next-turn)
     (define-key map "p" #'agent-log-previous-turn)
     (define-key map (kbd "TAB") #'agent-log-toggle-section)
-    (define-key map "C" #'agent-log-collapse-all-tools)
+    (define-key map "C" #'agent-log-collapse-all)
     (define-key map "E" #'agent-log-expand-all)
     (define-key map "g" #'agent-log-refresh)
     (define-key map "w" #'agent-log-copy-turn)
@@ -1441,7 +1441,7 @@ Returns the position, or nil."
       (when (bound-and-true-p outline-minor-mode)
         (outline-toggle-children))))))
 
-(defun agent-log-collapse-all-tools ()
+(defun agent-log-collapse-all ()
   "Collapse all tool-use, tool-result, and thinking sections."
   (interactive)
   (agent-log--remove-section-overlays)
@@ -2438,32 +2438,31 @@ full session list and index for filtering."
 (transient-define-prefix agent-log-menu ()
   "Transient menu for Agent Log commands."
   [["Open"
-    ("b" "Browse sessions" agent-log-browse-sessions)
-    ("l" "Open latest" agent-log-open-latest)
-    ("f" "Open file" agent-log-open-file)
-    ("d" "Open rendered directory" agent-log-open-rendered-directory)
-    ("." "Open session at point" agent-log-open-session-at-point)
-    ("r" "Resume session" agent-log-resume-session)]
-   ["Sync & AI"
-    ("S" "Sync all" agent-log-sync-all)
-    ("s" "Summarize sessions" agent-log-summarize-sessions)
-    ("/" "AI search" agent-log-search)
-    ("R" "Rename from summaries" agent-log-rename-sessions)
-    ("x" "Stop summarizing" agent-log-stop-summarizing)]
+    ("b" "Browse logs" agent-log-browse-sessions)
+    ("l" "Open log: latest session" agent-log-open-latest)
+    ("c" "Open log: current session" agent-log-open-from-session)
+    ("s" "Resume session from current log" agent-log-resume-session)
+    ("d" "Open log directory" agent-log-open-directory)]
    ["Navigate"
     :if (lambda () (derived-mode-p 'agent-log-mode))
     ("n" "Next turn" agent-log-next-turn)
     ("p" "Previous turn" agent-log-previous-turn)
-    ("TAB" "Toggle section" agent-log-toggle-section)
-    ("C" "Collapse all tools" agent-log-collapse-all-tools)
-    ("E" "Expand all" agent-log-expand-all)
-    ("G" "Refresh" agent-log-refresh)
-    ("w" "Copy turn" agent-log-copy-turn)]
+    ("TAB" "Toggle section at point" agent-log-toggle-section)
+    ("C" "Collapse all sections" agent-log-collapse-all)
+    ("E" "Expand all sections" agent-log-expand-all)
+    ("G" "Re-render from source" agent-log-refresh)
+    ("w" "Copy current turn" agent-log-copy-turn)]
+   ["Sync & AI"
+    ("y" "Sync all" agent-log-sync-all)
+    ("s" "Summarize sessions" agent-log-summarize-sessions)
+    ("x" "Stop summarizing" agent-log-stop-summarizing)
+    ("r" "Rename sessions from summaries" agent-log-rename-sessions)
+    ("/" "Search sessions with AI" agent-log-search)]
    ["Settings"
-    ("t" agent-log-cycle-show-thinking)
-    ("o" agent-log-cycle-show-tools)
-    ("u" agent-log-toggle-live-update)
-    ("g" agent-log-toggle-group-by-project)]])
+    ("-t" agent-log-cycle-show-thinking)
+    ("-o" agent-log-cycle-show-tools)
+    ("-u" agent-log-toggle-live-update)
+    ("-g" agent-log-toggle-group-by-project)]])
 
 (provide 'agent-log)
 ;;; agent-log.el ends here
