@@ -128,6 +128,8 @@ The user option ~agent-log-rendered-directory~ specifies the directory where ren
 
 Agent conversations contain thinking blocks (the model's chain-of-thought reasoning) and tool-use sections (file reads, bash commands, grep searches, and so on).  These are valuable for understanding what the assistant did, but they can also be verbose and clutter the view when you are reading the high-level conversation.
 
+Note that some backends store thinking blocks with empty content.  Claude Code, for instance, redacts the thinking text from its JSONL logs, keeping only a cryptographic signature.  When the thinking text is empty, the package omits the section entirely rather than rendering an empty heading.
+
 The user option ~agent-log-show-thinking~ controls how thinking blocks appear.  It accepts one of three symbols:
 
 - ~hidden~: thinking blocks are omitted entirely from the rendered output.

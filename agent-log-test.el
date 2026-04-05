@@ -755,6 +755,12 @@ Only truly unparseable inputs that signal errors return nil."
     (let ((result (agent-log--render-thinking item)))
       (should-not (string-match-p "\n\n\n" result)))))
 
+(ert-deftest agent-log-test-render-thinking/empty-text ()
+  "Returns empty string when thinking text is empty or missing."
+  (should (string-empty-p (agent-log--render-thinking (list :type "thinking" :thinking ""))))
+  (should (string-empty-p (agent-log--render-thinking (list :type "thinking"))))
+  (should (string-empty-p (agent-log--render-thinking (list :type "thinking" :thinking "  ")))))
+
 (ert-deftest agent-log-test-render-tool-use ()
   "Renders tool_use item with summary."
   (let ((item (list :type "tool_use" :name "Read"

@@ -1099,11 +1099,15 @@ BACKEND is passed through for tool-use dispatch."
     (apply #'concat (nreverse parts))))
 
 (defun agent-log--render-thinking (item)
-  "Render a thinking ITEM."
-  (let* ((text (or (plist-get item :thinking) ""))
-         (truncated (agent-log--truncate-string text agent-log-max-tool-result-length))
-         (clean (replace-regexp-in-string "\n\n+" "\n" truncated)))
-    (format "#### Thinking\n\n%s\n\n" clean)))
+  "Render a thinking ITEM.
+Returns an empty string when the thinking text is empty, which
+happens when Claude Code redacts thinking content from the JSONL."
+  (let ((text (or (plist-get item :thinking) "")))
+    (if (string-empty-p (string-trim text))
+        ""
+      (let* ((truncated (agent-log--truncate-string text agent-log-max-tool-result-length))
+             (clean (replace-regexp-in-string "\n\n+" "\n" truncated)))
+        (format "#### Thinking\n\n%s\n\n" clean)))))
 
 (defun agent-log--render-tool-use (item &optional backend)
   "Render a tool_use ITEM with a smart summary of its input.
