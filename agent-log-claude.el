@@ -305,26 +305,30 @@ extraction.  Returns nil if either is unavailable."
   "Resume the Claude Code session SESSION-ID."
   (unless (require 'claude-code nil t)
     (user-error "Package `claude-code' is required but not available"))
-  (let ((project-dir (agent-log-claude--session-project-directory session-id)))
+  (let* ((project-dir (agent-log-claude--session-project-directory session-id))
+         (switches (list "--resume" session-id)))
     (if project-dir
         (cl-letf (((symbol-function 'claude-code--directory)
                    (lambda () project-dir)))
-          (claude-code--start nil (list "--resume" session-id)))
-      (claude-code--start nil (list "--resume" session-id)))))
+          (claude-code--start nil switches))
+      (claude-code--start nil switches))))
 
 ;;;;; Claude-specific helper functions
 
 (defun agent-log-claude--session-project-directory (session-id)
   "Return the project directory for SESSION-ID.
-Try the buffer-local variable first, then fall back to history.jsonl."
-  (or (and agent-log--session-project
-           (not (string-empty-p agent-log--session-project))
-           (file-directory-p agent-log--session-project)
-           agent-log--session-project)
-      (when-let* ((project (agent-log-claude--lookup-session-project session-id)))
-        (and (not (string-empty-p project))
-             (file-directory-p project)
-             project))))
+Try the buffer-local variable first, then fall back to history.jsonl.
+The return value always has a trailing slash to match the format
+returned by `claude-code--directory'."
+  (when-let* ((dir (or (and agent-log--session-project
+                            (not (string-empty-p agent-log--session-project))
+                            (file-directory-p agent-log--session-project)
+                            agent-log--session-project)
+                       (when-let* ((project (agent-log-claude--lookup-session-project session-id)))
+                         (and (not (string-empty-p project))
+                              (file-directory-p project)
+                              project)))))
+    (file-name-as-directory dir)))
 
 (defun agent-log-claude--lookup-session-project (session-id)
   "Look up the project directory for SESSION-ID in history.jsonl."

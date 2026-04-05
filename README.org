@@ -404,7 +404,7 @@ Before stage 2, the estimated token cost is compared against ~agent-log-search-b
 
 #+findex: agent-log-resume-session
 
-The command ~agent-log-resume-session~ resumes the session displayed in the current buffer in the coding agent.  The command extracts the session ID from the buffer (either from the buffer-local variable or from the front-matter comment) and dispatches to the buffer's backend via the ~agent-log--resume-session~ generic function.  For Claude Code sessions, this requires the =claude-code= package and passes the session ID with the =--resume= flag, starting in the session's project directory when possible.  For Codex sessions, the command runs ~codex --resume~ in a compilation buffer, using the session's project directory as the default directory.  The keybinding is =r= in ~agent-log-mode~.
+The command ~agent-log-resume-session~ resumes the session displayed in the current buffer in the coding agent.  The command extracts the session ID from the buffer (either from the buffer-local variable or from the front-matter comment) and dispatches to the buffer's backend via the ~agent-log--resume-session~ generic function.  For Claude Code sessions, this requires the =claude-code= package and passes the session ID with the =--resume= flag, starting in the session's project directory when possible.  The project directory is normalized with a trailing slash to match the format returned by ~claude-code--directory~, ensuring that buffer names, concurrent session detection, and modeline display all work correctly.  For Codex sessions, the command runs ~codex --resume~ in a compilation buffer, using the session's project directory as the default directory.  The keybinding is =r= in ~agent-log-mode~.
 
 * ~agent-log-mode~
 :PROPERTIES:
