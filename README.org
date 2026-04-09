@@ -35,7 +35,7 @@ The core capabilities of =agent-log.el= are:
 - *AI-powered search*.  A two-stage LLM pipeline lets you search your session history with natural language queries.  A scope-narrowing model filters sessions by project and date range, then a selection model identifies the most relevant sessions and presents a narrative with clickable links ([[#h:ai-search][AI search]]).
 - *Session resumption*.  You can resume any session directly in the coding agent from within the rendered buffer, provided the corresponding Emacs integration package is installed (e.g. =claude-code= for Claude Code) ([[#h:session-resumption][Session resumption]]).
 
-The package requires Emacs 29.1 or later and [[https://jblevins.org/projects/markdown-mode/][markdown-mode]] 2.6 or later.  The optional summary feature requires [[https://github.com/karthink/gptel][gptel]].  Session resumption for Claude Code sessions requires [[https://github.com/stevemolitor/claude-code.el][claude-code]].
+The package requires Emacs 29.1 or later and [[https://jblevins.org/projects/markdown-mode/][markdown-mode]] 2.6 or later.  The optional summary feature requires [[https://github.com/karthink/gptel][gptel]].  Session resumption for Claude Code sessions requires [[https://github.com/stevemolitor/claude-code.el][claude-code]]; for Codex sessions it requires [[https://github.com/benthamite/codex.el][codex]].
 
 The development repository is on [[https://github.com/benthamite/agent-log][GitHub]].
 
@@ -408,7 +408,7 @@ Before stage 2, the estimated token cost is compared against ~agent-log-search-b
 
 #+findex: agent-log-resume-session
 
-The command ~agent-log-resume-session~ resumes the session displayed in the current buffer in the coding agent.  The command extracts the session ID from the buffer (either from the buffer-local variable or from the front-matter comment) and dispatches to the buffer's backend via the ~agent-log--resume-session~ generic function.  For Claude Code sessions, this requires the =claude-code= package and passes the session ID with the =--resume= flag, starting in the session's project directory when possible.  The project directory is normalized with a trailing slash to match the format returned by ~claude-code--directory~, ensuring that buffer names, concurrent session detection, and modeline display all work correctly.  For Codex sessions, the command runs ~codex --resume~ in a compilation buffer, using the session's project directory as the default directory.  The keybinding is =r= in ~agent-log-mode~.
+The command ~agent-log-resume-session~ resumes the session displayed in the current buffer in the coding agent.  The command extracts the session ID from the buffer (either from the buffer-local variable or from the front-matter comment) and dispatches to the buffer's backend via the ~agent-log--resume-session~ generic function.  For Claude Code sessions, this requires the =claude-code= package and passes the session ID with the =--resume= flag, starting in the session's project directory when possible.  The project directory is normalized with a trailing slash to match the format returned by ~claude-code--directory~, ensuring that buffer names, concurrent session detection, and modeline display all work correctly.  For Codex sessions, this requires the =codex= package and opens the session in a proper terminal buffer (eat or vterm), starting in the session's project directory when possible.  The keybinding is =r= in ~agent-log-mode~.
 
 * ~agent-log-mode~
 :PROPERTIES:

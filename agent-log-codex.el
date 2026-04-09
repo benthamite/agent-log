@@ -467,14 +467,17 @@ Codex process."
 
 (cl-defmethod agent-log--resume-session ((_backend agent-log-codex) session-id)
   "Resume the Codex session SESSION-ID."
+  (unless (require 'codex nil t)
+    (user-error "Package `codex' is required but not available"))
   (let* ((project-dir (or agent-log--session-project
                           default-directory))
          (default-directory (if (and project-dir
                                      (file-directory-p project-dir))
                                 project-dir
                               default-directory)))
-    (compile (format "codex --resume %s" (shell-quote-argument session-id))
-             t)))
+    (cl-letf (((symbol-function 'codex--directory)
+               (lambda () default-directory)))
+      (codex--start-subcommand "resume" nil (list session-id)))))
 
 ;;;;; Codex-specific helper functions
 
