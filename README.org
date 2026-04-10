@@ -401,6 +401,8 @@ Before starting, the command checks for unsummarized sessions.  If any exist, it
 
 Before stage 2, the estimated token cost is compared against ~agent-log-search-budget~ ([[#h:ai-search-options][AI search options]]).  If the estimate exceeds the threshold, the user is asked to confirm.
 
+When ~gptel-plus~ is available, the combined dollar cost of both stages is displayed at the bottom of the results buffer.
+
 ** Session resumption
 :PROPERTIES:
 :CUSTOM_ID: h:session-resumption
