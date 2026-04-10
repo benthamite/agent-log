@@ -2265,8 +2265,9 @@ INDEX is the session index for looking up summaries.  SCOPE is the
 stage 1 narrowing plist.  TOTAL is the pre-filter session count.
 MATCHED is the number of sessions that passed the scope filter."
   (let* ((n (length filtered-sessions))
-         (prompt (agent-log--search-build-selection-prompt
-                  query filtered-sessions index scope total matched))
+         (prompt (agent-log--search-ensure-utf-8
+                  (agent-log--search-build-selection-prompt
+                   query filtered-sessions index scope total matched)))
          (system agent-log--search-system-message)
          (resolved (agent-log--resolve-search-backend-and-model))
          (gptel-backend (car resolved))
@@ -2281,6 +2282,11 @@ MATCHED is the number of sessions that passed the scope filter."
             (lambda (response _info)
               (agent-log--search-selection-callback response))))
       (message "Search aborted"))))
+
+(defun agent-log--search-ensure-utf-8 (str)
+  "Re-encode STR as UTF-8, replacing invalid bytes.
+Prevents `json-serialize' from failing on raw-byte strings."
+  (decode-coding-string (encode-coding-string str 'utf-8 t) 'utf-8))
 
 (defun agent-log--search-selection-callback (response)
   "Handle the stage 2 RESPONSE."
