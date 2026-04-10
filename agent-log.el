@@ -2350,11 +2350,7 @@ full session list and index for filtering."
       (if (null filtered)
           (agent-log--search-display-results
            "No sessions with summaries matched the search scope.")
-        ;; Cap at 100 most recent sessions.
-        (let ((truncated (> (length filtered) 100)))
-          (when truncated
-            (setq filtered (seq-take filtered 100)))
-          (agent-log--search-send-selection query filtered index))))))
+        (agent-log--search-send-selection query filtered index)))))
 
 ;;;;; Resume session
 
@@ -2442,7 +2438,7 @@ full session list and index for filtering."
     ("b" "Browse logs" agent-log-browse-sessions)
     ("l" "Open log: latest session" agent-log-open-latest)
     ("c" "Open log: current session" agent-log-open-from-session)
-    ("s" "Resume session from current log" agent-log-resume-session)
+    ("r" "Resume session from current log" agent-log-resume-session)
     ("d" "Open log directory" agent-log-open-directory)]
    ["Navigate"
     :if (lambda () (derived-mode-p 'agent-log-mode))
@@ -2457,7 +2453,7 @@ full session list and index for filtering."
     ("y" "Sync all" agent-log-sync-all)
     ("s" "Summarize sessions" agent-log-summarize-sessions)
     ("x" "Stop summarizing" agent-log-stop-summarizing)
-    ("r" "Rename sessions from summaries" agent-log-rename-sessions)
+    ("R" "Rename sessions from summaries" agent-log-rename-sessions)
     ("/" "Search sessions with AI" agent-log-search)]
    ["Settings"
     ("-t" agent-log-cycle-show-thinking)
