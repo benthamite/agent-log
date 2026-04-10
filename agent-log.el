@@ -2161,15 +2161,18 @@ Returns non-nil if the user approves or the budget is not exceeded."
          t))
       (_ t))))
 
-(defun agent-log--search-build-selection-prompt (query filtered-sessions index scope total)
+(defun agent-log--search-build-selection-prompt
+    (query filtered-sessions index scope total matched)
   "Build the stage 2 selection prompt.
 QUERY is the user's search string.  FILTERED-SESSIONS and INDEX
 provide the session data.  SCOPE is the stage 1 narrowing plist.
-TOTAL is the number of summarized sessions before filtering."
+TOTAL is the number of summarized sessions before filtering.
+MATCHED is the number that passed the scope filter."
   (let ((session-blocks (agent-log--search-format-session-blocks
                          filtered-sessions index))
-        (scope-text (agent-log--search-format-scope scope total
-                                                    (length filtered-sessions))))
+        (scope-text (agent-log--search-format-scope
+                     scope total matched
+                     (length filtered-sessions))))
     (format "User query: %S\n\n## Search scope\n\n%s\n\n## Sessions\n\n%s"
             query scope-text session-blocks)))
 
@@ -2191,41 +2194,79 @@ TOTAL is the number of summarized sessions before filtering."
                sid project date oneline summary)))
    sessions "\n\n"))
 
-(defun agent-log--search-format-scope (scope total filtered)
+(defun agent-log--search-format-scope (scope total matched sent)
   "Format SCOPE as a human-readable description.
 TOTAL is the number of summarized sessions in the archive.
-FILTERED is the number of sessions after applying the scope."
+MATCHED is the number that passed the scope filter.  SENT is the
+number actually included (may be less than MATCHED due to budget)."
   (let* ((projects (plist-get scope :projects))
          (date-after (plist-get scope :date-after))
          (date-before (plist-get scope :date-before))
          (proj-desc (if (equal projects "all") "all projects"
                       (format "projects: %s" (string-join projects ", "))))
-         (date-desc (cond
-                     ((and date-after date-before)
-                      (format "from %s to %s"
-                              (agent-log--search-format-epoch-date date-after)
-                              (agent-log--search-format-epoch-date date-before)))
-                     (date-after
-                      (format "from %s onward"
-                              (agent-log--search-format-epoch-date date-after)))
-                     (date-before
-                      (format "up to %s"
-                              (agent-log--search-format-epoch-date date-before)))
-                     (t "all dates"))))
-    (format "%s, %s (%d of %d summarized sessions)"
-            proj-desc date-desc filtered total)))
+         (date-desc (agent-log--search-format-date-range
+                     date-after date-before))
+         (count-desc (if (< sent matched)
+                         (format "%d of %d matched, showing %d most recent"
+                                 matched total sent)
+                       (format "%d of %d summarized sessions"
+                               matched total))))
+    (format "%s, %s (%s)" proj-desc date-desc count-desc)))
+
+(defun agent-log--search-session-limit (index sessions)
+  "Return the maximum number of SESSIONS that fit the token budget.
+INDEX provides the summaries used to estimate per-session size."
+  (let* ((budget (when (eq (car agent-log-search-budget) 'tokens)
+                   (cdr agent-log-search-budget)))
+         (overhead 500)
+         (available (- (or budget 50000) overhead))
+         (avg-tokens (agent-log--search-estimate-avg-tokens
+                      index sessions)))
+    (max 10 (/ available avg-tokens))))
+
+(defun agent-log--search-estimate-avg-tokens (index sessions)
+  "Estimate the average token count per session block.
+INDEX provides the summaries.  SESSIONS is the list to sample."
+  (let* ((sample (seq-take sessions (min 20 (length sessions))))
+         (total-chars
+          (seq-reduce
+           (lambda (acc session)
+             (let* ((sid (car session))
+                    (entry (gethash sid index))
+                    (oneline (or (plist-get entry :summary-oneline) ""))
+                    (summary (or (plist-get entry :summary) "")))
+               (+ acc (length sid) (length oneline) (length summary) 80)))
+           sample 0)))
+    (max 1 (/ (/ total-chars (max 1 (length sample))) 4))))
+
+(defun agent-log--search-format-date-range (after before)
+  "Format date range from AFTER and BEFORE epoch-ms values."
+  (cond
+   ((and after before)
+    (format "from %s to %s"
+            (agent-log--search-format-epoch-date after)
+            (agent-log--search-format-epoch-date before)))
+   (after
+    (format "from %s onward"
+            (agent-log--search-format-epoch-date after)))
+   (before
+    (format "up to %s"
+            (agent-log--search-format-epoch-date before)))
+   (t "all dates")))
 
 (defun agent-log--search-format-epoch-date (epoch-ms)
   "Format EPOCH-MS (milliseconds) as a YYYY-MM-DD date string."
   (format-time-string "%Y-%m-%d" (/ epoch-ms 1000)))
 
-(defun agent-log--search-send-selection (query filtered-sessions index scope total)
+(defun agent-log--search-send-selection
+    (query filtered-sessions index scope total matched)
   "Send the stage 2 selection request for QUERY over FILTERED-SESSIONS.
 INDEX is the session index for looking up summaries.  SCOPE is the
-stage 1 narrowing plist.  TOTAL is the pre-filter session count."
+stage 1 narrowing plist.  TOTAL is the pre-filter session count.
+MATCHED is the number of sessions that passed the scope filter."
   (let* ((n (length filtered-sessions))
          (prompt (agent-log--search-build-selection-prompt
-                  query filtered-sessions index scope total))
+                  query filtered-sessions index scope total matched))
          (system agent-log--search-system-message)
          (resolved (agent-log--resolve-search-backend-and-model))
          (gptel-backend (car resolved))
@@ -2390,12 +2431,17 @@ of summarized sessions before filtering."
                         (agent-log--search-parse-scope-response response))
                    ;; Fallback: include everything.
                    (list :projects "all" :date-after nil :date-before nil))))
-    (let ((filtered (agent-log--search-apply-scope sessions index scope)))
+    (let* ((filtered (agent-log--search-apply-scope sessions index scope))
+           (matched (length filtered))
+           (limit (agent-log--search-session-limit index filtered))
+           (sent (if (> matched limit)
+                     (seq-take filtered limit)
+                   filtered)))
       (if (null filtered)
           (agent-log--search-display-results
            "No sessions with summaries matched the search scope.")
         (agent-log--search-send-selection
-         query filtered index scope total)))))
+         query sent index scope total matched)))))
 
 ;;;;; Resume session
 
