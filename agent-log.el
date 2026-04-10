@@ -2259,11 +2259,12 @@ INDEX provides the summaries.  SESSIONS is the list to sample."
   (format-time-string "%Y-%m-%d" (/ epoch-ms 1000)))
 
 (defun agent-log--search-send-selection
-    (query filtered-sessions index scope total matched)
+    (query filtered-sessions index scope total matched stage1-cost)
   "Send the stage 2 selection request for QUERY over FILTERED-SESSIONS.
 INDEX is the session index for looking up summaries.  SCOPE is the
 stage 1 narrowing plist.  TOTAL is the pre-filter session count.
-MATCHED is the number of sessions that passed the scope filter."
+MATCHED is the number of sessions that passed the scope filter.
+STAGE1-COST is the dollar cost of the scope request."
   (let* ((n (length filtered-sessions))
          (prompt (agent-log--search-ensure-utf-8
                   (agent-log--search-build-selection-prompt
@@ -2279,8 +2280,10 @@ MATCHED is the number of sessions that passed the scope filter."
           (gptel-request prompt
             :system system
             :callback
-            (lambda (response _info)
-              (agent-log--search-selection-callback response))))
+            (lambda (response info)
+              (agent-log--search-selection-callback
+               response (+ (or stage1-cost 0)
+                           (or (agent-log--search-cost info) 0))))))
       (message "Search aborted"))))
 
 (defun agent-log--search-ensure-utf-8 (str)
@@ -2288,11 +2291,19 @@ MATCHED is the number of sessions that passed the scope filter."
 Prevents `json-serialize' from failing on raw-byte strings."
   (decode-coding-string (encode-coding-string str 'utf-8 t) 'utf-8))
 
-(defun agent-log--search-selection-callback (response)
-  "Handle the stage 2 RESPONSE."
+(defun agent-log--search-cost (info)
+  "Extract the dollar cost from gptel callback INFO.
+Returns nil if `gptel-plus' is unavailable."
+  (when (and (require 'gptel-plus nil t)
+             (fboundp 'gptel-plus-compute-cost))
+    (gptel-plus-compute-cost info)))
+
+(defun agent-log--search-selection-callback (response total-cost)
+  "Handle the stage 2 RESPONSE.
+TOTAL-COST is the combined dollar cost of both stages."
   (cond
    ((stringp response)
-    (agent-log--search-display-results response))
+    (agent-log--search-display-results response total-cost))
    ((null response)
     (message "agent-log: search request failed (nil response)"))))
 
@@ -2316,13 +2327,17 @@ Session references are clickable links that open the rendered log."
   :group 'agent-log
   (setq-local buffer-read-only t))
 
-(defun agent-log--search-display-results (narrative)
-  "Display NARRATIVE in the `*agent-log-search*' buffer."
+(defun agent-log--search-display-results (narrative &optional total-cost)
+  "Display NARRATIVE in the `*agent-log-search*' buffer.
+When TOTAL-COST is non-nil and positive, append a cost line."
   (let ((buf (get-buffer-create "*agent-log-search*")))
     (with-current-buffer buf
       (let ((inhibit-read-only t))
         (erase-buffer)
         (insert narrative)
+        (when (and total-cost (> total-cost 0))
+          (goto-char (point-max))
+          (insert (format "\n\n---\n*Search cost: $%.4f*\n" total-cost)))
         (agent-log--search-buttonize-links)
         (goto-char (point-min)))
       (let ((markdown-mode-hook nil)
@@ -2424,15 +2439,18 @@ clickable links to the matching logs."
       (gptel-request scope-prompt
         :system agent-log--search-scope-system-message
         :callback
-        (lambda (response _info)
+        (lambda (response info)
           (agent-log--search-scope-callback
-           response query sessions index summarized))))))
+           response query sessions index summarized
+           (agent-log--search-cost info)))))))
 
-(defun agent-log--search-scope-callback (response query sessions index total)
+(defun agent-log--search-scope-callback
+    (response query sessions index total stage1-cost)
   "Handle the stage 1 scope RESPONSE.
 QUERY is the original search query.  SESSIONS and INDEX are the
 full session list and index for filtering.  TOTAL is the number
-of summarized sessions before filtering."
+of summarized sessions before filtering.  STAGE1-COST is the
+dollar cost of the scope request."
   (let ((scope (or (and (stringp response)
                         (agent-log--search-parse-scope-response response))
                    ;; Fallback: include everything.
@@ -2447,7 +2465,7 @@ of summarized sessions before filtering."
           (agent-log--search-display-results
            "No sessions with summaries matched the search scope.")
         (agent-log--search-send-selection
-         query sent index scope total matched)))))
+         query sent index scope total matched stage1-cost)))))
 
 ;;;;; Resume session
 
