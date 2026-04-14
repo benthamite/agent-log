@@ -44,6 +44,8 @@
 (require 'cl-lib)
 (require 'agent-log)
 
+(declare-function codex--start-subcommand "codex" (subcommand &optional args extra-args))
+
 ;;;;; Struct definition
 
 (cl-defstruct (agent-log-codex (:constructor agent-log--make-codex)
