@@ -5,7 +5,8 @@ LOAD_PATH := -L $(CURDIR) \
              -L $(ELPACA_REPOS)codex \
              -L $(ELPACA_REPOS)inheritenv \
              -L $(ELPACA_REPOS)transient/lisp \
-             -L $(ELPACA_REPOS)cond-let
+             -L $(ELPACA_REPOS)cond-let \
+             -L $(ELPACA_REPOS)compat
 
 .PHONY: test compile clean
 
