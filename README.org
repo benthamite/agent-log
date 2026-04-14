@@ -581,6 +581,16 @@ If a rendered file appears stale, press =g= (~agent-log-refresh~) in the buffer 
 
 Verify that ~agent-log-live-update~ is set to ~t~ ([[#h:live-updates][Live updates]]).  Live updates rely on ~file-notify~, which requires OS-level file watching support.  On some systems (e.g., remote filesystems via TRAMP), file notifications may not be available.
 
+* Development
+:PROPERTIES:
+:CUSTOM_ID: h:development
+:END:
+
+#+begin_src sh
+make test     # run the full ERT suite
+make compile  # byte-compile with warnings-as-errors
+#+end_src
+
 * License
 :PROPERTIES:
 :CUSTOM_ID: h:license
