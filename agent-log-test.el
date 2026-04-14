@@ -385,12 +385,8 @@ the message content (string or list)."
     (should (< (abs (- result 1699963200000)) (* 24 60 60 1000)))))
 
 (ert-deftest agent-log-test-iso-to-epoch-ms/invalid ()
-  "Returns a number even for invalid strings (date-to-time is lenient).
-Only truly unparseable inputs that signal errors return nil."
-  ;; date-to-time is lenient with arbitrary strings in modern Emacs,
-  ;; so these return numbers rather than nil.
-  (should (numberp (agent-log--iso-to-epoch-ms "not a date")))
-  (should (numberp (agent-log--iso-to-epoch-ms ""))))
+  "Returns nil for non-string inputs."
+  (should (null (agent-log--iso-to-epoch-ms 12345))))
 
 (ert-deftest agent-log-test-format-iso-timestamp/valid ()
   "Formats a valid ISO timestamp."
@@ -1053,7 +1049,8 @@ Only truly unparseable inputs that signal errors return nil."
                              :message (list :role "assistant"
                                             :content (list (list :type "text"
                                                                   :text "answer")))))))
-    (let ((result (agent-log--extract-conversation-text entries)))
+    (let ((result (agent-log--extract-conversation-text
+                   entries agent-log-test--claude-backend)))
       (should (string-match-p "User: question" result))
       (should (string-match-p "Assistant: answer" result)))))
 
@@ -1075,7 +1072,8 @@ Only truly unparseable inputs that signal errors return nil."
   (let ((entries (list (list :type "progress" :cwd "/tmp")
                        (list :type "user"
                              :message (list :role "user" :content "hello")))))
-    (let ((result (agent-log--extract-conversation-text entries)))
+    (let ((result (agent-log--extract-conversation-text
+                   entries agent-log-test--claude-backend)))
       (should (string-match-p "User: hello" result))
       (should-not (string-match-p "progress" result)))))
 
