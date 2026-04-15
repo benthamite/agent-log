@@ -4,7 +4,7 @@
 
 ;; Author: Pablo Stafforini
 ;; URL: https://github.com/benthamite/agent-log
-;; Version: 0.3.0
+;; Version: 0.4.0
 ;; Package-Requires: ((emacs "29.1") (markdown-mode "2.6"))
 ;; Keywords: tools
 
