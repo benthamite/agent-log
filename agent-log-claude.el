@@ -422,11 +422,23 @@ both the expanded path and `file-truename'."
              return session)))
 
 (defun agent-log-claude--session-has-custom-title-p (jsonl-file)
-  "Return non-nil if JSONL-FILE already has a custom-title entry."
-  (with-temp-buffer
-    (insert-file-contents jsonl-file)
-    (goto-char (point-min))
-    (re-search-forward "\"type\"\\s-*:\\s-*\"custom-title\"" nil t)))
+  "Return non-nil if JSONL-FILE already has a custom-title entry.
+Only reads the last 4 KB of the file, since custom-title entries
+are appended at the end."
+  (agent-log-claude--file-tail-matches-p
+   jsonl-file "\"type\"\\s-*:\\s-*\"custom-title\""))
+
+(defun agent-log-claude--file-tail-matches-p (file regexp &optional tail-bytes)
+  "Return non-nil if the tail of FILE matches REGEXP.
+Reads the last TAIL-BYTES bytes (default 4096).  Falls back to
+reading the entire file when it is smaller than TAIL-BYTES."
+  (when-let* ((attrs (file-attributes file))
+              (size (file-attribute-size attrs)))
+    (let ((offset (max 0 (- size (or tail-bytes 4096)))))
+      (with-temp-buffer
+        (insert-file-contents file nil offset size)
+        (goto-char (point-min))
+        (re-search-forward regexp nil t)))))
 
 (defun agent-log-claude--append-custom-title (jsonl-file session-id title &optional index)
   "Append a custom-title entry to JSONL-FILE for SESSION-ID with TITLE.
@@ -435,14 +447,22 @@ does not treat the file as stale.  When INDEX is non-nil, merge the
 new size into it (for batch operations); otherwise write to disk."
   (let ((entry (json-serialize
                 (list :type "custom-title"
-                      :customTitle title
-                      :sessionId session-id))))
+                      :customTitle (agent-log-claude--sanitize-for-json title)
+                      :sessionId (agent-log-claude--sanitize-for-json session-id)))))
     (write-region (concat entry "\n") nil jsonl-file t 'quiet)
     (when-let* ((new-size (file-attribute-size (file-attributes jsonl-file))))
-      (if index
-          (agent-log--index-merge index session-id (list :jsonl-size new-size))
-        (agent-log--index-update-props
-         session-id (list :jsonl-size new-size))))))
+      (let ((props (list :jsonl-size new-size :custom-title t)))
+        (if index
+            (agent-log--index-merge index session-id props)
+          (agent-log--index-update-props session-id props))))))
+
+(defun agent-log-claude--sanitize-for-json (str)
+  "Return STR as a multibyte string without text properties.
+Unibyte strings containing raw UTF-8 bytes (as returned by some
+JSON parsers) are decoded; text properties are stripped."
+  (setq str (substring-no-properties str))
+  (if (multibyte-string-p str) str
+    (decode-coding-string str 'utf-8)))
 
 (defun agent-log-claude--maybe-rename-session (session-id oneline)
   "Rename SESSION-ID from ONELINE summary if appropriate.
@@ -452,7 +472,7 @@ empty, or the sentinel value."
   (when (and oneline
              (not (string-empty-p oneline))
              (not (equal oneline agent-log--no-conversation-sentinel)))
-    (when-let* ((jsonl-file (agent-log--find-session-file session-id)))
+    (when-let* ((jsonl-file (agent-log--find-session-file-any session-id)))
       (unless (agent-log-claude--session-has-custom-title-p jsonl-file)
         (agent-log-claude--append-custom-title
          jsonl-file session-id oneline)))))
@@ -526,7 +546,7 @@ slugified to full-text titles).
 
 Sessions must be summarized first via `agent-log-summarize-sessions'."
   (interactive "P")
-  (let* ((sessions (agent-log--read-sessions))
+  (let* ((sessions (agent-log--read-all-sessions))
          (index (agent-log--read-index))
          (renamed 0)
          (skipped 0)
@@ -545,15 +565,28 @@ Sessions must be summarized first via `agent-log-summarize-sessions'."
          ((not (file-exists-p jsonl-file))
           (cl-incf skipped))
          ((and (not force)
-               (agent-log-claude--session-has-custom-title-p jsonl-file))
+               (agent-log-claude--session-already-titled-p entry jsonl-file))
+          (agent-log-claude--cache-custom-title-flag index sid entry)
           (cl-incf skipped))
          (t
           (agent-log-claude--append-custom-title jsonl-file sid oneline index)
           (cl-incf renamed)))))
-    (when (> renamed 0)
-      (agent-log--write-index index))
+    (agent-log--write-index index)
     (message "Renamed %d session(s), skipped %d (already named), %d without summary"
              renamed skipped no-summary)))
+
+(defun agent-log-claude--session-already-titled-p (index-entry jsonl-file)
+  "Return non-nil if the session is already titled.
+Check INDEX-ENTRY for a cached flag first; fall back to reading
+the tail of JSONL-FILE."
+  (or (plist-get index-entry :custom-title)
+      (agent-log-claude--session-has-custom-title-p jsonl-file)))
+
+(defun agent-log-claude--cache-custom-title-flag (index sid entry)
+  "Store `:custom-title t' in INDEX for SID when ENTRY lacks it.
+Avoids redundant file-tail reads on future runs."
+  (unless (plist-get entry :custom-title)
+    (agent-log--index-merge index sid (list :custom-title t))))
 
 ;;;;; Icon
 
