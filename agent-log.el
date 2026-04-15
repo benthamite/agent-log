@@ -34,11 +34,11 @@
 ;; Entry points:
 ;;   `agent-log-browse-sessions'    - pick a session from history
 ;;   `agent-log-open-latest'        - open the most recent session
-;;   `agent-log-open-from-session'  - open log for session in current buffer
+;;   `agent-log-open-current-session'  - open log for session in current buffer
 ;;   `agent-log-open-directory'     - browse rendered files in Dired
 ;;   `agent-log-open-file'          - open a specific JSONL file
 ;;   `agent-log-resume-session'     - resume session in the coding agent
-;;   `agent-log-sync-all'           - render all unrendered/stale sessions
+;;   `agent-log-sync-sessions'           - render all unrendered/stale sessions
 
 ;;; Code:
 
@@ -228,7 +228,7 @@ Returns nil if KEY is not in `agent-log-backends'."
 
 ;;;;;; Forward declarations for agent-log-claude.el
 
-(declare-function agent-log-open-from-session "agent-log-claude")
+(declare-function agent-log-open-current-session "agent-log-claude")
 (declare-function agent-log-rename-sessions "agent-log-claude")
 (declare-function agent-log-claude--session-end-handler "agent-log-claude")
 (declare-function agent-log-claude--maybe-rename-session "agent-log-claude")
@@ -284,10 +284,6 @@ When non-nil, `agent-log-browse-sessions' first prompts for a
 project, then for a session within that project."
   :type 'boolean)
 
-(defcustom agent-log-display-width 60
-  "Maximum width of the first-message column in the session browser."
-  :type 'integer)
-
 (defcustom agent-log-slug-max-length 50
   "Maximum length of the slug portion of rendered filenames."
   :type 'integer)
@@ -309,24 +305,42 @@ When nil, defaults to `gptel-model'."
   "Maximum characters of conversation text sent to the LLM for summarization."
   :type 'integer)
 
-(defcustom agent-log-sync-on-session-end nil
-  "Whether to sync and summarize when a Claude Code session ends.
-When non-nil, `agent-log-sync-all' and `agent-log-summarize-sessions'
-run automatically after a session terminates.  Requires the `claude-code'
-package and a \"Stop\" hook configured in Claude Code settings."
+(defun agent-log--session-end-hook-needed-p ()
+  "Return non-nil if either auto-sync or auto-summarize is enabled."
+  (or (bound-and-true-p agent-log-auto-sync-sessions)
+      (bound-and-true-p agent-log-auto-summarize-sessions)))
+
+(defun agent-log--update-session-end-hook (&rest _)
+  "Install or remove the session-end hook based on current settings."
+  (if (featurep 'agent-log-claude)
+      (if (agent-log--session-end-hook-needed-p)
+          (add-hook 'claude-code-event-hook #'agent-log-claude--session-end-handler)
+        (remove-hook 'claude-code-event-hook #'agent-log-claude--session-end-handler))
+    (when (agent-log--session-end-hook-needed-p)
+      (eval-after-load 'agent-log-claude
+        '(when (agent-log--session-end-hook-needed-p)
+           (add-hook 'claude-code-event-hook
+                     #'agent-log-claude--session-end-handler))))))
+
+(defcustom agent-log-auto-sync-sessions nil
+  "Whether to sync sessions when a Claude Code session ends.
+When non-nil, `agent-log-sync-sessions' runs automatically after a
+session terminates.  Requires the `claude-code' package and a
+\"Stop\" hook configured in Claude Code settings."
   :type 'boolean
   :set (lambda (sym val)
          (set-default sym val)
-         (if (featurep 'agent-log-claude)
-             (if val
-                 (add-hook 'claude-code-event-hook #'agent-log-claude--session-end-handler)
-               (remove-hook 'claude-code-event-hook #'agent-log-claude--session-end-handler))
-           ;; Defer until agent-log-claude is loaded.
-           (when val
-             (eval-after-load 'agent-log-claude
-               '(when agent-log-sync-on-session-end
-                  (add-hook 'claude-code-event-hook
-                            #'agent-log-claude--session-end-handler)))))))
+         (agent-log--update-session-end-hook)))
+
+(defcustom agent-log-auto-summarize-sessions nil
+  "Whether to summarize sessions when a Claude Code session ends.
+When non-nil, `agent-log-summarize-sessions' runs automatically
+after a session terminates.  Requires the `claude-code' package
+and a \"Stop\" hook configured in Claude Code settings."
+  :type 'boolean
+  :set (lambda (sym val)
+         (set-default sym val)
+         (agent-log--update-session-end-hook)))
 
 (defcustom agent-log-auto-rename-sessions nil
   "When non-nil, rename sessions automatically after summarization.
@@ -532,7 +546,7 @@ a project, then for a session within that project."
     (agent-log-open-file file)))
 
 ;;;###autoload
-(defun agent-log-sync-all (&optional callback)
+(defun agent-log-sync-sessions (&optional callback)
   "Render all unrendered or stale sessions.
 Uses timers to avoid blocking Emacs.  When CALLBACK is non-nil,
 call it with no arguments after the last session is rendered."
@@ -1732,7 +1746,7 @@ If summary generation is already in progress, stop it instead."
     (user-error "Package `gptel' is required for summary generation"))
   (cond
    (agent-log--summarize-active
-    (agent-log-stop-summarizing))
+    (agent-log-stop-summarize-sessions))
    (t
     (let* ((sessions (agent-log--read-all-sessions))
            (index (agent-log--read-index))
@@ -1749,7 +1763,7 @@ If summary generation is already in progress, stop it instead."
          agent-log--summarize-generation))))))
 
 ;;;###autoload
-(defun agent-log-stop-summarizing ()
+(defun agent-log-stop-summarize-sessions ()
   "Stop summary generation immediately.
 Any in-flight gptel request will still complete, but its callback
 will not spawn further work."
@@ -2552,7 +2566,7 @@ dollar cost of the scope request."
   [["Open"
     ("b" "Browse logs" agent-log-browse-sessions)
     ("l" "Open log: latest session" agent-log-open-latest)
-    ("c" "Open log: current session" agent-log-open-from-session)
+    ("c" "Open log: current session" agent-log-open-current-session)
     ("r" "Resume session from current log" agent-log-resume-session)
     ("d" "Open log directory" agent-log-open-directory)]
    ["Navigate"
@@ -2565,9 +2579,9 @@ dollar cost of the scope request."
     ("G" "Re-render from source" agent-log-refresh)
     ("w" "Copy current turn" agent-log-copy-turn)]
    ["Sync & AI"
-    ("y" "Sync all" agent-log-sync-all)
+    ("y" "Sync all" agent-log-sync-sessions)
     ("s" "Summarize sessions" agent-log-summarize-sessions)
-    ("x" "Stop summarizing" agent-log-stop-summarizing)
+    ("x" "Stop summarizing" agent-log-stop-summarize-sessions)
     ("R" "Rename sessions from summaries" agent-log-rename-sessions)
     ("/" "Search sessions with AI" agent-log-search)]
    ["Settings"

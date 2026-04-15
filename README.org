@@ -175,12 +175,9 @@ Increase these values if you find that truncated tool content is hiding informat
 :END:
 
 #+vindex: agent-log-group-by-project
-#+vindex: agent-log-display-width
 #+vindex: agent-log-slug-max-length
 
 The user option ~agent-log-group-by-project~ controls whether ~agent-log-browse-sessions~ groups sessions by project ([[#h:session-browsing][Session browsing]]).  When non-~nil~ (the default), the command first prompts for a project, then for a session within that project.  When ~nil~, all sessions are presented in a single flat list.  The grouped view is more convenient when you have many sessions across several projects; the flat view is useful for quickly finding a recent session regardless of project.
-
-The user option ~agent-log-display-width~ sets the maximum width of the first-message column in the session browser.  Longer messages are truncated.  The default value is ~60~.
 
 The user option ~agent-log-slug-max-length~ sets the maximum length of the slug portion of rendered filenames.  The slug is derived from the first user message and appears after the date in the filename (e.g., =2026-02-22_11-56_redesign-agent-log-package.md=).  The default value is ~50~.
 
@@ -251,7 +248,7 @@ In ~dollars~ mode, cost estimation requires the =gptel-plus= package.  If =gptel
 #+findex: agent-log-open-latest
 #+findex: agent-log-open-file
 #+findex: agent-log-open-session
-#+findex: agent-log-open-from-session
+#+findex: agent-log-open-current-session
 
 The command ~agent-log-browse-sessions~ is the primary entry point for exploring your session history.  It reads =history.jsonl=, resolves each session to its JSONL file on disk, and presents the results in a ~completing-read~ prompt.  Each candidate is formatted as:
 
@@ -271,7 +268,7 @@ The command ~agent-log-open-file~ opens a specific JSONL file by path.  It promp
 
 The command ~agent-log-open-session~ opens a session by its ID.  It prompts for the session ID interactively.
 
-The command ~agent-log-open-from-session~ opens the log for the Claude Code session running in the current buffer.  This command is defined in =agent-log-claude.el= and requires the =claude-code= package; the current buffer must be a Claude Code terminal buffer.  The command reads the status file that Claude Code writes to =/tmp/claude-code-status/= and uses the =transcript_path= field to locate the exact JSONL file for the session.  This uniquely identifies the session even when multiple sessions (including branches created with ~/branch~) share the same project directory.  If the status file is unavailable, it falls back to the most recently modified JSONL file in the project's session directory, or to searching =history.jsonl=.  This lets you quickly jump from an active Claude Code session to its rendered log.
+The command ~agent-log-open-current-session~ opens the log for the Claude Code session running in the current buffer.  This command is defined in =agent-log-claude.el= and requires the =claude-code= package; the current buffer must be a Claude Code terminal buffer.  The command reads the status file that Claude Code writes to =/tmp/claude-code-status/= and uses the =transcript_path= field to locate the exact JSONL file for the session.  This uniquely identifies the session even when multiple sessions (including branches created with ~/branch~) share the same project directory.  If the status file is unavailable, it falls back to the most recently modified JSONL file in the project's session directory, or to searching =history.jsonl=.  This lets you quickly jump from an active Claude Code session to its rendered log.
 
 ** Rendered directory
 :PROPERTIES:
@@ -289,12 +286,12 @@ If the rendered directory does not yet exist, the command creates it.
 :CUSTOM_ID: h:sync-and-rendering
 :END:
 
-#+findex: agent-log-sync-all
+#+findex: agent-log-sync-sessions
 #+findex: agent-log-refresh
 
 By default, rendering is lazy: sessions are rendered to =.md= files on first access via ~agent-log-browse-sessions~ or ~agent-log-open-file~.  The package maintains an index file (=_index.el=) in the rendered directory that maps session IDs to rendered file paths and JSONL file sizes.  When you access a session, the package compares the current JSONL file size against the indexed size; if they differ, the session is re-rendered.
 
-The command ~agent-log-sync-all~ renders all unrendered or stale sessions in bulk.  It processes sessions one at a time using ~run-with-timer~ to avoid blocking Emacs.  A progress message reports how many sessions were rendered.
+The command ~agent-log-sync-sessions~ renders all unrendered or stale sessions in bulk.  It processes sessions one at a time using ~run-with-timer~ to avoid blocking Emacs.  A progress message reports how many sessions were rendered.
 
 The command ~agent-log-refresh~ re-renders the session displayed in the current buffer from its JSONL source.  This is useful if the rendered file appears stale or if you have changed display settings such as ~agent-log-show-thinking~ or ~agent-log-show-tools~ ([[#h:display-of-thinking-and-tool-sections][Display of thinking and tool sections]]).  The keybinding is =g= in ~agent-log-mode~.
 
@@ -340,24 +337,31 @@ The command ~agent-log-copy-turn~ copies the current turn to the kill ring.  A "
 :END:
 
 #+findex: agent-log-summarize-sessions
-#+findex: agent-log-stop-summarizing
+#+findex: agent-log-stop-summarize-sessions
 
 The command ~agent-log-summarize-sessions~ generates AI summaries for all sessions that do not yet have one.  It requires the =gptel= package.  The command processes sessions sequentially, sending each conversation's text to the configured LLM ([[#h:summary-generation-options][Summary generation options]]) and storing the response in the index.  Summary requests disable ~gptel-use-tools~ so that globally configured tools (e.g. MCP servers) are not included in the request.
 
 Each summary consists of two parts: a one-line summary (up to 80 characters) used in the session browser display, and a paragraph summary (3--5 sentences) shown at the top of rendered buffers.  The LLM is instructed to return a JSON object with ~oneline~ and ~summary~ fields.
 
-Progress is displayed in the echo area, showing which session is being summarized and the model in use.  If you invoke ~agent-log-summarize-sessions~ while summarization is already running, it stops the current run instead.  You can also stop explicitly with ~agent-log-stop-summarizing~.
+Progress is displayed in the echo area, showing which session is being summarized and the model in use.  If you invoke ~agent-log-summarize-sessions~ while summarization is already running, it stops the current run instead.  You can also stop explicitly with ~agent-log-stop-summarize-sessions~.
 
 Summaries are persisted in the index file, so they survive across Emacs sessions and do not need to be regenerated.  When you open a session that has a summary, the paragraph summary is inserted as a blockquote below the session header.
 
-*** Automatic summarization on session end
+*** Automatic sync and summarization on session end
 :PROPERTIES:
-:CUSTOM_ID: h:auto-summarize-on-session-end
+:CUSTOM_ID: h:auto-sync-summarize-on-session-end
 :END:
 
-#+vindex: agent-log-sync-on-session-end
+#+vindex: agent-log-auto-sync-sessions
+#+vindex: agent-log-auto-summarize-sessions
 
-When ~agent-log-sync-on-session-end~ is non-nil, ~agent-log-sync-all~ and ~agent-log-summarize-sessions~ run automatically each time a Claude Code session terminates.  This requires the =claude-code= package and a =Stop= hook configured in Claude Code's settings (see the =claude-code= documentation for hook setup).  The hook handler (~agent-log-claude--session-end-handler~) is defined in =agent-log-claude.el= and is installed via ~eval-after-load~ when the defcustom is set before the backend is loaded.
+Two user options control what happens automatically when a Claude Code session terminates.  Both require the =claude-code= package and a =Stop= hook configured in Claude Code's settings (see the =claude-code= documentation for hook setup).
+
+When ~agent-log-auto-sync-sessions~ is non-nil, ~agent-log-sync-sessions~ runs automatically each time a session ends.
+
+When ~agent-log-auto-summarize-sessions~ is non-nil, ~agent-log-summarize-sessions~ runs automatically each time a session ends.  If auto-sync is also enabled, summarization runs after sync completes.
+
+The hook handler (~agent-log-claude--session-end-handler~) is defined in =agent-log-claude.el= and is installed via ~eval-after-load~ when either defcustom is set before the backend is loaded.
 
 Sessions with a live agent process are excluded from summarization by session ID.  Each backend's ~agent-log--active-session-ids~ method provides the IDs of currently running sessions.  If summarization is already running when another session ends, the in-progress batch continues undisturbed.
 
@@ -377,7 +381,7 @@ The command ~agent-log-rename-sessions~ renames all sessions that lack a custom 
 
 This is a purely local, offline operation — no API calls are made.  Sessions must be summarized first via ~agent-log-summarize-sessions~ ([[#h:summary-generation][Summary generation]]).  Sessions that already have a custom title (e.g. from Claude Code's =/rename= command) are skipped.
 
-After writing custom-title entries, the cached JSONL file sizes in the index are updated in a single bulk write so that ~agent-log-sync-all~ does not treat the modified files as stale and trigger unnecessary re-renders.
+After writing custom-title entries, the cached JSONL file sizes in the index are updated in a single bulk write so that ~agent-log-sync-sessions~ does not treat the modified files as stale and trigger unnecessary re-renders.
 
 The command reports how many sessions were renamed, how many were skipped, and how many lacked a summary.
 
