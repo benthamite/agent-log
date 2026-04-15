@@ -478,25 +478,38 @@ empty, or the sentinel value."
          jsonl-file session-id oneline)))))
 
 (defun agent-log-claude--session-end-handler (message)
-  "Handle a Claude Code event MESSAGE, triggering sync on session end.
-Intended for use in `claude-code-event-hook'.  Runs `agent-log-sync-all'
-followed by `agent-log-summarize-sessions' when `:type' is \"Stop\"."
+  "Handle a Claude Code event MESSAGE, triggering actions on session end.
+Intended for use in `claude-code-event-hook'.  Runs
+`agent-log-sync-sessions' and/or `agent-log-summarize-sessions' when
+`:type' is \"Stop\", according to the user options
+`agent-log-auto-sync-sessions' and
+`agent-log-auto-summarize-sessions'."
   (when (eq (plist-get message :type) 'stop)
-    ;; Delay briefly to let the JSONL file finish writing.
     (run-with-timer
      1 nil
      (lambda ()
-       (agent-log-sync-all
-        (lambda ()
-          (when (and (require 'gptel nil t)
-                     (not agent-log--summarize-active))
-            (agent-log-summarize-sessions))))))
+       (agent-log-claude--run-session-end-actions)))
     nil))
+
+(defun agent-log-claude--run-session-end-actions ()
+  "Run the appropriate session-end actions based on user settings."
+  (if agent-log-auto-sync-sessions
+      (agent-log-sync-sessions
+       (lambda ()
+         (agent-log-claude--maybe-summarize)))
+    (agent-log-claude--maybe-summarize)))
+
+(defun agent-log-claude--maybe-summarize ()
+  "Run `agent-log-summarize-sessions' if auto-summarize is enabled."
+  (when (and agent-log-auto-summarize-sessions
+             (require 'gptel nil t)
+             (not agent-log--summarize-active))
+    (agent-log-summarize-sessions)))
 
 ;;;;; Interactive commands
 
 ;;;###autoload
-(defun agent-log-open-from-session ()
+(defun agent-log-open-current-session ()
   "Open the log for the Claude Code session in the current buffer.
 The current buffer must be a Claude Code terminal buffer.
 When possible, identify the exact session via the status file;
