@@ -443,9 +443,14 @@ The built-in pattern list (~agent-log-redact-patterns~) covers AWS access keys, 
 :CUSTOM_ID: h:redaction-integration
 :END:
 
-Redaction is applied via =:filter-return= advice on ~agent-log--render-entry~, so it covers both the full-render path (~agent-log--render-to-file~) and the live-update path (~agent-log--append-rendered-line~).  Source JSONL files are not touched — they remain in plain text at each agent's own location (for Claude Code, under =~/.claude/projects/=) and should be protected with filesystem-level controls.  This is by design: rewriting the JSONL would risk breaking session resumption.
+Redaction is applied at two layers:
 
-Redaction covers the rendered Markdown that you actually search and browse; it is not a substitute for preventing secrets from entering the transcript in the first place.
+1. /Render-time/ via =:filter-return= advice on ~agent-log--render-entry~, so every rendered entry passes through the redactor on its way to the Markdown file.  Covers both the full-render path (~agent-log--render-to-file~) and the live-update path (~agent-log--append-rendered-line~).
+2. /Source-level/ via ~agent-log-redact-scrub-jsonl~, which walks each .jsonl under ~agent-log-redact-jsonl-roots~ (Claude Code's =~/.claude/projects/=, Codex's =~/.codex/sessions/=), parses each line as JSON, and rewrites every string value through ~agent-log-redact-text~ atomically.  JSON object keys are preserved unchanged.  Files modified within ~agent-log-redact-active-session-seconds~ are skipped to avoid racing with an active session.
+
+Source-level scrubbing is the authoritative redaction: once the JSONL is clean, every downstream rendering of that session is automatically clean, and there is no plain-text copy of the secret on local disk.  Session-resume still works — a resumed conversation sees =[REDACTED:label:hash]= strings in prior history, which any coding agent handles as normal text.
+
+Neither layer is a substitute for preventing secrets from entering the transcript in the first place (that is the job of an upstream PreToolUse hook).  They are defense in depth: prevention at the edge, redaction at the core, and redaction at the view.
 
 ** Commands
 :PROPERTIES:
@@ -457,6 +462,9 @@ Redaction covers the rendered Markdown that you actually search and browse; it i
 
 #+findex: agent-log-redact-existing-in-place
 ~agent-log-redact-existing-in-place~ is a faster alternative for the first-time migration.  It iterates every already-rendered =.md= file, runs its contents through ~agent-log-redact-text~, and rewrites only files whose content actually changed — no JSONL re-parsing.  Much faster than ~agent-log-redact-rebuild-all~ on large archives.  Sessions whose JSONL has grown since their last render are not refreshed by this command; run ~agent-log-sync-sessions~ afterward to pick up any new content through the advice-based redactor.
+
+#+findex: agent-log-redact-scrub-jsonl
+~agent-log-redact-scrub-jsonl~ is the source-level scrubber.  It walks every directory in ~agent-log-redact-jsonl-roots~ recursively, and for every =.jsonl= older than ~agent-log-redact-active-session-seconds~ parses each line as JSON, redacts every string value via ~agent-log-redact-text~, and rewrites the file atomically (temporary file + rename) when anything changed.  Lines that fail to parse as JSON are preserved unchanged, so malformed or truncated entries survive scrubbing.  Run once after enabling redaction to clean historical sessions, and periodically afterward (manually, or via a cron-like schedule) to scrub newly-completed sessions.
 
 #+findex: agent-log-redact-preview
 ~agent-log-redact-preview~ lists every potential match in the current buffer — with its label, position, and a truncated preview — in a dedicated report buffer.  Useful for tuning patterns or adding entries to ~agent-log-redact-allowlist~ when a legitimate value triggers a false positive.
@@ -480,6 +488,12 @@ Redaction covers the rendered Markdown that you actually search and browse; it i
 
 #+vindex: agent-log-redact-hash-salt
 ~agent-log-redact-hash-salt~ is an optional salt prepended to secrets before hashing.  An empty salt (the default) is safe — the 8-char truncation already makes recovery impractical.  Set a non-empty salt if you sync the same logs to multiple machines and want placeholders to differ across them.
+
+#+vindex: agent-log-redact-jsonl-roots
+~agent-log-redact-jsonl-roots~ lists the directories the source-level scrubber walks.  Defaults to Claude Code's =~/.claude/projects/= and Codex's =~/.codex/sessions/=.
+
+#+vindex: agent-log-redact-active-session-seconds
+~agent-log-redact-active-session-seconds~ controls how recently-modified a .jsonl must be before the scrubber skips it.  Default 300 (five minutes).  Prevents racing with a session that is still writing.
 
 * ~agent-log-mode~
 :PROPERTIES:
