@@ -166,6 +166,34 @@ and should be protected with filesystem-level controls."
   (agent-log-sync-sessions
    (lambda () (message "agent-log-redact: rebuild complete"))))
 
+;;;###autoload
+(defun agent-log-redact-existing-in-place ()
+  "Redact secrets in every already-rendered .md file, in place.
+Iterates `agent-log-rendered-directory', reads each .md, runs it
+through `agent-log-redact-text', and rewrites only files whose
+content actually changed.  Much faster than
+`agent-log-redact-rebuild-all' on large archives because it does not
+re-parse JSONL; it only rewrites files that contain matches.
+
+Sessions whose JSONL has grown since last render are not refreshed
+by this command — run `agent-log-sync-sessions' afterward to pick up
+any new content through the advice-based redactor."
+  (interactive)
+  (let ((dir (expand-file-name agent-log-rendered-directory))
+        (scanned 0)
+        (changed 0))
+    (dolist (file (directory-files-recursively dir "\\.md\\'"))
+      (cl-incf scanned)
+      (let* ((original (with-temp-buffer
+                         (insert-file-contents file)
+                         (buffer-string)))
+             (redacted (agent-log-redact-text original)))
+        (unless (string= original redacted)
+          (cl-incf changed)
+          (with-temp-file file (insert redacted)))))
+    (message "agent-log-redact: scanned %d file(s), rewrote %d"
+             scanned changed)))
+
 (defun agent-log-redact--clear-rendered-directory ()
   "Delete every .md file under `agent-log-rendered-directory' and the index."
   (let ((dir (expand-file-name agent-log-rendered-directory)))

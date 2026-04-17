@@ -455,6 +455,9 @@ Redaction covers the rendered Markdown that you actually search and browse; it i
 #+findex: agent-log-redact-rebuild-all
 ~agent-log-redact-rebuild-all~ deletes every rendered =.md= file under ~agent-log-rendered-directory~, clears the index, and re-runs ~agent-log-sync-sessions~ so every session is re-rendered through the redactor.  Use after enabling redaction or after changing the pattern list.
 
+#+findex: agent-log-redact-existing-in-place
+~agent-log-redact-existing-in-place~ is a faster alternative for the first-time migration.  It iterates every already-rendered =.md= file, runs its contents through ~agent-log-redact-text~, and rewrites only files whose content actually changed — no JSONL re-parsing.  Much faster than ~agent-log-redact-rebuild-all~ on large archives.  Sessions whose JSONL has grown since their last render are not refreshed by this command; run ~agent-log-sync-sessions~ afterward to pick up any new content through the advice-based redactor.
+
 #+findex: agent-log-redact-preview
 ~agent-log-redact-preview~ lists every potential match in the current buffer — with its label, position, and a truncated preview — in a dedicated report buffer.  Useful for tuning patterns or adding entries to ~agent-log-redact-allowlist~ when a legitimate value triggers a false positive.
 
