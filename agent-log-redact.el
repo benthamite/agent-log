@@ -100,6 +100,20 @@ across machines (e.g. when the same logs are synced to multiple hosts
 and you don't want the hash to act as a cross-host identifier)."
   :type 'string)
 
+(defcustom agent-log-redact-jsonl-roots
+  '("~/.claude/projects/" "~/.codex/sessions/")
+  "Directories whose .jsonl files are scrubbed by source-level redaction.
+`agent-log-redact-scrub-jsonl' walks each root recursively and redacts
+every .jsonl it finds, skipping files modified too recently to be safely
+scrubbed (see `agent-log-redact-active-session-seconds')."
+  :type '(repeat directory))
+
+(defcustom agent-log-redact-active-session-seconds 300
+  "Skip JSONL files modified within this many seconds during scrubbing.
+Prevents racing with an active Claude Code or Codex session that may
+still be appending to its log file."
+  :type 'number)
+
 (defun agent-log-redact--hash (secret)
   "Return first 8 hex chars of sha256 of SECRET plus the configured salt."
   (substring (secure-hash 'sha256
@@ -193,6 +207,110 @@ any new content through the advice-based redactor."
           (with-temp-file file (insert redacted)))))
     (message "agent-log-redact: scanned %d file(s), rewrote %d"
              scanned changed)))
+
+;;;###autoload
+(defun agent-log-redact-scrub-jsonl ()
+  "Redact secrets in every source .jsonl file under the configured roots.
+Walks every directory listed in `agent-log-redact-jsonl-roots'
+recursively, parses each JSONL line, redacts every string value via
+`agent-log-redact-text', and rewrites the file atomically if anything
+changed.  Files modified within the last
+`agent-log-redact-active-session-seconds' seconds are skipped to avoid
+racing with an active session.
+
+JSON object keys are never redacted — only values.  Lines that fail to
+parse as JSON are written through unchanged.  The source .jsonl is the
+ground truth for session-resume functionality, so redaction happens on
+string values only; structure is preserved exactly."
+  (interactive)
+  (let ((total 0) (scanned 0) (skipped 0) (changed 0))
+    (dolist (root agent-log-redact-jsonl-roots)
+      (let ((dir (expand-file-name root)))
+        (when (file-directory-p dir)
+          (dolist (file (directory-files-recursively dir "\\.jsonl\\'"))
+            (cl-incf total)
+            (if (agent-log-redact--file-recent-p
+                 file agent-log-redact-active-session-seconds)
+                (cl-incf skipped)
+              (cl-incf scanned)
+              (when (agent-log-redact--scrub-jsonl-file file)
+                (cl-incf changed)))))))
+    (message "agent-log-redact: total=%d scanned=%d skipped=%d changed=%d"
+             total scanned skipped changed)))
+
+(defun agent-log-redact--file-recent-p (file seconds)
+  "Return non-nil if FILE was modified within the last SECONDS."
+  (let ((mtime (file-attribute-modification-time (file-attributes file))))
+    (< (- (float-time) (float-time mtime)) seconds)))
+
+(defun agent-log-redact--scrub-jsonl-file (file)
+  "Rewrite FILE with every JSON string value redacted.
+Returns non-nil when the file content changed.  Writes to a sibling
+temporary file and atomically renames on success, so a crash mid-write
+cannot corrupt the original."
+  (let ((changed nil)
+        (tmp (concat file ".redact-tmp")))
+    (with-temp-buffer
+      (let ((coding-system-for-read 'utf-8-unix)
+            (coding-system-for-write 'utf-8-unix))
+        (insert-file-contents file)
+        (let ((scrubbed (agent-log-redact--scrub-jsonl-buffer)))
+          (setq changed scrubbed))
+        (when changed
+          (write-region (point-min) (point-max) tmp nil 'quiet))))
+    (when changed
+      (rename-file tmp file t))
+    changed))
+
+(defun agent-log-redact--scrub-jsonl-buffer ()
+  "Redact string values in each JSONL line of the current buffer.
+Returns non-nil when any line changed."
+  (let ((changed nil))
+    (goto-char (point-min))
+    (while (not (eobp))
+      (let* ((start (line-beginning-position))
+             (end (line-end-position))
+             (line (buffer-substring-no-properties start end)))
+        (unless (string-empty-p line)
+          (let ((new (agent-log-redact--scrub-jsonl-line line)))
+            (unless (string= line new)
+              (setq changed t)
+              (delete-region start end)
+              (goto-char start)
+              (insert new)))))
+      (forward-line 1))
+    changed))
+
+(defun agent-log-redact--scrub-jsonl-line (line)
+  "Return LINE with every JSON string value passed through the redactor.
+Lines that fail to parse as JSON are returned unchanged so malformed or
+truncated entries survive scrubbing."
+  (condition-case _err
+      (let ((obj (json-parse-string line
+                                    :object-type 'hash-table
+                                    :array-type 'array
+                                    :null-object nil
+                                    :false-object :false)))
+        (json-serialize (agent-log-redact--walk-json-strings obj)
+                        :null-object nil
+                        :false-object :false))
+    (error line)))
+
+(defun agent-log-redact--walk-json-strings (value)
+  "Return VALUE with every string leaf replaced by `agent-log-redact-text'.
+Hash-table keys are preserved as-is; only values are redacted."
+  (cond
+   ((stringp value) (agent-log-redact-text value))
+   ((hash-table-p value)
+    (let ((out (make-hash-table :test (hash-table-test value)
+                                :size (hash-table-count value))))
+      (maphash (lambda (k v)
+                 (puthash k (agent-log-redact--walk-json-strings v) out))
+               value)
+      out))
+   ((vectorp value)
+    (vconcat (mapcar #'agent-log-redact--walk-json-strings value)))
+   (t value)))
 
 (defun agent-log-redact--clear-rendered-directory ()
   "Delete every .md file under `agent-log-rendered-directory' and the index."
