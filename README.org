@@ -416,6 +416,68 @@ When ~gptel-plus~ is available, the combined dollar cost of both stages is displ
 
 The command ~agent-log-resume-session~ resumes the session displayed in the current buffer in the coding agent.  The command extracts the session ID from the buffer (either from the buffer-local variable or from the front-matter comment) and dispatches to the buffer's backend via the ~agent-log--resume-session~ generic function.  For Claude Code sessions, this requires the =claude-code= package and passes the session ID with the =--resume= flag, starting in the session's project directory when possible.  The project directory is normalized with a trailing slash to match the format returned by ~claude-code--directory~, ensuring that buffer names, concurrent session detection, and modeline display all work correctly.  For Codex sessions, this requires the =codex= package and opens the session in a proper terminal buffer (eat or vterm), starting in the session's project directory when possible.  The keybinding is =r= in ~agent-log-mode~.
 
+* Secret redaction
+:PROPERTIES:
+:CUSTOM_ID: h:secret-redaction
+:END:
+
+Because AI coding agents frequently see or handle secrets, their conversation logs can contain API keys, tokens, and other credentials in plain text.  The optional =agent-log-redact= module scans each rendered entry for known secret formats and replaces every match with a deterministic placeholder of the form =[REDACTED:LABEL:HASH8]=, where =HASH8= is the first 8 hex chars of =sha256(secret + salt)=.  The same secret always produces the same placeholder, so you can still reason about which credential appears where without exposing its value.
+
+Enable it by loading the module:
+
+#+begin_src emacs-lisp
+(require 'agent-log-redact)
+#+end_src
+
+After enabling for the first time, run ~agent-log-redact-rebuild-all~ to re-render any previously-rendered logs through the redactor.
+
+** Coverage
+:PROPERTIES:
+:CUSTOM_ID: h:redaction-coverage
+:END:
+
+The built-in pattern list (~agent-log-redact-patterns~) covers AWS access keys, GitHub tokens (classic, =ghs_=, and fine-grained PATs), GitLab personal access tokens, Slack tokens, generic =sk-= API keys (with a more specific =sk-ant-= rule for Anthropic keys that fires first), Google API keys (=AIza...=), JSON Web Tokens, database connection strings with embedded credentials (=postgres=, =mysql=, =mongodb=, etc.), Google OAuth client secrets, PEM private-key blocks, and generic =api_key= / =password= / =token= assignments with high-entropy values.  Add site-specific patterns via ~agent-log-redact-extra-patterns~ (same =(REGEX . LABEL)= alist format); suppress known-safe matches via ~agent-log-redact-allowlist~ (a list of literal strings).
+
+** Integration
+:PROPERTIES:
+:CUSTOM_ID: h:redaction-integration
+:END:
+
+Redaction is applied via =:filter-return= advice on ~agent-log--render-entry~, so it covers both the full-render path (~agent-log--render-to-file~) and the live-update path (~agent-log--append-rendered-line~).  Source JSONL files are not touched — they remain in plain text at each agent's own location (for Claude Code, under =~/.claude/projects/=) and should be protected with filesystem-level controls.  This is by design: rewriting the JSONL would risk breaking session resumption.
+
+Redaction covers the rendered Markdown that you actually search and browse; it is not a substitute for preventing secrets from entering the transcript in the first place.
+
+** Commands
+:PROPERTIES:
+:CUSTOM_ID: h:redaction-commands
+:END:
+
+#+findex: agent-log-redact-rebuild-all
+~agent-log-redact-rebuild-all~ deletes every rendered =.md= file under ~agent-log-rendered-directory~, clears the index, and re-runs ~agent-log-sync-sessions~ so every session is re-rendered through the redactor.  Use after enabling redaction or after changing the pattern list.
+
+#+findex: agent-log-redact-preview
+~agent-log-redact-preview~ lists every potential match in the current buffer — with its label, position, and a truncated preview — in a dedicated report buffer.  Useful for tuning patterns or adding entries to ~agent-log-redact-allowlist~ when a legitimate value triggers a false positive.
+
+** User options
+:PROPERTIES:
+:CUSTOM_ID: h:redaction-options
+:END:
+
+#+vindex: agent-log-redact-enabled
+~agent-log-redact-enabled~ (default =t=) toggles redaction globally.  Set to =nil= to bypass the redactor without unloading the module.
+
+#+vindex: agent-log-redact-patterns
+~agent-log-redact-patterns~ is the built-in =(REGEX . LABEL)= alist.  Each entry is applied in order.  If a regex contains a capture group, only the first capture group is replaced; otherwise the whole match is replaced.  Use a capture group when you want to preserve surrounding context (e.g. the =password== prefix in a =password=VALUE= match).
+
+#+vindex: agent-log-redact-extra-patterns
+~agent-log-redact-extra-patterns~ is appended to the built-in list on every scan.  Use it to add site-specific secret formats without editing the built-in.
+
+#+vindex: agent-log-redact-allowlist
+~agent-log-redact-allowlist~ is a list of literal strings that are never redacted, even when matched by a pattern.  Use to suppress known false positives such as public test keys.
+
+#+vindex: agent-log-redact-hash-salt
+~agent-log-redact-hash-salt~ is an optional salt prepended to secrets before hashing.  An empty salt (the default) is safe — the 8-char truncation already makes recovery impractical.  Set a non-empty salt if you sync the same logs to multiple machines and want placeholders to differ across them.
+
 * ~agent-log-mode~
 :PROPERTIES:
 :CUSTOM_ID: h:agent-log-mode
