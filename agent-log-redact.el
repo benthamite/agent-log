@@ -123,7 +123,7 @@ still be appending to its log file."
 MESSAGE is a Claude Code event plist.  Fires only on `:type' `stop'.
 Defers the scrub by `agent-log-redact-active-session-seconds' plus
 30 seconds so the just-ended session file ages past the active window."
-  (when (and agent-log-redact-scrub-on-session-end
+  (when (and agent-log-auto-redact-sessions
              (eq (plist-get message :type) 'stop))
     (run-with-timer
      (+ agent-log-redact-active-session-seconds 30) nil
@@ -135,13 +135,13 @@ Defers the scrub by `agent-log-redact-active-session-seconds' plus
 
 (defun agent-log-redact--update-session-end-hook ()
   "Install or remove the session-end scrub hook based on the user option."
-  (if agent-log-redact-scrub-on-session-end
+  (if agent-log-auto-redact-sessions
       (add-hook 'claude-code-event-hook
                 #'agent-log-redact--session-end-handler)
     (remove-hook 'claude-code-event-hook
                  #'agent-log-redact--session-end-handler)))
 
-(defcustom agent-log-redact-scrub-on-session-end nil
+(defcustom agent-log-auto-redact-sessions nil
   "When non-nil, run `agent-log-redact-scrub-jsonl' after a session ends.
 Hooks into Claude Code's event mechanism via `claude-code-event-hook'.
 Scrubbing is deferred by `agent-log-redact-active-session-seconds'
