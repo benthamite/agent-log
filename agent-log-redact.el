@@ -247,9 +247,13 @@ string values only; structure is preserved exactly."
   "Rewrite FILE with every JSON string value redacted.
 Returns non-nil when the file content changed.  Writes to a sibling
 temporary file and atomically renames on success, so a crash mid-write
-cannot corrupt the original."
+cannot corrupt the original.  Locking is disabled for the write so
+concurrent scrubber runs cannot deadlock on stale lockfiles."
   (let ((changed nil)
-        (tmp (concat file ".redact-tmp")))
+        (tmp (concat file ".redact-tmp"))
+        (create-lockfiles nil))
+    (when (file-exists-p tmp)
+      (delete-file tmp))
     (with-temp-buffer
       (let ((coding-system-for-read 'utf-8-unix)
             (coding-system-for-write 'utf-8-unix))
