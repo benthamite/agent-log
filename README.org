@@ -495,6 +495,9 @@ Neither layer is a substitute for preventing secrets from entering the transcrip
 #+vindex: agent-log-redact-active-session-seconds
 ~agent-log-redact-active-session-seconds~ controls how recently-modified a .jsonl must be before the scrubber skips it.  Default 300 (five minutes).  Prevents racing with a session that is still writing.
 
+#+vindex: agent-log-redact-scrub-on-session-end
+~agent-log-redact-scrub-on-session-end~, when non-nil, runs ~agent-log-redact-scrub-jsonl~ automatically after each Claude Code session ends.  Installs a handler on ~claude-code-event-hook~ that fires on =:type stop= and defers the scrub by ~agent-log-redact-active-session-seconds~ plus 30 seconds — long enough for the just-ended session's .jsonl to age past the active-session window and be picked up by the same scrub pass.  Codex has no equivalent event hook, so Codex sessions are only scrubbed on manual invocation.  This is the companion to ~agent-log-auto-sync-sessions~ and ~agent-log-auto-summarize-sessions~ — same pattern, different action.
+
 * ~agent-log-mode~
 :PROPERTIES:
 :CUSTOM_ID: h:agent-log-mode
