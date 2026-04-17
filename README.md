@@ -54,7 +54,7 @@ Run `M-x agent-log-browse-sessions` to pick a project and session. The session o
 
 ## Documentation
 
-For a comprehensive description of all user options, commands, and functions, see the [manual](README.org).
+For a comprehensive description of all user options, commands, and functions, see the [manual](https://stafforini.com/notes/agent-log/).
 
 ## License
 
