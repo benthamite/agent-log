@@ -152,6 +152,15 @@ Returns a plist with :project and :date.")
 (cl-defgeneric agent-log--resume-session (backend session-id)
   "Resume the session SESSION-ID in the coding agent for BACKEND.")
 
+(cl-defgeneric agent-log--current-buffer-p (backend)
+  "Return non-nil if the current buffer is a live session buffer for BACKEND."
+  (:method ((_backend agent-log-backend)) nil))
+
+(cl-defgeneric agent-log--current-buffer-session-file (backend)
+  "Return the JSONL session file for the current buffer under BACKEND.
+Return nil if no matching session file can be identified."
+  (:method ((_backend agent-log-backend)) nil))
+
 ;;;;; Customization
 
 (defgroup agent-log nil
@@ -228,7 +237,6 @@ Returns nil if KEY is not in `agent-log-backends'."
 
 ;;;;;; Forward declarations for agent-log-claude.el
 
-(declare-function agent-log-open-current-session "agent-log-claude")
 (declare-function agent-log-rename-sessions "agent-log-claude")
 (declare-function agent-log-claude--session-end-handler "agent-log-claude")
 (declare-function agent-log-claude--maybe-rename-session "agent-log-claude")
@@ -526,6 +534,26 @@ a project, then for a session within that project."
            (session-id (car latest))
            (metadata (cdr latest)))
       (agent-log--open-rendered session-id metadata))))
+
+(defun agent-log--backend-for-current-buffer ()
+  "Return the backend whose live-session buffer matches the current buffer."
+  (cl-some (lambda (backend)
+             (and (agent-log--current-buffer-p backend) backend))
+           (agent-log--active-backend-instances)))
+
+;;;###autoload
+(defun agent-log-open-current-session ()
+  "Open the log for the AI coding agent session in the current buffer.
+The current buffer must be a live session buffer for one of the
+active backends (e.g. Claude Code or Codex)."
+  (interactive)
+  (let ((backend (agent-log--backend-for-current-buffer)))
+    (unless backend
+      (user-error "Not in a recognized AI coding agent buffer"))
+    (if-let* ((file (agent-log--current-buffer-session-file backend)))
+        (agent-log-open-file file)
+      (user-error "No session log found for %s"
+                  (agent-log-backend-name backend)))))
 
 ;;;###autoload
 (defun agent-log-open-directory ()

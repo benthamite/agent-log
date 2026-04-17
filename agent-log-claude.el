@@ -506,44 +506,34 @@ Intended for use in `claude-code-event-hook'.  Runs
              (not agent-log--summarize-active))
     (agent-log-summarize-sessions)))
 
-;;;;; Interactive commands
+;;;;; Current-buffer session detection
 
-;;;###autoload
-(defun agent-log-open-current-session ()
-  "Open the log for the Claude Code session in the current buffer.
-The current buffer must be a Claude Code terminal buffer.
-When possible, identify the exact session via the status file;
-otherwise fall back to the most recent JSONL in the project
-directory or to `history.jsonl'."
-  (interactive)
-  (unless (require 'claude-code nil t)
-    (user-error "Package `claude-code' is required but not available"))
-  (unless (claude-code--buffer-p (current-buffer))
-    (user-error "Not in a Claude Code buffer"))
+(cl-defmethod agent-log--current-buffer-p ((_backend agent-log-claude))
+  "Return non-nil if the current buffer is a Claude Code terminal buffer."
+  (and (require 'claude-code nil t)
+       (claude-code--buffer-p (current-buffer))))
+
+(cl-defmethod agent-log--current-buffer-session-file ((backend agent-log-claude))
+  "Return the JSONL file for the Claude Code session in the current buffer.
+BACKEND is the Claude Code backend instance.  Identify the exact
+session via the status file when possible; otherwise fall back to
+the most recent JSONL in the project directory, then to a session
+in `history.jsonl' whose project matches the buffer directory."
   (let* ((dir (claude-code--extract-directory-from-buffer-name (buffer-name)))
          (status (agent-log-claude--read-status-file))
-         ;; Primary: use transcript_path from the status file directly.
          (transcript (plist-get status :transcript_path))
          (session-id (plist-get status :session_id))
-         (jsonl (or (and transcript (file-exists-p transcript) transcript)
-                    ;; Secondary: construct from session-dir + session-id.
-                    (let ((session-dir
-                           (and dir (agent-log-claude--find-project-session-dir dir))))
-                      (or (and session-id session-dir
-                               (let ((f (expand-file-name
-                                         (concat session-id ".jsonl")
-                                         session-dir)))
-                                 (and (file-exists-p f) f)))
-                          (and session-dir
-                               (agent-log-claude--find-latest-jsonl session-dir)))))))
-    (if jsonl
-        (agent-log-open-file jsonl)
-      ;; Fallback: search history.jsonl for sessions matching this project
-      (let ((match (agent-log-claude--find-session-for-project
-                    dir (agent-log--read-sessions))))
-        (unless match
-          (user-error "No session log found for %s" (or dir "this buffer")))
-        (agent-log--open-rendered (car match) (cdr match))))))
+         (session-dir (and dir (agent-log-claude--find-project-session-dir dir))))
+    (or (and transcript (file-exists-p transcript) transcript)
+        (and session-id session-dir
+             (let ((f (expand-file-name (concat session-id ".jsonl") session-dir)))
+               (and (file-exists-p f) f)))
+        (and session-dir (agent-log-claude--find-latest-jsonl session-dir))
+        (when-let* ((match (agent-log-claude--find-session-for-project
+                            dir (agent-log--read-sessions backend))))
+          (plist-get (cdr match) :file)))))
+
+;;;;; Interactive commands
 
 ;;;###autoload
 (defun agent-log-rename-sessions (&optional force)
