@@ -143,12 +143,15 @@ in `agent-log-redact-allowlist' are left untouched."
 (defun agent-log-redact--apply-pattern (regex label)
   "Replace every REGEX match in the current buffer with a LABEL placeholder.
 Operates on group 1 if the pattern has one, otherwise the whole match.
-Respects `agent-log-redact-allowlist'."
+Respects `agent-log-redact-allowlist' and skips matches that already
+contain a `[REDACTED:...]' placeholder (which would otherwise get
+re-hashed on every pass, breaking idempotency)."
   (goto-char (point-min))
   (while (re-search-forward regex nil t)
     (let* ((group (if (match-beginning 1) 1 0))
            (matched (match-string-no-properties group)))
-      (unless (member matched agent-log-redact-allowlist)
+      (unless (or (member matched agent-log-redact-allowlist)
+                  (string-match-p "\\[REDACTED:" matched))
         (replace-match (agent-log-redact--placeholder label matched)
                        t t nil group)))))
 
