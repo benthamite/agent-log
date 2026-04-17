@@ -652,7 +652,8 @@ Returns an empty hash table if the file does not exist or is corrupt."
     (condition-case err
         (if (file-exists-p file)
             (let ((obj (with-temp-buffer
-                         (insert-file-contents file)
+                         (let ((coding-system-for-read 'utf-8-emacs-unix))
+                           (insert-file-contents file))
                          (read (current-buffer)))))
               (if (hash-table-p obj) obj
                 (message "agent-log: index file corrupt (not a hash table), rebuilding")
@@ -672,11 +673,12 @@ if Emacs crashes mid-write."
     (let ((tmp (make-temp-file (expand-file-name "_index-tmp" dir) nil ".el")))
       (condition-case err
           (progn
-            (with-temp-file tmp
-              (let ((print-level nil)
-                    (print-length nil))
-                (prin1 index (current-buffer))
-                (insert "\n")))
+            (let ((coding-system-for-write 'utf-8-emacs-unix))
+              (with-temp-file tmp
+                (let ((print-level nil)
+                      (print-length nil))
+                  (prin1 index (current-buffer))
+                  (insert "\n"))))
             (rename-file tmp file t))
         (error
          (ignore-errors (delete-file tmp))
