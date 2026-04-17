@@ -285,24 +285,36 @@ Returns non-nil when any line changed."
       (forward-line 1))
     changed))
 
+(defvar agent-log-redact--walk-changed nil
+  "Dynamic flag set when `agent-log-redact--walk-json-strings' redacts a value.
+Bound fresh for each JSONL line; consulted to decide whether the line
+needs re-serializing at all.")
+
 (defun agent-log-redact--scrub-jsonl-line (line)
   "Return LINE with every JSON string value passed through the redactor.
-Fast path: lines that contain no pattern match are returned verbatim,
-bypassing the JSON parse and serialize cycle (which is not byte-
-identical for all inputs).  Lines that fail to parse as JSON after
-matching a pattern are returned unchanged so malformed or truncated
-entries survive scrubbing."
+Fast path 1: lines with no pattern match are returned verbatim.
+Fast path 2: if the recursive walk finds a match syntactically but
+redacts nothing (e.g. the match was inside an already-redacted
+placeholder), the original line is returned verbatim too.  Both paths
+are required for idempotency — JSON parse + serialize is not
+byte-identical for all valid inputs, so unconditional re-serialization
+would cause drift across re-runs.  Lines that fail to parse as JSON are
+returned unchanged so malformed or truncated entries survive scrubbing."
   (if (not (agent-log-redact--line-matches-any-pattern-p line))
       line
     (condition-case _err
-        (let ((obj (json-parse-string line
-                                      :object-type 'hash-table
-                                      :array-type 'array
-                                      :null-object nil
-                                      :false-object :false)))
-          (json-serialize (agent-log-redact--walk-json-strings obj)
-                          :null-object nil
-                          :false-object :false))
+        (let* ((agent-log-redact--walk-changed nil)
+               (obj (json-parse-string line
+                                       :object-type 'hash-table
+                                       :array-type 'array
+                                       :null-object nil
+                                       :false-object :false))
+               (new (agent-log-redact--walk-json-strings obj)))
+          (if agent-log-redact--walk-changed
+              (json-serialize new
+                              :null-object nil
+                              :false-object :false)
+            line))
       (error line))))
 
 (defun agent-log-redact--line-matches-any-pattern-p (line)
@@ -317,9 +329,15 @@ entries survive scrubbing."
 
 (defun agent-log-redact--walk-json-strings (value)
   "Return VALUE with every string leaf replaced by `agent-log-redact-text'.
-Hash-table keys are preserved as-is; only values are redacted."
+Hash-table keys are preserved as-is; only values are redacted.  Sets
+`agent-log-redact--walk-changed' when any string is actually rewritten,
+so the caller can skip re-serialization if nothing needed redacting."
   (cond
-   ((stringp value) (agent-log-redact-text value))
+   ((stringp value)
+    (let ((new (agent-log-redact-text value)))
+      (unless (string= value new)
+        (setq agent-log-redact--walk-changed t))
+      new))
    ((hash-table-p value)
     (let ((out (make-hash-table :test (hash-table-test value)
                                 :size (hash-table-count value))))
