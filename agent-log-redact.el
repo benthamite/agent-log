@@ -114,6 +114,46 @@ Prevents racing with an active Claude Code or Codex session that may
 still be appending to its log file."
   :type 'number)
 
+(defvar claude-code-event-hook)
+
+(declare-function agent-log-redact-scrub-jsonl "agent-log-redact")
+
+(defun agent-log-redact--session-end-handler (message)
+  "Run `agent-log-redact-scrub-jsonl' on Claude Code session end.
+MESSAGE is a Claude Code event plist.  Fires only on `:type' `stop'.
+Defers the scrub by `agent-log-redact-active-session-seconds' plus
+30 seconds so the just-ended session file ages past the active window."
+  (when (and agent-log-redact-scrub-on-session-end
+             (eq (plist-get message :type) 'stop))
+    (run-with-timer
+     (+ agent-log-redact-active-session-seconds 30) nil
+     (lambda ()
+       (condition-case err
+           (agent-log-redact-scrub-jsonl)
+         (error (message "agent-log-redact: scheduled scrub failed: %s"
+                         (error-message-string err))))))))
+
+(defun agent-log-redact--update-session-end-hook ()
+  "Install or remove the session-end scrub hook based on the user option."
+  (if agent-log-redact-scrub-on-session-end
+      (add-hook 'claude-code-event-hook
+                #'agent-log-redact--session-end-handler)
+    (remove-hook 'claude-code-event-hook
+                 #'agent-log-redact--session-end-handler)))
+
+(defcustom agent-log-redact-scrub-on-session-end nil
+  "When non-nil, run `agent-log-redact-scrub-jsonl' after a session ends.
+Hooks into Claude Code's event mechanism via `claude-code-event-hook'.
+Scrubbing is deferred by `agent-log-redact-active-session-seconds'
+plus a small buffer so the just-ended session's JSONL ages past the
+active-session window and gets scrubbed on the same run.  Requires
+the `claude-code' package.  Codex has no equivalent event hook, so
+Codex sessions are only scrubbed by manual invocation."
+  :type 'boolean
+  :set (lambda (sym val)
+         (set-default sym val)
+         (agent-log-redact--update-session-end-hook)))
+
 (defun agent-log-redact--hash (secret)
   "Return first 8 hex chars of sha256 of SECRET plus the configured salt."
   (substring (secure-hash 'sha256
@@ -164,6 +204,8 @@ Pass through unchanged when `agent-log-redact-enabled' is nil."
 
 (advice-add 'agent-log--render-entry :filter-return
             #'agent-log-redact--filter-return)
+
+(agent-log-redact--update-session-end-hook)
 
 ;;;###autoload
 (defun agent-log-redact-rebuild-all ()
