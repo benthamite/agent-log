@@ -45,6 +45,8 @@
 (require 'agent-log)
 
 (declare-function codex--start-subcommand "codex" (subcommand &optional args extra-args))
+(declare-function codex--buffer-p "codex" (buffer))
+(declare-function codex--buffer-directory-for "codex" (buffer))
 
 ;;;;; Struct definition
 
@@ -480,6 +482,46 @@ Codex process."
     (cl-letf (((symbol-function 'codex--directory)
                (lambda () default-directory)))
       (codex--start-subcommand "resume" nil (list session-id)))))
+
+;;;;;; Current-buffer session detection
+
+(cl-defmethod agent-log--current-buffer-p ((_backend agent-log-codex))
+  "Return non-nil if the current buffer is a Codex terminal buffer."
+  (and (require 'codex nil t)
+       (codex--buffer-p (current-buffer))))
+
+(cl-defmethod agent-log--current-buffer-session-file ((backend agent-log-codex))
+  "Return the JSONL file for the Codex session in the current buffer.
+BACKEND is the Codex backend instance.  Since Codex does not
+publish a live session ID, fall back to the most recent session
+whose recorded CWD matches the buffer's directory."
+  (when-let* ((dir (codex--buffer-directory-for (current-buffer)))
+              (match (agent-log-codex--find-session-for-project
+                      dir (agent-log--read-sessions backend))))
+    (plist-get (cdr match) :file)))
+
+(defun agent-log-codex--find-session-for-project (directory sessions)
+  "Find the latest session in SESSIONS whose project matches DIRECTORY.
+SESSIONS should be sorted newest-first (as from
+`agent-log--read-sessions').  DIRECTORY is compared against each
+session's :project field using both the expanded path and
+`file-truename'."
+  (let ((targets (agent-log-codex--directory-match-targets directory)))
+    (cl-find-if (lambda (session)
+                  (let ((project (plist-get (cdr session) :project)))
+                    (and (stringp project)
+                         (not (string-empty-p project))
+                         (member (directory-file-name
+                                  (expand-file-name project))
+                                 targets))))
+                sessions)))
+
+(defun agent-log-codex--directory-match-targets (directory)
+  "Return a deduplicated list of canonical forms of DIRECTORY for matching."
+  (delete-dups
+   (mapcar #'directory-file-name
+           (list (expand-file-name directory)
+                 (file-truename (expand-file-name directory))))))
 
 ;;;;; Codex-specific helper functions
 

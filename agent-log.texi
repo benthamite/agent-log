@@ -32,6 +32,7 @@ This manual describes the features and customization options for the @samp{agent
 * Installation::
 * User options::
 * Commands::
+* Secret redaction::
 * @code{agent-log-mode}::
 * How it works::
 * Troubleshooting::
@@ -75,6 +76,13 @@ Commands
 Summary generation
 
 * Automatic sync and summarization on session end::
+
+Secret redaction
+
+* Coverage::
+* Integration::
+* Commands: Commands (1). 
+* User options: User options (1). 
 
 @code{agent-log-mode}
 
@@ -376,7 +384,7 @@ The command @code{agent-log-open-file} opens a specific JSONL file by path.  It 
 
 The command @code{agent-log-open-session} opens a session by its ID@.  It prompts for the session ID interactively. @*
 
-The command @code{agent-log-open-current-session} opens the log for the Claude Code session running in the current buffer.  This command is defined in @samp{agent-log-claude.el} and requires the @samp{claude-code} package; the current buffer must be a Claude Code terminal buffer.  The command reads the status file that Claude Code writes to @samp{/tmp/claude-code-status/} and uses the @samp{transcript_path} field to locate the exact JSONL file for the session.  This uniquely identifies the session even when multiple sessions (including branches created with @code{/branch}) share the same project directory.  If the status file is unavailable, it falls back to the most recently modified JSONL file in the project's session directory, or to searching @samp{history.jsonl}.  This lets you quickly jump from an active Claude Code session to its rendered log. @*
+The command @code{agent-log-open-current-session} opens the log for the coding agent session running in the current buffer.  It dispatches on the current buffer's backend: if the buffer is a Claude Code terminal, it reads the status file that Claude Code writes to @samp{/tmp/claude-code-status/} and uses the @samp{transcript_path} field to locate the exact JSONL file for the session, which uniquely identifies the session even when multiple sessions (including branches created with @code{/branch}) share the same project directory; if the status file is unavailable, it falls back to the most recently modified JSONL file in the project's session directory, or to searching @samp{history.jsonl}.  If the buffer is a Codex terminal, the command falls back to the most recent Codex session whose recorded working directory matches the buffer's directory, since Codex does not publish a live session identifier.  This lets you quickly jump from an active coding agent session to its rendered log. @*
 
 @node Rendered directory
 @section Rendered directory
@@ -507,6 +515,89 @@ When @code{gptel-plus} is available, the combined dollar cost of both stages is 
 @findex agent-log-resume-session
 
 The command @code{agent-log-resume-session} resumes the session displayed in the current buffer in the coding agent.  The command extracts the session ID from the buffer (either from the buffer-local variable or from the front-matter comment) and dispatches to the buffer's backend via the @code{agent-log--resume-session} generic function.  For Claude Code sessions, this requires the @samp{claude-code} package and passes the session ID with the @samp{--resume} flag, starting in the session's project directory when possible.  The project directory is normalized with a trailing slash to match the format returned by @code{claude-code--directory}, ensuring that buffer names, concurrent session detection, and modeline display all work correctly.  For Codex sessions, this requires the @samp{codex} package and opens the session in a proper terminal buffer (eat or vterm), starting in the session's project directory when possible.  The keybinding is @samp{r} in @code{agent-log-mode}. @*
+
+@node Secret redaction
+@chapter Secret redaction
+
+Because AI coding agents frequently see or handle secrets, their conversation logs can contain API keys, tokens, and other credentials in plain text.  The optional @samp{agent-log-redact} module scans each rendered entry for known secret formats and replaces every match with a deterministic placeholder of the form @samp{[REDACTED:LABEL:HASH8]}, where @samp{HASH8} is the first 8 hex chars of @samp{sha256(secret + salt)}.  The same secret always produces the same placeholder, so you can still reason about which credential appears where without exposing its value. @*
+
+Enable it by loading the module: @*
+
+@lisp
+(require 'agent-log-redact)
+@end lisp
+
+After enabling for the first time, run @code{agent-log-redact-rebuild-all} to re-render any previously-rendered logs through the redactor. @*
+
+@menu
+* Coverage::
+* Integration::
+* Commands: Commands (1). 
+* User options: User options (1). 
+@end menu
+
+@node Coverage
+@section Coverage
+
+The built-in pattern list (@code{agent-log-redact-patterns}) covers AWS access keys, GitHub tokens (classic, @samp{ghs_}, and fine-grained PATs), GitLab personal access tokens, Slack tokens, generic @samp{sk-} API keys (with a more specific @samp{sk-ant-} rule for Anthropic keys that fires first), Google API keys (@samp{AIza...}), JSON Web Tokens, database connection strings with embedded credentials (@samp{postgres}, @samp{mysql}, @samp{mongodb}, etc.), Google OAuth client secrets, PEM private-key blocks, and generic @samp{api_key} / @samp{password} / @samp{token} assignments with high-entropy values.  Add site-specific patterns via @code{agent-log-redact-extra-patterns} (same @samp{(REGEX . LABEL)} alist format); suppress known-safe matches via @code{agent-log-redact-allowlist} (a list of literal strings). @*
+
+@node Integration
+@section Integration
+
+Redaction is applied at two layers: @*
+
+@enumerate
+@item
+@emph{Render-time} via @samp{:filter-return} advice on @code{agent-log--render-entry}, so every rendered entry passes through the redactor on its way to the Markdown file.  Covers both the full-render path (@code{agent-log--render-to-file}) and the live-update path (@code{agent-log--append-rendered-line}). @*
+@item
+@emph{Source-level} via @code{agent-log-redact-scrub-jsonl}, which walks each .jsonl under @code{agent-log-redact-jsonl-roots} (Claude Code's @samp{~/.claude/projects/}, Codex's @samp{~/.codex/sessions/}), parses each line as JSON, and rewrites every string value through @code{agent-log-redact-text} atomically.  JSON object keys are preserved unchanged.  Files modified within @code{agent-log-redact-active-session-seconds} are skipped to avoid racing with an active session. @*
+@end enumerate
+
+Source-level scrubbing is the authoritative redaction: once the JSONL is clean, every downstream rendering of that session is automatically clean, and there is no plain-text copy of the secret on local disk.  Session-resume still works — a resumed conversation sees @samp{[REDACTED:label:hash]} strings in prior history, which any coding agent handles as normal text. @*
+
+Neither layer is a substitute for preventing secrets from entering the transcript in the first place (that is the job of an upstream PreToolUse hook).  They are defense in depth: prevention at the edge, redaction at the core, and redaction at the view. @*
+
+@node Commands (1)
+@section Commands
+
+@findex agent-log-redact-rebuild-all
+@code{agent-log-redact-rebuild-all} deletes every rendered @samp{.md} file under @code{agent-log-rendered-directory}, clears the index, and re-runs @code{agent-log-sync-sessions} so every session is re-rendered through the redactor.  Use after enabling redaction or after changing the pattern list. @*
+
+@findex agent-log-redact-existing-in-place
+@code{agent-log-redact-existing-in-place} is a faster alternative for the first-time migration.  It iterates every already-rendered @samp{.md} file, runs its contents through @code{agent-log-redact-text}, and rewrites only files whose content actually changed — no JSONL re-parsing.  Much faster than @code{agent-log-redact-rebuild-all} on large archives.  Sessions whose JSONL has grown since their last render are not refreshed by this command; run @code{agent-log-sync-sessions} afterward to pick up any new content through the advice-based redactor. @*
+
+@findex agent-log-redact-scrub-jsonl
+@code{agent-log-redact-scrub-jsonl} is the source-level scrubber.  It walks every directory in @code{agent-log-redact-jsonl-roots} recursively, and for every @samp{.jsonl} older than @code{agent-log-redact-active-session-seconds} examines each line.  Idempotency is enforced at three layers.  First, @code{agent-log-redact-text} skips any regex match whose captured text already contains a @samp{[REDACTED:...]} substring, so a pattern with a permissive character class cannot swallow and re-hash its own placeholder (e.g. the @samp{db-password} pattern captures @samp{[^@@/ \n]+} as the password, which would otherwise match a previously-redacted placeholder on a subsequent pass).  Second, lines that contain no pattern match at all are left verbatim — no JSON round-trip.  Third, lines that match syntactically but whose recursive walk redacts no actual string are also left verbatim (this covers the case where a pattern matches inside an already-redacted placeholder that the first layer skips).  Only lines where at least one string value is actually rewritten trigger JSON re-serialization.  The file is rewritten atomically (temporary file + rename) only when at least one line actually changed.  Both fast paths are required because JSON parse + serialize is not guaranteed to be byte-identical for all valid inputs — unconditional re-serialization would cause spurious drift across re-runs.  Lines that fail to parse as JSON are preserved unchanged, so malformed or truncated entries survive scrubbing.  The write path disables Emacs lockfiles so concurrent scrubber invocations do not deadlock on stale @samp{.#} lock symlinks.  Run once after enabling redaction to clean historical sessions, and periodically afterward (manually, or via a cron-like schedule) to scrub newly-completed sessions. @*
+
+@findex agent-log-redact-preview
+@code{agent-log-redact-preview} lists every potential match in the current buffer — with its label, position, and a truncated preview — in a dedicated report buffer.  Useful for tuning patterns or adding entries to @code{agent-log-redact-allowlist} when a legitimate value triggers a false positive. @*
+
+@node User options (1)
+@section User options
+
+@vindex agent-log-redact-enabled
+@code{agent-log-redact-enabled} (default @samp{t}) toggles redaction globally.  Set to @samp{nil} to bypass the redactor without unloading the module. @*
+
+@vindex agent-log-redact-patterns
+@code{agent-log-redact-patterns} is the built-in @samp{(REGEX . LABEL)} alist.  Each entry is applied in order.  If a regex contains a capture group, only the first capture group is replaced; otherwise the whole match is replaced.  Use a capture group when you want to preserve surrounding context (e.g. the @samp{password=} prefix in a @samp{password=VALUE} match). @*
+
+@vindex agent-log-redact-extra-patterns
+@code{agent-log-redact-extra-patterns} is appended to the built-in list on every scan.  Use it to add site-specific secret formats without editing the built-in. @*
+
+@vindex agent-log-redact-allowlist
+@code{agent-log-redact-allowlist} is a list of literal strings that are never redacted, even when matched by a pattern.  Use to suppress known false positives such as public test keys. @*
+
+@vindex agent-log-redact-hash-salt
+@code{agent-log-redact-hash-salt} is an optional salt prepended to secrets before hashing.  An empty salt (the default) is safe — the 8-char truncation already makes recovery impractical.  Set a non-empty salt if you sync the same logs to multiple machines and want placeholders to differ across them. @*
+
+@vindex agent-log-redact-jsonl-roots
+@code{agent-log-redact-jsonl-roots} lists the directories the source-level scrubber walks.  Defaults to Claude Code's @samp{~/.claude/projects/} and Codex's @samp{~/.codex/sessions/}. @*
+
+@vindex agent-log-redact-active-session-seconds
+@code{agent-log-redact-active-session-seconds} controls how recently-modified a .jsonl must be before the scrubber skips it.  Default 300 (five minutes).  Prevents racing with a session that is still writing. @*
+
+@vindex agent-log-auto-redact-sessions
+@code{agent-log-auto-redact-sessions}, when non-nil, scrubs JSONL automatically after each Claude Code session ends.  Installs a handler on @code{claude-code-event-hook} that fires on @samp{:type stop} and, after @code{agent-log-redact-active-session-seconds} plus 30 seconds, launches an @samp{emacs --batch} subprocess that runs @code{agent-log-redact-scrub-jsonl}.  Using a subprocess is essential: scrubbing thousands of files inline in the interactive Emacs would block the UI for minutes.  Codex has no equivalent event hook, so Codex sessions are only scrubbed on manual invocation.  This is the companion to @code{agent-log-auto-sync-sessions} and @code{agent-log-auto-summarize-sessions} — same pattern, different action. @*
 
 @node @code{agent-log-mode}
 @chapter @code{agent-log-mode}
