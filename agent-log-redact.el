@@ -116,20 +116,69 @@ still be appending to its log file."
 
 (defvar claude-code-event-hook)
 
-(declare-function agent-log-redact-scrub-jsonl "agent-log-redact")
+(defvar agent-log-redact--source-directory
+  (or (and load-file-name (file-name-directory load-file-name))
+      default-directory)
+  "Directory containing this file, captured at load time.
+Used to locate the sibling elpaca builds tree when spawning the
+out-of-process scrubber so the subprocess's load-path can find
+`agent-log' without running the user's full init.")
+
+(defun agent-log-redact--elpaca-builds-directory ()
+  "Return the elpaca builds directory sibling to this file's source tree.
+Returns nil if the expected layout is not present (e.g. installed via
+a non-elpaca mechanism)."
+  (let ((candidate (expand-file-name "../../builds/"
+                                     agent-log-redact--source-directory)))
+    (and (file-directory-p candidate) candidate)))
+
+(defun agent-log-redact--spawn-scrubber ()
+  "Start an `emacs --batch' subprocess that scrubs JSONL out of process.
+Non-blocking: returns immediately.  The subprocess inherits no state
+from the running Emacs other than the elpaca builds load-path, which
+is reconstructed from this file's location."
+  (let ((builds (agent-log-redact--elpaca-builds-directory)))
+    (unless builds
+      (user-error
+       "agent-log-redact: cannot locate elpaca builds directory from %s"
+       agent-log-redact--source-directory))
+    (make-process
+     :name "agent-log-redact-scrub"
+     :buffer nil
+     :noquery t
+     :connection-type 'pipe
+     :command
+     (list (expand-file-name invocation-name invocation-directory)
+           "--batch"
+           "--eval"
+           (format "(dolist (d (file-expand-wildcards %S)) (add-to-list 'load-path d))"
+                   (concat builds "*/"))
+           "--eval" "(require 'agent-log)"
+           "--eval" "(require 'agent-log-redact)"
+           "--eval" "(agent-log-redact-scrub-jsonl)")
+     :sentinel #'agent-log-redact--scrubber-sentinel)))
+
+(defun agent-log-redact--scrubber-sentinel (proc event)
+  "Log completion of the background scrubber PROC with EVENT string."
+  (when (memq (process-status proc) '(exit signal))
+    (let ((status (process-exit-status proc)))
+      (message "agent-log-redact: background scrub finished (exit %d, %s)"
+               status (string-trim event)))))
 
 (defun agent-log-redact--session-end-handler (message)
-  "Run `agent-log-redact-scrub-jsonl' on Claude Code session end.
+  "Spawn the background scrubber on Claude Code session end.
 MESSAGE is a Claude Code event plist.  Fires only on `:type' `stop'.
-Defers the scrub by `agent-log-redact-active-session-seconds' plus
-30 seconds so the just-ended session file ages past the active window."
+Defers the spawn by `agent-log-redact-active-session-seconds' plus 30
+seconds so the just-ended session file ages past the active window,
+then launches `agent-log-redact-scrub-jsonl' in an `emacs --batch'
+subprocess so the running Emacs stays responsive."
   (when (and agent-log-auto-redact-sessions
              (eq (plist-get message :type) 'stop))
     (run-with-timer
      (+ agent-log-redact-active-session-seconds 30) nil
      (lambda ()
        (condition-case err
-           (agent-log-redact-scrub-jsonl)
+           (agent-log-redact--spawn-scrubber)
          (error (message "agent-log-redact: scheduled scrub failed: %s"
                          (error-message-string err))))))))
 
