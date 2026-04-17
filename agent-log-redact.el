@@ -287,18 +287,33 @@ Returns non-nil when any line changed."
 
 (defun agent-log-redact--scrub-jsonl-line (line)
   "Return LINE with every JSON string value passed through the redactor.
-Lines that fail to parse as JSON are returned unchanged so malformed or
-truncated entries survive scrubbing."
-  (condition-case _err
-      (let ((obj (json-parse-string line
-                                    :object-type 'hash-table
-                                    :array-type 'array
-                                    :null-object nil
-                                    :false-object :false)))
-        (json-serialize (agent-log-redact--walk-json-strings obj)
-                        :null-object nil
-                        :false-object :false))
-    (error line)))
+Fast path: lines that contain no pattern match are returned verbatim,
+bypassing the JSON parse and serialize cycle (which is not byte-
+identical for all inputs).  Lines that fail to parse as JSON after
+matching a pattern are returned unchanged so malformed or truncated
+entries survive scrubbing."
+  (if (not (agent-log-redact--line-matches-any-pattern-p line))
+      line
+    (condition-case _err
+        (let ((obj (json-parse-string line
+                                      :object-type 'hash-table
+                                      :array-type 'array
+                                      :null-object nil
+                                      :false-object :false)))
+          (json-serialize (agent-log-redact--walk-json-strings obj)
+                          :null-object nil
+                          :false-object :false))
+      (error line))))
+
+(defun agent-log-redact--line-matches-any-pattern-p (line)
+  "Return non-nil if LINE contains a match for any configured pattern."
+  (let ((case-fold-search t))
+    (catch 'hit
+      (dolist (entry (append agent-log-redact-patterns
+                             agent-log-redact-extra-patterns))
+        (when (string-match-p (car entry) line)
+          (throw 'hit t)))
+      nil)))
 
 (defun agent-log-redact--walk-json-strings (value)
   "Return VALUE with every string leaf replaced by `agent-log-redact-text'.
