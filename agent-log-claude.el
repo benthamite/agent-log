@@ -500,8 +500,13 @@ Intended for use in `claude-code-event-hook'.  Runs
     (agent-log-claude--maybe-summarize)))
 
 (defun agent-log-claude--maybe-summarize ()
-  "Run `agent-log-summarize-sessions' if auto-summarize is enabled."
+  "Run `agent-log-summarize-sessions' if auto-summarize is enabled.
+Skips when `agent-log--summarize-blocked-reason' is non-nil — i.e.
+when a previous run aborted with an unrecoverable error such as an
+expired API key.  An interactive call to `agent-log-summarize-sessions'
+clears the block."
   (when (and agent-log-auto-summarize-sessions
+             (not agent-log--summarize-blocked-reason)
              (require 'gptel nil t)
              (not agent-log--summarize-active))
     (agent-log-summarize-sessions)))
