@@ -454,6 +454,20 @@ Set before each `gptel-request' and consumed by the first callback
 invocation.  Subsequent callbacks for the same request see a mismatch
 and are silently ignored, preventing chain forking from streaming.")
 
+(defvar agent-log--summarize-blocked-reason nil
+  "Human-readable reason why summary auto-runs are suspended.
+Set when a run aborts due to an unrecoverable API error such as an
+expired or invalid key.  While non-nil, the auto-summarize hook skips
+without re-triggering.  Cleared by an interactive call to
+`agent-log-summarize-sessions'.")
+
+(defvar agent-log--summarize-consecutive-failures 0
+  "Count of consecutive failed summary requests in the current run.
+Reset to 0 on success and at the start of each new run.")
+
+(defconst agent-log--summarize-max-consecutive-failures 3
+  "Abort the current summary run after this many consecutive failures.")
+
 ;; Concurrency control for async summary generation
 ;; -------------------------------------------------
 ;; `agent-log--summarize-generation' and `agent-log--summarize-request-id'
@@ -1778,6 +1792,8 @@ If summary generation is already in progress, stop it instead."
    (agent-log--summarize-active
     (agent-log-stop-summarize-sessions))
    (t
+    (setq agent-log--summarize-blocked-reason nil
+          agent-log--summarize-consecutive-failures 0)
     (let* ((sessions (agent-log--read-all-sessions))
            (index (agent-log--read-index))
            (pending (agent-log--sessions-needing-summary sessions index)))
@@ -1868,9 +1884,9 @@ chain-continuation state for `agent-log--summarize-next'."
     (gptel-request prompt
       :system agent-log--summary-system-message
       :callback
-      (lambda (response _info)
+      (lambda (response info)
         (agent-log--summarize-callback
-         response request-id sid remaining done total gen)))))
+         response info request-id sid remaining done total gen)))))
 
 (defun agent-log--summarize-display-name (meta text sid)
   "Return a human-readable display name from META, TEXT, or SID."
@@ -1883,40 +1899,68 @@ chain-continuation state for `agent-log--summarize-next'."
           sid)
       display)))
 
-(defun agent-log--summarize-callback (response request-id sid remaining done total gen)
+(defun agent-log--summarize-callback (response info request-id sid remaining done total gen)
   "Handle the gptel RESPONSE for a summary request.
-REQUEST-ID, SID, REMAINING, DONE, TOTAL, and GEN are
-chain-continuation state.  Non-string responses (tool-calls,
-reasoning blocks) are ignored; only the final string response or
-an error (nil) consumes the request guard and advances the chain."
+INFO is the gptel callback info plist (used to extract error details
+when RESPONSE is nil).  REQUEST-ID, SID, REMAINING, DONE, TOTAL, and
+GEN are chain-continuation state.  Non-string responses (tool-calls,
+reasoning blocks) are ignored; only the final string response or an
+error (nil) consumes the request guard and advances the chain."
   (when (eq agent-log--summarize-request-id request-id)
     (cond
-     ;; Success: got a string response.
      ((stringp response)
-      (setq agent-log--summarize-request-id nil)
-      (when (and agent-log--summarize-active
-                 (= gen agent-log--summarize-generation))
-        (let ((parsed (agent-log--parse-summary-response response)))
-          (if parsed
-              (progn
-                (agent-log--index-update-props
-                 sid (list :summary (car parsed)
-                           :summary-oneline (cdr parsed)))
-                (when agent-log-auto-rename-sessions
-                  (when (require 'agent-log-claude nil t)
-                    (agent-log-claude--maybe-rename-session sid (cdr parsed)))))
-            (message "Failed to parse summary for %s" sid)))
-        ;; Brief delay before the next request to avoid hammering the
-        ;; LLM API and to let the event loop process pending I/O.
-        (run-with-timer
-         0.1 nil
-         #'agent-log--summarize-next
-         (cdr remaining)
-         (1+ done) total gen)))
-     ;; Error: nil response from gptel.  Clear the guard and advance.
+      (agent-log--summarize-handle-success
+       response sid remaining done total gen))
      ((null response)
-      (setq agent-log--summarize-request-id nil)
-      (message "Summary request failed for %s, skipping" sid)
+      (agent-log--summarize-handle-failure
+       info sid remaining done total gen)))))
+
+(defun agent-log--summarize-handle-success (response sid remaining done total gen)
+  "Record the successful summary RESPONSE for session SID.
+RESPONSE is the LLM's reply.  REMAINING, DONE, TOTAL, and GEN are
+chain-continuation state passed to `agent-log--summarize-next' for the
+next session."
+  (setq agent-log--summarize-request-id nil
+        agent-log--summarize-consecutive-failures 0)
+  (when (and agent-log--summarize-active
+             (= gen agent-log--summarize-generation))
+    (let ((parsed (agent-log--parse-summary-response response)))
+      (if parsed
+          (progn
+            (agent-log--index-update-props
+             sid (list :summary (car parsed)
+                       :summary-oneline (cdr parsed)))
+            (when agent-log-auto-rename-sessions
+              (when (require 'agent-log-claude nil t)
+                (agent-log-claude--maybe-rename-session sid (cdr parsed)))))
+        (message "Failed to parse summary for %s" sid)))
+    (run-with-timer
+     0.1 nil
+     #'agent-log--summarize-next
+     (cdr remaining)
+     (1+ done) total gen)))
+
+(defun agent-log--summarize-handle-failure (info sid remaining done total gen)
+  "Handle an API failure for session SID.
+INFO is the gptel callback info plist with `:status' and `:error'
+fields.  REMAINING, DONE, TOTAL, and GEN are chain-continuation
+state.  Aborts the run on auth errors (and blocks auto-restart) or
+after `agent-log--summarize-max-consecutive-failures' consecutive
+failures; otherwise logs the error and advances to the next session."
+  (setq agent-log--summarize-request-id nil)
+  (cl-incf agent-log--summarize-consecutive-failures)
+  (let* ((err-msg (agent-log--summarize-error-message info))
+         (err-class (agent-log--summarize-classify-error info))
+         (auth-error (eq err-class 'auth))
+         (too-many (>= agent-log--summarize-consecutive-failures
+                       agent-log--summarize-max-consecutive-failures)))
+    (cond
+     (auth-error
+      (agent-log--summarize-abort sid err-msg t (1+ done) total))
+     (too-many
+      (agent-log--summarize-abort sid err-msg nil (1+ done) total))
+     (t
+      (message "Summary request failed for %s: %s" sid err-msg)
       (when (and agent-log--summarize-active
                  (= gen agent-log--summarize-generation))
         (run-with-timer
@@ -1924,6 +1968,72 @@ an error (nil) consumes the request guard and advances the chain."
          #'agent-log--summarize-next
          (cdr remaining)
          (1+ done) total gen))))))
+
+(defun agent-log--summarize-abort (sid err-msg blocking-p done total)
+  "Abort the in-progress summary run after a fatal error.
+SID is the failing session ID.  ERR-MSG is a human-readable error
+description.  When BLOCKING-P is non-nil, set
+`agent-log--summarize-blocked-reason' so auto-summarize hooks skip
+until cleared by an interactive call to `agent-log-summarize-sessions'.
+DONE and TOTAL are progress counters used in the abort message."
+  (cl-incf agent-log--summarize-generation)
+  (setq agent-log--summarize-active nil
+        agent-log--summarize-stop nil
+        agent-log--summarize-consecutive-failures 0)
+  (when blocking-p
+    (setq agent-log--summarize-blocked-reason err-msg))
+  (message
+   "Summary aborted at %d/%d (%s): %s%s"
+   done total sid err-msg
+   (if blocking-p
+       " — auto-summarize suspended; fix the issue and run M-x agent-log-summarize-sessions to retry"
+     "")))
+
+(defun agent-log--summarize-classify-error (info)
+  "Classify the error described by gptel callback INFO plist.
+Returns one of: `auth' for HTTP 400/401/403 (won't resolve without
+user action), `rate-limit' for 429, `server' for 5xx, `client' for
+other 4xx, or nil when no HTTP status is available."
+  (let* ((status (plist-get info :status))
+         (code (when (stringp status)
+                 (string-to-number status))))
+    (cond
+     ((or (null code) (zerop code)) nil)
+     ((memq code '(400 401 403)) 'auth)
+     ((= code 429) 'rate-limit)
+     ((and (>= code 400) (< code 500)) 'client)
+     ((>= code 500) 'server)
+     (t nil))))
+
+(defun agent-log--summarize-error-message (info)
+  "Return a human-readable error string from gptel callback INFO plist.
+Combines the `:status' and `:error' fields when present, falling back
+to \"unknown error\" if neither is informative."
+  (let* ((status (plist-get info :status))
+         (error-data (plist-get info :error))
+         (msg (agent-log--summarize-error-data-message error-data)))
+    (cond
+     ((and status msg) (format "(%s) %s" status (string-trim msg)))
+     (msg (string-trim msg))
+     (status (format "HTTP %s" status))
+     (t "unknown error"))))
+
+(defun agent-log--summarize-error-data-message (error-data)
+  "Extract a message string from gptel ERROR-DATA.
+ERROR-DATA may be a string, a plist with `:message', an alist with
+a `message' entry, or nil.  Returns a string or nil."
+  (let ((raw (cond
+              ((stringp error-data) error-data)
+              ((and (listp error-data)
+                    (keywordp (car-safe error-data)))
+               (plist-get error-data :message))
+              ((and (listp error-data)
+                    (consp (car-safe error-data)))
+               (cdr (assq 'message error-data))))))
+    (cond
+     ((stringp raw) raw)
+     ((null raw) nil)
+     (t (format "%s" raw)))))
 
 (defun agent-log--maybe-insert-summary (session-id)
   "Insert the AI summary for SESSION-ID into the current buffer, if available."
