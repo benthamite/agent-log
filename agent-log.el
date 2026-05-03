@@ -161,6 +161,13 @@ Returns a plist with :project and :date.")
 Return nil if no matching session file can be identified."
   (:method ((_backend agent-log-backend)) nil))
 
+(cl-defgeneric agent-log--session-id-from-file (backend file)
+  "Return the session ID for FILE under BACKEND.
+The default strips the extension from the basename, which is correct
+for backends whose filenames are themselves session IDs."
+  (:method ((_backend agent-log-backend) file)
+   (file-name-sans-extension (file-name-nondirectory file))))
+
 ;;;;; Customization
 
 (defgroup agent-log nil
@@ -519,7 +526,7 @@ a project, then for a session within that project."
   (interactive "fJSONL file: ")
   (let* ((file (expand-file-name file))
          (backend (agent-log--backend-for-file file))
-         (session-id (file-name-sans-extension (file-name-nondirectory file)))
+         (session-id (agent-log--session-id-from-file backend file))
          (entries (agent-log--parse-and-normalize file backend))
          (first-msg (agent-log--find-first-message entries))
          (progress (agent-log--find-progress-entry entries))

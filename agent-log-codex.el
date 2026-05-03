@@ -151,6 +151,14 @@ Scans the sessions directory tree."
           (when (string-match-p (regexp-quote session-id) file)
             (cl-return file)))))))
 
+(cl-defmethod agent-log--session-id-from-file ((_backend agent-log-codex) file)
+  "Extract the Codex session UUID from FILE.
+Codex rollout filenames have the form `rollout-DATE-UUID.jsonl'; this
+returns just the UUID portion."
+  (if (string-match agent-log-codex--session-id-regexp file)
+      (match-string 1 file)
+    (file-name-sans-extension (file-name-nondirectory file))))
+
 ;;;;;; Entry normalization
 
 (cl-defmethod agent-log--normalize-entries ((_backend agent-log-codex) entries)
