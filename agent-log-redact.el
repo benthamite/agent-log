@@ -114,7 +114,19 @@ Prevents racing with an active Claude Code or Codex session that may
 still be appending to its log file."
   :type 'number)
 
+(defcustom agent-log-redact-opaque-json-keys
+  '("encrypted_content" "signature" "ciphertext" "nonce" "mac" "tag")
+  "JSON object keys whose string values must never be source-redacted.
+These fields commonly hold authenticated ciphertext, signatures, or
+other integrity-checked blobs.  Rewriting their contents can make agent
+session resume fail even when the replacement is a valid JSON string.
+Keys ending in `_signature', `_ciphertext', `_nonce', `_mac', or `_tag'
+are also treated as opaque."
+  :type '(repeat string))
+
 (defvar claude-code-event-hook)
+
+(defvar agent-log-auto-redact-sessions)
 
 (defvar agent-log-redact--source-directory
   (or (and load-file-name (file-name-directory load-file-name))
@@ -306,16 +318,17 @@ any new content through the advice-based redactor."
 (defun agent-log-redact-scrub-jsonl ()
   "Redact secrets in every source .jsonl file under the configured roots.
 Walks every directory listed in `agent-log-redact-jsonl-roots'
-recursively, parses each JSONL line, redacts every string value via
-`agent-log-redact-text', and rewrites the file atomically if anything
-changed.  Files modified within the last
+recursively, parses each JSONL line, redacts non-opaque string values
+via `agent-log-redact-text', and rewrites the file atomically if
+anything changed.  Files modified within the last
 `agent-log-redact-active-session-seconds' seconds are skipped to avoid
 racing with an active session.
 
-JSON object keys are never redacted — only values.  Lines that fail to
-parse as JSON are written through unchanged.  The source .jsonl is the
-ground truth for session-resume functionality, so redaction happens on
-string values only; structure is preserved exactly."
+JSON object keys are never redacted, and values whose keys are listed
+in `agent-log-redact-opaque-json-keys' are preserved byte-for-byte.
+Lines that fail to parse as JSON are written through unchanged.  The
+source .jsonl is the ground truth for session-resume functionality, so
+redaction must not alter authenticated ciphertext or signature fields."
   (interactive)
   (let ((total 0) (scanned 0) (skipped 0) (changed 0))
     (dolist (root agent-log-redact-jsonl-roots)
@@ -421,27 +434,38 @@ returned unchanged so malformed or truncated entries survive scrubbing."
           (throw 'hit t)))
       nil)))
 
-(defun agent-log-redact--walk-json-strings (value)
+(defun agent-log-redact--walk-json-strings (value &optional key)
   "Return VALUE with every string leaf replaced by `agent-log-redact-text'.
-Hash-table keys are preserved as-is; only values are redacted.  Sets
+Hash-table keys are preserved as-is; only non-opaque values are
+redacted.  KEY is the JSON object key for VALUE, when available.  Sets
 `agent-log-redact--walk-changed' when any string is actually rewritten,
 so the caller can skip re-serialization if nothing needed redacting."
-  (cond
-   ((stringp value)
-    (let ((new (agent-log-redact-text value)))
-      (unless (string= value new)
-        (setq agent-log-redact--walk-changed t))
-      new))
-   ((hash-table-p value)
-    (let ((out (make-hash-table :test (hash-table-test value)
-                                :size (hash-table-count value))))
-      (maphash (lambda (k v)
-                 (puthash k (agent-log-redact--walk-json-strings v) out))
-               value)
-      out))
-   ((vectorp value)
-    (vconcat (mapcar #'agent-log-redact--walk-json-strings value)))
-   (t value)))
+  (if (agent-log-redact--opaque-json-key-p key)
+      value
+    (cond
+     ((stringp value)
+      (let ((new (agent-log-redact-text value)))
+        (unless (string= value new)
+          (setq agent-log-redact--walk-changed t))
+        new))
+     ((hash-table-p value)
+      (let ((out (make-hash-table :test (hash-table-test value)
+                                  :size (hash-table-count value))))
+        (maphash (lambda (k v)
+                   (puthash k (agent-log-redact--walk-json-strings v k) out))
+                 value)
+        out))
+     ((vectorp value)
+      (vconcat (mapcar #'agent-log-redact--walk-json-strings value)))
+     (t value))))
+
+(defun agent-log-redact--opaque-json-key-p (key)
+  "Return non-nil when KEY names an opaque JSON value."
+  (and (stringp key)
+       (or (member key agent-log-redact-opaque-json-keys)
+           (string-match-p
+            "\\(?:\\`\\|_\\)\\(?:signature\\|ciphertext\\|nonce\\|mac\\|tag\\)\\'"
+            key))))
 
 (defun agent-log-redact--clear-rendered-directory ()
   "Delete every .md file under `agent-log-rendered-directory' and the index."
