@@ -1730,5 +1730,18 @@ the message content (string or list)."
     (should (string-match-p "\\[REDACTED:sk-api-key:"
                             (gethash "text" payload)))))
 
+(ert-deftest agent-log-test-redact-jsonl-line/preserves-base64-image-data ()
+  "Leaves a base64 image source byte-identical even when patterns match.
+Matches inside randomized image bytes corrupt the base64 and break
+session resume; the entire `type:base64' block must be preserved."
+  (let* ((fake-key (concat "AK" "IA" (make-string 16 ?A)))
+         (data (concat "PADDING" fake-key "PADDING"))
+         (line (format (concat "{\"type\":\"image\",\"source\":"
+                               "{\"type\":\"base64\","
+                               "\"media_type\":\"image/png\","
+                               "\"data\":\"%s\"}}")
+                       data)))
+    (should (equal (agent-log-redact--scrub-jsonl-line line) line))))
+
 (provide 'agent-log-test)
 ;;; agent-log-test.el ends here

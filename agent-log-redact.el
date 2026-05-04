@@ -124,6 +124,20 @@ Keys ending in `_signature', `_ciphertext', `_nonce', `_mac', or `_tag'
 are also treated as opaque."
   :type '(repeat string))
 
+(defcustom agent-log-redact-opaque-source-types
+  '("base64")
+  "Values of a JSON `type' field that mark the containing object as opaque.
+When the JSONL scrubber encounters a hash-table whose `type' equals one
+of these strings, the entire sub-object is preserved byte-for-byte.
+
+The default protects Anthropic image content blocks of the form
+\((\"type\" . \"base64\") (\"media_type\" . \"image/png\") (\"data\" . \"...\")),
+whose long base64 payload can otherwise contain incidental matches for
+secret-detection patterns (e.g. `AKIA[A-Z0-9]\\{16\\}' inside randomized
+image bytes).  Replacing those matches with placeholders corrupts the
+base64 and breaks session resume."
+  :type '(repeat string))
+
 (defvar claude-code-event-hook)
 
 (defvar agent-log-auto-redact-sessions)
@@ -440,24 +454,32 @@ Hash-table keys are preserved as-is; only non-opaque values are
 redacted.  KEY is the JSON object key for VALUE, when available.  Sets
 `agent-log-redact--walk-changed' when any string is actually rewritten,
 so the caller can skip re-serialization if nothing needed redacting."
-  (if (agent-log-redact--opaque-json-key-p key)
-      value
-    (cond
-     ((stringp value)
-      (let ((new (agent-log-redact-text value)))
-        (unless (string= value new)
-          (setq agent-log-redact--walk-changed t))
-        new))
-     ((hash-table-p value)
-      (let ((out (make-hash-table :test (hash-table-test value)
-                                  :size (hash-table-count value))))
-        (maphash (lambda (k v)
-                   (puthash k (agent-log-redact--walk-json-strings v k) out))
-                 value)
-        out))
-     ((vectorp value)
-      (vconcat (mapcar #'agent-log-redact--walk-json-strings value)))
-     (t value))))
+  (cond
+   ((agent-log-redact--opaque-json-key-p key) value)
+   ((agent-log-redact--opaque-json-object-p value) value)
+   ((stringp value)
+    (let ((new (agent-log-redact-text value)))
+      (unless (string= value new)
+        (setq agent-log-redact--walk-changed t))
+      new))
+   ((hash-table-p value)
+    (let ((out (make-hash-table :test (hash-table-test value)
+                                :size (hash-table-count value))))
+      (maphash (lambda (k v)
+                 (puthash k (agent-log-redact--walk-json-strings v k) out))
+               value)
+      out))
+   ((vectorp value)
+    (vconcat (mapcar #'agent-log-redact--walk-json-strings value)))
+   (t value)))
+
+(defun agent-log-redact--opaque-json-object-p (value)
+  "Return non-nil when hash-table VALUE marks an opaque content block.
+Checks the `type' field against `agent-log-redact-opaque-source-types'."
+  (and (hash-table-p value)
+       (let ((type (gethash "type" value)))
+         (and (stringp type)
+              (member type agent-log-redact-opaque-source-types)))))
 
 (defun agent-log-redact--opaque-json-key-p (key)
   "Return non-nil when KEY names an opaque JSON value."
