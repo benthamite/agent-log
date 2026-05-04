@@ -20,7 +20,7 @@ test:
 compile:
 	$(EMACS) -Q --batch $(LOAD_PATH) \
 	  --eval '(setq byte-compile-error-on-warn t)' \
-	  -f batch-byte-compile agent-log.el agent-log-claude.el agent-log-codex.el
+	  -f batch-byte-compile agent-log.el agent-log-claude.el agent-log-codex.el agent-log-redact.el
 
 clean:
 	rm -f *.elc

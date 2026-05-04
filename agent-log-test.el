@@ -8,6 +8,7 @@
 (require 'ert)
 (require 'agent-log)
 (require 'agent-log-claude)
+(require 'agent-log-redact)
 
 ;;;;; Test helpers
 
@@ -1695,6 +1696,39 @@ the message content (string or list)."
            (content (plist-get (plist-get entry :message) :content))
            (tool-use (car content)))
       (should (equal (plist-get tool-use :name) "apply_patch")))))
+
+;;;;; Redaction
+
+(ert-deftest agent-log-test-redact-jsonl-line/preserves-opaque-values ()
+  "Leaves opaque JSON values byte-identical when only they match."
+  (let* ((secret (concat "sk-" (make-string 24 ?a)))
+         (google-key (concat "AIza" (make-string 35 ?A)))
+         (line (format (concat "{\"type\":\"response_item\",\"payload\":"
+                               "{\"encrypted_content\":\"%s\","
+                               "\"signature\":\"%s\","
+                               "\"thinking_signature\":\"%s\","
+                               "\"nonce\":\"%s\","
+                               "\"mac\":\"%s\","
+                               "\"tag\":\"%s\"}}")
+                       secret google-key secret secret secret secret)))
+    (should (equal (agent-log-redact--scrub-jsonl-line line) line))))
+
+(ert-deftest agent-log-test-redact-jsonl-line/redacts-plaintext-siblings ()
+  "Redacts plaintext while preserving sibling opaque values."
+  (let* ((secret (concat "sk-" (make-string 24 ?a)))
+         (line (format (concat "{\"type\":\"response_item\",\"payload\":"
+                               "{\"encrypted_content\":\"%s\","
+                               "\"text\":\"token %s\"}}")
+                       secret secret))
+         (scrubbed (agent-log-redact--scrub-jsonl-line line))
+         (obj (json-parse-string scrubbed
+                                 :object-type 'hash-table
+                                 :array-type 'array))
+         (payload (gethash "payload" obj)))
+    (should-not (equal scrubbed line))
+    (should (equal (gethash "encrypted_content" payload) secret))
+    (should (string-match-p "\\[REDACTED:sk-api-key:"
+                            (gethash "text" payload)))))
 
 (provide 'agent-log-test)
 ;;; agent-log-test.el ends here

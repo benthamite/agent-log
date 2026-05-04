@@ -14,6 +14,7 @@
 
 @finalout
 @titlepage
+@title agent-log: Browse AI coding agent session logs in Emacs
 @author Pablo Stafforini (@email{pablo@@stafforini.com})
 @end titlepage
 
@@ -23,7 +24,7 @@
 @node Top
 @top agent-log: Browse AI coding agent session logs in Emacs
 
-This manual describes the features and customization options for the @samp{agent-log} package (@samp{agent-log.el} and its backend files). @*
+This manual describes the features and customization options for the @samp{agent-log} package (@samp{agent-log.el} and its backend files).
 
 @end ifnottex
 
@@ -119,36 +120,36 @@ Indices
 @node Overview
 @chapter Overview
 
-AI coding agents such as @uref{https://docs.anthropic.com/en/docs/claude-code, Claude Code} and @uref{https://openai.com/index/introducing-codex/, Codex} store complete conversation transcripts as JSONL files.  While these files contain a full record of every session, they are not human-readable: each line is a JSON object with nested content arrays, tool-use blocks, thinking sections, and system metadata.  @samp{agent-log.el} renders these transcripts into readable Markdown files and provides a dedicated Emacs interface for browsing, searching, and navigating them. @*
+AI coding agents such as @uref{https://docs.anthropic.com/en/docs/claude-code, Claude Code} and @uref{https://openai.com/index/introducing-codex/, Codex} store complete conversation transcripts as JSONL files.  While these files contain a full record of every session, they are not human-readable: each line is a JSON object with nested content arrays, tool-use blocks, thinking sections, and system metadata.  @samp{agent-log.el} renders these transcripts into readable Markdown files and provides a dedicated Emacs interface for browsing, searching, and navigating them.
 
-The package supports multiple backends through a generic interface based on @code{cl-defstruct} and @code{cl-defmethod}.  Each backend knows how to discover sessions, parse its tool's JSONL format, and normalize entries into a canonical representation that the rendering pipeline, session browser, and AI features operate on.  Currently supported backends are Claude Code (@samp{agent-log-claude.el}) and Codex (@samp{agent-log-codex.el}).  By default, the package auto-detects which tools are installed and activates the corresponding backends (@ref{Backend configuration}). @*
+The package supports multiple backends through a generic interface based on @code{cl-defstruct} and @code{cl-defmethod}.  Each backend knows how to discover sessions, parse its tool's JSONL format, and normalize entries into a canonical representation that the rendering pipeline, session browser, and AI features operate on.  Currently supported backends are Claude Code (@samp{agent-log-claude.el}) and Codex (@samp{agent-log-codex.el}).  By default, the package auto-detects which tools are installed and activates the corresponding backends (@ref{Backend configuration}).
 
-The package maintains a mirror directory of pre-rendered Markdown files, organized by project.  This means that standard tools such as @samp{consult-ripgrep}, Dired, and @samp{grep} work natively on readable content without any special integration. @*
+The package maintains a mirror directory of pre-rendered Markdown files, organized by project.  This means that standard tools such as @samp{consult-ripgrep}, Dired, and @samp{grep} work natively on readable content without any special integration.
 
-The core capabilities of @samp{agent-log.el} are: @*
+The core capabilities of @samp{agent-log.el} are:
 
 @itemize
 @item
-@strong{Session browsing}.  A @code{completing-read} interface lists all sessions, grouped by project or as a flat list, sorted by recency.  Each candidate shows a backend-specific icon (SVG in GUI frames, a short text label in terminal frames), the date, project name, and either an AI-generated summary or the first user message (@ref{Session browsing}). @*
+@strong{Session browsing}.  A @code{completing-read} interface lists all sessions, grouped by project or as a flat list, sorted by recency.  Each candidate shows a backend-specific icon (SVG in GUI frames, a short text label in terminal frames), the date, project name, and either an AI-generated summary or the first user message (@ref{Session browsing}).
 @item
-@strong{Lazy rendering}.  Sessions are rendered to @samp{.md} files on first access.  The package tracks JSONL file sizes in an index to avoid re-rendering files that have not changed (@ref{Sync and rendering}). @*
+@strong{Lazy rendering}.  Sessions are rendered to @samp{.md} files on first access.  The package tracks JSONL file sizes in an index to avoid re-rendering files that have not changed (@ref{Sync and rendering}).
 @item
-@strong{Live updates}.  For active sessions, a @code{file-notify} watcher detects JSONL changes and appends new entries to both the @samp{.md} file on disk and the open buffer in real time (@ref{Live updates}). @*
+@strong{Live updates}.  For active sessions, a @code{file-notify} watcher detects JSONL changes and appends new entries to both the @samp{.md} file on disk and the open buffer in real time (@ref{Live updates}).
 @item
-@strong{Outline navigation}.  Rendered buffers use @code{outline-minor-mode} for folding tool calls, thinking blocks, and tool results.  Dedicated keybindings jump between conversation turns (@ref{Navigation}). @*
+@strong{Outline navigation}.  Rendered buffers use @code{outline-minor-mode} for folding tool calls, thinking blocks, and tool results.  Dedicated keybindings jump between conversation turns (@ref{Navigation}).
 @item
-@strong{Smart tool summaries}.  Each tool call is summarized by its most relevant input—the file path for Read/Write, the command for Bash, the pattern for Grep, and so on. @*
+@strong{Smart tool summaries}.  Each tool call is summarized by its most relevant input—the file path for Read/Write, the command for Bash, the pattern for Grep, and so on.
 @item
-@strong{AI-powered session summaries}.  An optional integration with @samp{gptel} generates concise one-line and paragraph summaries for each session, displayed in the browser and at the top of rendered buffers (@ref{Summary generation}). @*
+@strong{AI-powered session summaries}.  An optional integration with @samp{gptel} generates concise one-line and paragraph summaries for each session, displayed in the browser and at the top of rendered buffers (@ref{Summary generation}).
 @item
-@strong{AI-powered search}.  A two-stage LLM pipeline lets you search your session history with natural language queries.  A scope-narrowing model filters sessions by project and date range, then a selection model identifies the most relevant sessions and presents a narrative with clickable links (@ref{AI search}). @*
+@strong{AI-powered search}.  A two-stage LLM pipeline lets you search your session history with natural language queries.  A scope-narrowing model filters sessions by project and date range, then a selection model identifies the most relevant sessions and presents a narrative with clickable links (@ref{AI search}).
 @item
-@strong{Session resumption}.  You can resume any session directly in the coding agent from within the rendered buffer, provided the corresponding Emacs integration package is installed (e.g. @samp{claude-code} for Claude Code) (@ref{Session resumption}). @*
+@strong{Session resumption}.  You can resume any session directly in the coding agent from within the rendered buffer, provided the corresponding Emacs integration package is installed (e.g. @samp{claude-code} for Claude Code) (@ref{Session resumption}).
 @end itemize
 
-The package requires Emacs 29.1 or later and @uref{https://jblevins.org/projects/markdown-mode/, markdown-mode} 2.6 or later.  The optional summary feature requires @uref{https://github.com/karthink/gptel, gptel}.  Session resumption for Claude Code sessions requires @uref{https://github.com/stevemolitor/claude-code.el, claude-code}; for Codex sessions it requires @uref{https://github.com/benthamite/codex.el, codex}. @*
+The package requires Emacs 29.1 or later and @uref{https://jblevins.org/projects/markdown-mode/, markdown-mode} 2.6 or later.  The optional summary feature requires @uref{https://github.com/karthink/gptel, gptel}.  Session resumption for Claude Code sessions requires @uref{https://github.com/stevemolitor/claude-code.el, claude-code}; for Codex sessions it requires @uref{https://github.com/benthamite/codex.el, codex}.
 
-The development repository is on @uref{https://github.com/benthamite/agent-log, GitHub}. @*
+The development repository is on @uref{https://github.com/benthamite/agent-log, GitHub}.
 
 @node Installation
 @chapter Installation
@@ -161,7 +162,7 @@ The development repository is on @uref{https://github.com/benthamite/agent-log, 
 @node Manual installation
 @section Manual installation
 
-Clone the repository to a directory on your Emacs load path and add the following to your init file: @*
+Clone the repository to a directory on your Emacs load path and add the following to your init file:
 
 @lisp
 (require 'agent-log)
@@ -170,7 +171,7 @@ Clone the repository to a directory on your Emacs load path and add the followin
 @node Installation with use-package
 @section Installation with use-package
 
-If you use @code{use-package}, add one of the following snippets to your init file: @*
+If you use @code{use-package}, add one of the following snippets to your init file:
 
 @lisp
 ;; with vc
@@ -193,7 +194,7 @@ If you use @code{use-package}, add one of the following snippets to your init fi
 @node User options
 @chapter User options
 
-All user options belong to the @code{agent-log} customization group.  You can browse them interactively with @samp{M-x customize-group RET agent-log RET}. @*
+All user options belong to the @code{agent-log} customization group.  You can browse them interactively with @samp{M-x customize-group RET agent-log RET}.
 
 @menu
 * Backend configuration::
@@ -213,16 +214,16 @@ All user options belong to the @code{agent-log} customization group.  You can br
 @vindex agent-log-backends
 @vindex agent-log-active-backends
 
-The user option @code{agent-log-backends} is an alist mapping backend key symbols to their feature (file) names.  Each entry is a cons cell @samp{(KEY . FEATURE)} where @samp{KEY} is a symbol identifying the backend (e.g. @code{claude-code}, @code{codex}) and @samp{FEATURE} is the symbol passed to @code{require} to load the backend file.  Backend files are loaded lazily on first use.  The default value includes entries for Claude Code and Codex: @*
+The user option @code{agent-log-backends} is an alist mapping backend key symbols to their feature (file) names.  Each entry is a cons cell @samp{(KEY . FEATURE)} where @samp{KEY} is a symbol identifying the backend (e.g. @code{claude-code}, @code{codex}) and @samp{FEATURE} is the symbol passed to @code{require} to load the backend file.  Backend files are loaded lazily on first use.  The default value includes entries for Claude Code and Codex:
 
 @lisp
 '((claude-code . agent-log-claude)
   (codex . agent-log-codex))
 @end lisp
 
-You would modify this to add a custom backend or to remove a backend you do not want available. @*
+You would modify this to add a custom backend or to remove a backend you do not want available.
 
-The user option @code{agent-log-active-backends} controls which backends are scanned for sessions.  It accepts either the symbol @code{auto} or a list of backend key symbols.  When set to @code{auto} (the default), the package checks whether each backend's root directory exists on disk (e.g. @samp{~/.claude} for Claude Code, @samp{~/.codex} for Codex) and activates only the backends whose directories are found.  Set it to an explicit list such as @code{(claude-code)} if you want to restrict the session browser to a specific backend regardless of what is installed. @*
+The user option @code{agent-log-active-backends} controls which backends are scanned for sessions.  It accepts either the symbol @code{auto} or a list of backend key symbols.  When set to @code{auto} (the default), the package checks whether each backend's root directory exists on disk (e.g. @samp{~/.claude} for Claude Code, @samp{~/.codex} for Codex) and activates only the backends whose directories are found.  Set it to an explicit list such as @code{(claude-code)} if you want to restrict the session browser to a specific backend regardless of what is installed.
 
 @node Directory configuration
 @section Directory configuration
@@ -230,9 +231,9 @@ The user option @code{agent-log-active-backends} controls which backends are sca
 @vindex agent-log-directory
 @vindex agent-log-rendered-directory
 
-The user option @code{agent-log-directory} specifies the root directory of the Claude Code backend's configuration.  The package reads @samp{history.jsonl} in this directory and looks for session files under the @samp{projects/} subdirectory.  The default value is @samp{~/.claude}.  You would change this only if you have configured Claude Code to use a non-standard location.  Each backend has its own directory configuration. @*
+The user option @code{agent-log-directory} specifies the root directory of the Claude Code backend's configuration.  The package reads @samp{history.jsonl} in this directory and looks for session files under the @samp{projects/} subdirectory.  The default value is @samp{~/.claude}.  You would change this only if you have configured Claude Code to use a non-standard location.  Each backend has its own directory configuration.
 
-The user option @code{agent-log-rendered-directory} specifies the directory where rendered Markdown files are stored.  Each project gets its own subdirectory, and each session is rendered as a dated @samp{.md} file within it (@ref{Sync and rendering}).  The default value is @samp{~/.claude/rendered}.  You might change this if you want rendered files to live outside the default configuration directory, for example on a path indexed by a desktop search tool. @*
+The user option @code{agent-log-rendered-directory} specifies the directory where rendered Markdown files are stored.  Each project gets its own subdirectory, and each session is rendered as a dated @samp{.md} file within it (@ref{Sync and rendering}).  The default value is @samp{~/.claude/rendered}.  You might change this if you want rendered files to live outside the default configuration directory, for example on a path indexed by a desktop search tool.
 
 @node Display of thinking and tool sections
 @section Display of thinking and tool sections
@@ -240,35 +241,35 @@ The user option @code{agent-log-rendered-directory} specifies the directory wher
 @vindex agent-log-show-thinking
 @vindex agent-log-show-tools
 
-Agent conversations contain thinking blocks (the model's chain-of-thought reasoning) and tool-use sections (file reads, bash commands, grep searches, and so on).  These are valuable for understanding what the assistant did, but they can also be verbose and clutter the view when you are reading the high-level conversation. @*
+Agent conversations contain thinking blocks (the model's chain-of-thought reasoning) and tool-use sections (file reads, bash commands, grep searches, and so on).  These are valuable for understanding what the assistant did, but they can also be verbose and clutter the view when you are reading the high-level conversation.
 
-Note that some backends store thinking blocks with empty content.  Claude Code, for instance, redacts the thinking text from its JSONL logs, keeping only a cryptographic signature.  When the thinking text is empty, the package omits the section entirely rather than rendering an empty heading. @*
+Note that some backends store thinking blocks with empty content.  Claude Code, for instance, redacts the thinking text from its JSONL logs, keeping only a cryptographic signature.  When the thinking text is empty, the package omits the section entirely rather than rendering an empty heading.
 
-The user option @code{agent-log-show-thinking} controls how thinking blocks appear.  It accepts one of three symbols: @*
+The user option @code{agent-log-show-thinking} controls how thinking blocks appear.  It accepts one of three symbols:
 
 @itemize
 @item
-@code{hidden}: thinking blocks are omitted entirely from the rendered output. @*
+@code{hidden}: thinking blocks are omitted entirely from the rendered output.
 @item
-@code{collapsed}: thinking blocks are rendered but folded under a heading, so you see the heading but not the content until you expand it. @*
+@code{collapsed}: thinking blocks are rendered but folded under a heading, so you see the heading but not the content until you expand it.
 @item
-@code{visible}: thinking blocks are rendered fully expanded. @*
+@code{visible}: thinking blocks are rendered fully expanded.
 @end itemize
 
-The default value is @code{collapsed}. @*
+The default value is @code{collapsed}.
 
-The user option @code{agent-log-show-tools} works identically but controls tool-use and tool-result sections.  It also defaults to @code{collapsed}. @*
+The user option @code{agent-log-show-tools} works identically but controls tool-use and tool-result sections.  It also defaults to @code{collapsed}.
 
-When both options are set to @code{hidden}, assistant turns that contain only tool calls and thinking (no visible text) are hidden entirely, including their heading and separator. @*
+When both options are set to @code{hidden}, assistant turns that contain only tool calls and thinking (no visible text) are hidden entirely, including their heading and separator.
 
-You can toggle individual sections interactively using @code{agent-log-toggle-section} (@ref{Section visibility}). @*
+You can toggle individual sections interactively using @code{agent-log-toggle-section} (@ref{Section visibility}).
 
 @node Timestamps
 @section Timestamps
 
 @vindex agent-log-timestamp-format
 
-The user option @code{agent-log-timestamp-format} controls the format string used when displaying timestamps in rendered output.  It follows the conventions of @code{format-time-string}.  The default value is @samp{"%Y-%m-%d %H:%M:%S"}. @*
+The user option @code{agent-log-timestamp-format} controls the format string used when displaying timestamps in rendered output.  It follows the conventions of @code{format-time-string}.  The default value is @samp{"%Y-%m-%d %H:%M:%S"}.
 
 @node Tool output limits
 @section Tool output limits
@@ -276,13 +277,13 @@ The user option @code{agent-log-timestamp-format} controls the format string use
 @vindex agent-log-max-tool-input-length
 @vindex agent-log-max-tool-result-length
 
-Tool calls can have very long inputs (entire file contents for Write, lengthy commands for Bash) and even longer results.  Two user options control how much of this content is shown in the rendered output. @*
+Tool calls can have very long inputs (entire file contents for Write, lengthy commands for Bash) and even longer results.  Two user options control how much of this content is shown in the rendered output.
 
-The user option @code{agent-log-max-tool-input-length} sets the maximum number of characters displayed for tool input summaries.  Text beyond this limit is truncated with an ellipsis.  The default value is @code{200}. @*
+The user option @code{agent-log-max-tool-input-length} sets the maximum number of characters displayed for tool input summaries.  Text beyond this limit is truncated with an ellipsis.  The default value is @code{200}.
 
-The user option @code{agent-log-max-tool-result-length} sets the maximum number of characters displayed for tool result content.  The default value is @code{500}. @*
+The user option @code{agent-log-max-tool-result-length} sets the maximum number of characters displayed for tool result content.  The default value is @code{500}.
 
-Increase these values if you find that truncated tool content is hiding information you need.  Decrease them if rendered files are too large or buffers are slow to navigate. @*
+Increase these values if you find that truncated tool content is hiding information you need.  Decrease them if rendered files are too large or buffers are slow to navigate.
 
 @node Session browser options
 @section Session browser options
@@ -290,18 +291,18 @@ Increase these values if you find that truncated tool content is hiding informat
 @vindex agent-log-group-by-project
 @vindex agent-log-slug-max-length
 
-The user option @code{agent-log-group-by-project} controls whether @code{agent-log-browse-sessions} groups sessions by project (@ref{Session browsing}).  When non-@code{nil} (the default), the command first prompts for a project, then for a session within that project.  When @code{nil}, all sessions are presented in a single flat list.  The grouped view is more convenient when you have many sessions across several projects; the flat view is useful for quickly finding a recent session regardless of project. @*
+The user option @code{agent-log-group-by-project} controls whether @code{agent-log-browse-sessions} groups sessions by project (@ref{Session browsing}).  When non-@code{nil} (the default), the command first prompts for a project, then for a session within that project.  When @code{nil}, all sessions are presented in a single flat list.  The grouped view is more convenient when you have many sessions across several projects; the flat view is useful for quickly finding a recent session regardless of project.
 
-The user option @code{agent-log-slug-max-length} sets the maximum length of the slug portion of rendered filenames.  The slug is derived from the first user message and appears after the date in the filename (e.g., @samp{2026-02-22_11-56_redesign-agent-log-package.md}).  The default value is @code{50}. @*
+The user option @code{agent-log-slug-max-length} sets the maximum length of the slug portion of rendered filenames.  The slug is derived from the first user message and appears after the date in the filename (e.g., @samp{2026-02-22_11-56_redesign-agent-log-package.md}).  The default value is @code{50}.
 
 @node Live updates
 @section Live updates
 
 @vindex agent-log-live-update
 
-The user option @code{agent-log-live-update} controls whether the package watches the source JSONL file for changes when a rendered buffer is open.  When non-@code{nil} (the default), a @code{file-notify} watcher detects new entries appended to the JSONL file and renders them into both the open buffer and the @samp{.md} file on disk.  This means you can have a rendered log open alongside an active coding agent session and see new turns appear as they happen. @*
+The user option @code{agent-log-live-update} controls whether the package watches the source JSONL file for changes when a rendered buffer is open.  When non-@code{nil} (the default), a @code{file-notify} watcher detects new entries appended to the JSONL file and renders them into both the open buffer and the @samp{.md} file on disk.  This means you can have a rendered log open alongside an active coding agent session and see new turns appear as they happen.
 
-Set this to @code{nil} if you experience performance issues with file watching, or if you are on a system where @code{file-notify} is not reliable (e.g., certain remote filesystems via TRAMP). @*
+Set this to @code{nil} if you experience performance issues with file watching, or if you are on a system where @code{file-notify} is not reliable (e.g., certain remote filesystems via TRAMP).
 
 @node Summary generation (1)
 @section Summary generation
@@ -310,13 +311,13 @@ Set this to @code{nil} if you experience performance issues with file watching, 
 @vindex agent-log-summary-model
 @vindex agent-log-summary-max-content-length
 
-The summary feature uses @samp{gptel} to generate concise descriptions of each session.  Three user options control how summaries are generated. @*
+The summary feature uses @samp{gptel} to generate concise descriptions of each session.  Three user options control how summaries are generated.
 
-The user option @code{agent-log-summary-backend} specifies the @samp{gptel} backend name to use for summary requests, for example @samp{"Gemini"} or @samp{"Claude"}.  When @code{nil} (the default), the backend is inferred from @code{agent-log-summary-model} if set, otherwise it falls back to @code{gptel-backend}. @*
+The user option @code{agent-log-summary-backend} specifies the @samp{gptel} backend name to use for summary requests, for example @samp{"Gemini"} or @samp{"Claude"}.  When @code{nil} (the default), the backend is inferred from @code{agent-log-summary-model} if set, otherwise it falls back to @code{gptel-backend}.
 
-The user option @code{agent-log-summary-model} specifies the @samp{gptel} model to use, for example @code{claude-haiku-4-5-20251001}.  A smaller, faster model is often sufficient for summarization.  When @code{nil} (the default), it uses @code{gptel-model}. @*
+The user option @code{agent-log-summary-model} specifies the @samp{gptel} model to use, for example @code{claude-haiku-4-5-20251001}.  A smaller, faster model is often sufficient for summarization.  When @code{nil} (the default), it uses @code{gptel-model}.
 
-The user option @code{agent-log-summary-max-content-length} sets the maximum number of characters of conversation text sent to the LLM for summarization.  The package extracts the plain text of user and assistant messages (ignoring tool calls and thinking blocks) and truncates the result to this limit.  The default value is @code{8000}.  Increase this for longer, more detailed summaries at the cost of higher token usage; decrease it if you want to minimize API costs. @*
+The user option @code{agent-log-summary-max-content-length} sets the maximum number of characters of conversation text sent to the LLM for summarization.  The package extracts the plain text of user and assistant messages (ignoring tool calls and thinking blocks) and truncates the result to this limit.  The default value is @code{8000}.  Increase this for longer, more detailed summaries at the cost of higher token usage; decrease it if you want to minimize API costs.
 
 @node AI search options
 @section AI search options
@@ -327,19 +328,19 @@ The user option @code{agent-log-summary-max-content-length} sets the maximum num
 @vindex agent-log-search-model
 @vindex agent-log-search-budget
 
-The AI search feature (@ref{AI search}) uses two LLM calls: a scope-narrowing stage and a selection stage.  Each stage has its own backend and model options, allowing you to use a cheap, fast model for scope narrowing and a more capable model for the selection narrative. @*
+The AI search feature (@ref{AI search}) uses two LLM calls: a scope-narrowing stage and a selection stage.  Each stage has its own backend and model options, allowing you to use a cheap, fast model for scope narrowing and a more capable model for the selection narrative.
 
-The user option @code{agent-log-search-scope-backend} specifies the @samp{gptel} backend for stage 1 (scope narrowing), for example @samp{"Gemini"} or @samp{"Claude"}.  When @code{nil} (the default), the backend is inferred from @code{agent-log-search-scope-model} if set, otherwise it falls back to @code{gptel-backend}. @*
+The user option @code{agent-log-search-scope-backend} specifies the @samp{gptel} backend for stage 1 (scope narrowing), for example @samp{"Gemini"} or @samp{"Claude"}.  When @code{nil} (the default), the backend is inferred from @code{agent-log-search-scope-model} if set, otherwise it falls back to @code{gptel-backend}.
 
-The user option @code{agent-log-search-scope-model} specifies the model for stage 1.  A small, fast model (e.g. @code{claude-haiku-4-5-20251001}) is recommended since the task is simple classification.  When @code{nil} (the default), it uses @code{gptel-model}. @*
+The user option @code{agent-log-search-scope-model} specifies the model for stage 1.  A small, fast model (e.g. @code{claude-haiku-4-5-20251001}) is recommended since the task is simple classification.  When @code{nil} (the default), it uses @code{gptel-model}.
 
-The user option @code{agent-log-search-backend} specifies the @samp{gptel} backend for stage 2 (selection and narrative).  When @code{nil} (the default), the backend is inferred from @code{agent-log-search-model} if set, otherwise it falls back to @code{gptel-backend}. @*
+The user option @code{agent-log-search-backend} specifies the @samp{gptel} backend for stage 2 (selection and narrative).  When @code{nil} (the default), the backend is inferred from @code{agent-log-search-model} if set, otherwise it falls back to @code{gptel-backend}.
 
-The user option @code{agent-log-search-model} specifies the model for stage 2.  This model receives all filtered session summaries and must reason over them, so a more capable model may produce better results.  When @code{nil} (the default), it uses @code{gptel-model}. @*
+The user option @code{agent-log-search-model} specifies the model for stage 2.  This model receives all filtered session summaries and must reason over them, so a more capable model may produce better results.  When @code{nil} (the default), it uses @code{gptel-model}.
 
-The user option @code{agent-log-search-budget} sets a per-request cost threshold as a @samp{(TYPE . LIMIT)} cons cell, where @samp{TYPE} is either @code{tokens} or @code{dollars}.  Before stage 2 sends the filtered summaries to the LLM, the package estimates the prompt's token count (heuristically, one token per four characters).  If the estimate exceeds the limit, the user is asked to confirm with @code{y-or-n-p}.  The default value is @code{(tokens . 50000)}. @*
+The user option @code{agent-log-search-budget} sets a per-request cost threshold as a @samp{(TYPE . LIMIT)} cons cell, where @samp{TYPE} is either @code{tokens} or @code{dollars}.  Before stage 2 sends the filtered summaries to the LLM, the package estimates the prompt's token count (heuristically, one token per four characters).  If the estimate exceeds the limit, the user is asked to confirm with @code{y-or-n-p}.  The default value is @code{(tokens . 50000)}.
 
-In @code{dollars} mode, cost estimation requires the @samp{gptel-plus} package.  If @samp{gptel-plus} is not available, the budget is not enforced and a warning is displayed.  Dollar estimates use the model's input pricing from @samp{gptel-plus} to convert the estimated token count to a dollar amount. @*
+In @code{dollars} mode, cost estimation requires the @samp{gptel-plus} package.  If @samp{gptel-plus} is not available, the budget is not enforced and a warning is displayed.  Dollar estimates use the model's input pricing from @samp{gptel-plus} to convert the estimated token count to a dollar amount.
 
 @node Commands
 @chapter Commands
@@ -366,34 +367,34 @@ In @code{dollars} mode, cost estimation requires the @samp{gptel-plus} package. 
 @findex agent-log-open-session
 @findex agent-log-open-current-session
 
-The command @code{agent-log-browse-sessions} is the primary entry point for exploring your session history.  It reads @samp{history.jsonl}, resolves each session to its JSONL file on disk, and presents the results in a @code{completing-read} prompt.  Each candidate is formatted as: @*
+The command @code{agent-log-browse-sessions} is the primary entry point for exploring your session history.  It reads @samp{history.jsonl}, resolves each session to its JSONL file on disk, and presents the results in a @code{completing-read} prompt.  Each candidate is formatted as:
 
 @example
 [icon] 2026-02-22 14:06  my-project  "Fix the authentication bug in..."
 @end example
 
-Each candidate is prefixed with a backend-specific icon so you can tell at a glance which agent a session belongs to.  In GUI frames the icon is an inline SVG image; in terminal frames it falls back to a short text label (e.g. @samp{CC} for Claude Code, @samp{CX} for Codex). @*
+Each candidate is prefixed with a backend-specific icon so you can tell at a glance which agent a session belongs to.  In GUI frames the icon is an inline SVG image; in terminal frames it falls back to a short text label (e.g. @samp{CC} for Claude Code, @samp{CX} for Codex).
 
-When @code{agent-log-group-by-project} is non-@code{nil} (the default), the command first prompts for a project, then for a session within that project (@ref{Session browser options}).  Sessions are sorted most-recent-first.  If AI summaries have been generated for any sessions (@ref{Summary generation}), the summary replaces the quoted first message in the candidate display. @*
+When @code{agent-log-group-by-project} is non-@code{nil} (the default), the command first prompts for a project, then for a session within that project (@ref{Session browser options}).  Sessions are sorted most-recent-first.  If AI summaries have been generated for any sessions (@ref{Summary generation}), the summary replaces the quoted first message in the candidate display.
 
-Selecting a session lazily renders it to a @samp{.md} file if needed, then opens the rendered buffer in @code{agent-log-mode} (@ref{@code{agent-log-mode}}). @*
+Selecting a session lazily renders it to a @samp{.md} file if needed, then opens the rendered buffer in @code{agent-log-mode} (@ref{@code{agent-log-mode}}).
 
-The command @code{agent-log-open-latest} opens the most recent session directly, without prompting.  This is convenient when you want to review the last conversation you had with a coding agent. @*
+The command @code{agent-log-open-latest} opens the most recent session directly, without prompting.  This is convenient when you want to review the last conversation you had with a coding agent.
 
-The command @code{agent-log-open-file} opens a specific JSONL file by path.  It prompts for a file path interactively.  This is useful for automation, for opening session files you found via the filesystem, or when you know the exact file you want. @*
+The command @code{agent-log-open-file} opens a specific JSONL file by path.  It prompts for a file path interactively.  This is useful for automation, for opening session files you found via the filesystem, or when you know the exact file you want.
 
-The command @code{agent-log-open-session} opens a session by its ID@.  It prompts for the session ID interactively. @*
+The command @code{agent-log-open-session} opens a session by its ID@.  It prompts for the session ID interactively.
 
-The command @code{agent-log-open-current-session} opens the log for the coding agent session running in the current buffer.  It dispatches on the current buffer's backend: if the buffer is a Claude Code terminal, it reads the status file that Claude Code writes to @samp{/tmp/claude-code-status/} and uses the @samp{transcript_path} field to locate the exact JSONL file for the session, which uniquely identifies the session even when multiple sessions (including branches created with @code{/branch}) share the same project directory; if the status file is unavailable, it falls back to the most recently modified JSONL file in the project's session directory, or to searching @samp{history.jsonl}.  If the buffer is a Codex terminal, the command falls back to the most recent Codex session whose recorded working directory matches the buffer's directory, since Codex does not publish a live session identifier.  This lets you quickly jump from an active coding agent session to its rendered log. @*
+The command @code{agent-log-open-current-session} opens the log for the coding agent session running in the current buffer.  It dispatches on the current buffer's backend: if the buffer is a Claude Code terminal, it reads the status file that Claude Code writes to @samp{/tmp/claude-code-status/} and uses the @samp{transcript_path} field to locate the exact JSONL file for the session, which uniquely identifies the session even when multiple sessions (including branches created with @code{/branch}) share the same project directory; if the status file is unavailable, it falls back to the most recently modified JSONL file in the project's session directory, or to searching @samp{history.jsonl}.  If the buffer is a Codex terminal, the command falls back to the most recent Codex session whose recorded working directory matches the buffer's directory, since Codex does not publish a live session identifier.  This lets you quickly jump from an active coding agent session to its rendered log.
 
 @node Rendered directory
 @section Rendered directory
 
 @findex agent-log-open-directory
 
-The command @code{agent-log-open-directory} opens the rendered Markdown directory in Dired.  Since rendered files are plain Markdown organized by project, you can use standard Emacs tools to browse, search, and manage them.  For example, you can run @samp{consult-ripgrep} from this Dired buffer to search across all rendered sessions. @*
+The command @code{agent-log-open-directory} opens the rendered Markdown directory in Dired.  Since rendered files are plain Markdown organized by project, you can use standard Emacs tools to browse, search, and manage them.  For example, you can run @samp{consult-ripgrep} from this Dired buffer to search across all rendered sessions.
 
-If the rendered directory does not yet exist, the command creates it. @*
+If the rendered directory does not yet exist, the command creates it.
 
 @node Sync and rendering
 @section Sync and rendering
@@ -401,11 +402,11 @@ If the rendered directory does not yet exist, the command creates it. @*
 @findex agent-log-sync-sessions
 @findex agent-log-refresh
 
-By default, rendering is lazy: sessions are rendered to @samp{.md} files on first access via @code{agent-log-browse-sessions} or @code{agent-log-open-file}.  The package maintains an index file (@samp{_index.el}) in the rendered directory that maps session IDs to rendered file paths and JSONL file sizes.  When you access a session, the package compares the current JSONL file size against the indexed size; if they differ, the session is re-rendered. @*
+By default, rendering is lazy: sessions are rendered to @samp{.md} files on first access via @code{agent-log-browse-sessions} or @code{agent-log-open-file}.  The package maintains an index file (@samp{_index.el}) in the rendered directory that maps session IDs to rendered file paths and JSONL file sizes.  When you access a session, the package compares the current JSONL file size against the indexed size; if they differ, the session is re-rendered.
 
-The command @code{agent-log-sync-sessions} renders all unrendered or stale sessions in bulk.  It processes sessions one at a time using @code{run-with-timer} to avoid blocking Emacs.  A progress message reports how many sessions were rendered. @*
+The command @code{agent-log-sync-sessions} renders all unrendered or stale sessions in bulk.  It processes sessions one at a time using @code{run-with-timer} to avoid blocking Emacs.  A progress message reports how many sessions were rendered.
 
-The command @code{agent-log-refresh} re-renders the session displayed in the current buffer from its JSONL source.  This is useful if the rendered file appears stale or if you have changed display settings such as @code{agent-log-show-thinking} or @code{agent-log-show-tools} (@ref{Display of thinking and tool sections}).  The keybinding is @samp{g} in @code{agent-log-mode}. @*
+The command @code{agent-log-refresh} re-renders the session displayed in the current buffer from its JSONL source.  This is useful if the rendered file appears stale or if you have changed display settings such as @code{agent-log-show-thinking} or @code{agent-log-show-tools} (@ref{Display of thinking and tool sections}).  The keybinding is @samp{g} in @code{agent-log-mode}.
 
 @node Navigation
 @section Navigation
@@ -413,9 +414,9 @@ The command @code{agent-log-refresh} re-renders the session displayed in the cur
 @findex agent-log-next-turn
 @findex agent-log-previous-turn
 
-The command @code{agent-log-next-turn} moves point to the next User or Assistant heading in the buffer.  The command @code{agent-log-previous-turn} moves to the previous one.  These commands search for @samp{## User} and @samp{## Assistant} headings, skipping over tool calls and thinking sections. @*
+The command @code{agent-log-next-turn} moves point to the next User or Assistant heading in the buffer.  The command @code{agent-log-previous-turn} moves to the previous one.  These commands search for @samp{## User} and @samp{## Assistant} headings, skipping over tool calls and thinking sections.
 
-The keybindings are @samp{n} and @samp{p} in @code{agent-log-mode}, making it easy to step through a conversation turn by turn. @*
+The keybindings are @samp{n} and @samp{p} in @code{agent-log-mode}, making it easy to step through a conversation turn by turn.
 
 @node Section visibility
 @section Section visibility
@@ -424,18 +425,18 @@ The keybindings are @samp{n} and @samp{p} in @code{agent-log-mode}, making it ea
 @findex agent-log-collapse-all
 @findex agent-log-expand-all
 
-The command @code{agent-log-toggle-section} toggles the visibility of the section at point.  When point is on a @samp{####} heading (tool call, tool result, or thinking block), it collapses or expands just that section.  When point is on any other heading, it delegates to @code{outline-toggle-children}.  The keybinding is @samp{TAB}. @*
+The command @code{agent-log-toggle-section} toggles the visibility of the section at point.  When point is on a @samp{####} heading (tool call, tool result, or thinking block), it collapses or expands just that section.  When point is on any other heading, it delegates to @code{outline-toggle-children}.  The keybinding is @samp{TAB}.
 
-The command @code{agent-log-collapse-all} collapses all tool-use, tool-result, and thinking sections in the buffer at once.  This gives you a clean view of just the user messages and assistant text responses.  The keybinding is @samp{C}. @*
+The command @code{agent-log-collapse-all} collapses all tool-use, tool-result, and thinking sections in the buffer at once.  This gives you a clean view of just the user messages and assistant text responses.  The keybinding is @samp{C}.
 
-The command @code{agent-log-expand-all} expands all sections, removing all section overlays and showing the full content.  The keybinding is @samp{E}. @*
+The command @code{agent-log-expand-all} expands all sections, removing all section overlays and showing the full content.  The keybinding is @samp{E}.
 
 @node Copying
 @section Copying
 
 @findex agent-log-copy-turn
 
-The command @code{agent-log-copy-turn} copies the current turn to the kill ring.  A ``turn'' is delimited by @samp{##} headings: from the current @samp{## User} or @samp{## Assistant} heading up to (but not including) the next one.  This is useful for extracting a specific message from a conversation to paste elsewhere.  The keybinding is @samp{w}. @*
+The command @code{agent-log-copy-turn} copies the current turn to the kill ring.  A ``turn'' is delimited by @samp{##} headings: from the current @samp{## User} or @samp{## Assistant} heading up to (but not including) the next one.  This is useful for extracting a specific message from a conversation to paste elsewhere.  The keybinding is @samp{w}.
 
 @node Summary generation
 @section Summary generation
@@ -443,13 +444,13 @@ The command @code{agent-log-copy-turn} copies the current turn to the kill ring.
 @findex agent-log-summarize-sessions
 @findex agent-log-stop-summarize-sessions
 
-The command @code{agent-log-summarize-sessions} generates AI summaries for all sessions that do not yet have one.  It requires the @samp{gptel} package.  The command processes sessions sequentially, sending each conversation's text to the configured LLM (@ref{Summary generation (1), , Summary generation options}) and storing the response in the index.  Summary requests disable @code{gptel-use-tools} so that globally configured tools (e.g. MCP servers) are not included in the request. @*
+The command @code{agent-log-summarize-sessions} generates AI summaries for all sessions that do not yet have one.  It requires the @samp{gptel} package.  The command processes sessions sequentially, sending each conversation's text to the configured LLM (@ref{Summary generation (1), , Summary generation options}) and storing the response in the index.  Summary requests disable @code{gptel-use-tools} so that globally configured tools (e.g. MCP servers) are not included in the request.
 
-Each summary consists of two parts: a one-line summary (up to 80 characters) used in the session browser display, and a paragraph summary (3--5 sentences) shown at the top of rendered buffers.  The LLM is instructed to return a JSON object with @code{oneline} and @code{summary} fields. @*
+Each summary consists of two parts: a one-line summary (up to 80 characters) used in the session browser display, and a paragraph summary (3--5 sentences) shown at the top of rendered buffers.  The LLM is instructed to return a JSON object with @code{oneline} and @code{summary} fields.
 
-Progress is displayed in the echo area, showing which session is being summarized and the model in use.  If you invoke @code{agent-log-summarize-sessions} while summarization is already running, it stops the current run instead.  You can also stop explicitly with @code{agent-log-stop-summarize-sessions}. @*
+Progress is displayed in the echo area, showing which session is being summarized and the model in use.  If you invoke @code{agent-log-summarize-sessions} while summarization is already running, it stops the current run instead.  You can also stop explicitly with @code{agent-log-stop-summarize-sessions}.
 
-Summaries are persisted in the index file, so they survive across Emacs sessions and do not need to be regenerated.  When you open a session that has a summary, the paragraph summary is inserted as a blockquote below the session header. @*
+Summaries are persisted in the index file, so they survive across Emacs sessions and do not need to be regenerated.  When you open a session that has a summary, the paragraph summary is inserted as a blockquote below the session header.
 
 @menu
 * Automatic sync and summarization on session end::
@@ -461,15 +462,15 @@ Summaries are persisted in the index file, so they survive across Emacs sessions
 @vindex agent-log-auto-sync-sessions
 @vindex agent-log-auto-summarize-sessions
 
-Two user options control what happens automatically when a Claude Code session terminates.  Both require the @samp{claude-code} package and a @samp{Stop} hook configured in Claude Code's settings (see the @samp{claude-code} documentation for hook setup). @*
+Two user options control what happens automatically when a Claude Code session terminates.  Both require the @samp{claude-code} package and a @samp{Stop} hook configured in Claude Code's settings (see the @samp{claude-code} documentation for hook setup).
 
-When @code{agent-log-auto-sync-sessions} is non-nil, @code{agent-log-sync-sessions} runs automatically each time a session ends. @*
+When @code{agent-log-auto-sync-sessions} is non-nil, @code{agent-log-sync-sessions} runs automatically each time a session ends.
 
-When @code{agent-log-auto-summarize-sessions} is non-nil, @code{agent-log-summarize-sessions} runs automatically each time a session ends.  If auto-sync is also enabled, summarization runs after sync completes. @*
+When @code{agent-log-auto-summarize-sessions} is non-nil, @code{agent-log-summarize-sessions} runs automatically each time a session ends.  If auto-sync is also enabled, summarization runs after sync completes.
 
-The hook handler (@code{agent-log-claude--session-end-handler}) is defined in @samp{agent-log-claude.el} and is installed via @code{eval-after-load} when either defcustom is set before the backend is loaded. @*
+The hook handler (@code{agent-log-claude--session-end-handler}) is defined in @samp{agent-log-claude.el} and is installed via @code{eval-after-load} when either defcustom is set before the backend is loaded.
 
-Sessions with a live agent process are excluded from summarization by session ID@.  Each backend's @code{agent-log--active-session-ids} method provides the IDs of currently running sessions.  If summarization is already running when another session ends, the in-progress batch continues undisturbed. @*
+Sessions with a live agent process are excluded from summarization by session ID@.  Each backend's @code{agent-log--active-session-ids} method provides the IDs of currently running sessions.  If summarization is already running when another session ends, the in-progress batch continues undisturbed.
 
 @node Session rename
 @section Session rename
@@ -477,17 +478,17 @@ Sessions with a live agent process are excluded from summarization by session ID
 @findex agent-log-rename-sessions
 @vindex agent-log-auto-rename-sessions
 
-The user option @code{agent-log-auto-rename-sessions} controls whether sessions are renamed automatically when they receive an AI summary.  When set to non-@code{nil}, each time @code{agent-log-summarize-sessions} successfully generates a summary for a session, the one-line summary is slugified and written as a @samp{custom-title} entry in the session JSONL file.  This makes the name immediately visible in Claude Code's @samp{/resume} picker without any manual step. @*
+The user option @code{agent-log-auto-rename-sessions} controls whether sessions are renamed automatically when they receive an AI summary.  When set to non-@code{nil}, each time @code{agent-log-summarize-sessions} successfully generates a summary for a session, the one-line summary is slugified and written as a @samp{custom-title} entry in the session JSONL file.  This makes the name immediately visible in Claude Code's @samp{/resume} picker without any manual step.
 
-The default value is @code{nil}.  Set it to @code{t} if you want session names to stay in sync with summaries automatically. @*
+The default value is @code{nil}.  Set it to @code{t} if you want session names to stay in sync with summaries automatically.
 
-The command @code{agent-log-rename-sessions} renames all sessions that lack a custom title.  This command is defined in @samp{agent-log-claude.el} because custom-title entries are a Claude Code-specific JSONL convention.  For each session that has a one-line summary in the index but no @samp{custom-title} entry in its JSONL file, the command writes the summary directly as the custom title.  With a prefix argument (@samp{C-u}), it overwrites existing custom titles as well, which is useful after changing the title format. @*
+The command @code{agent-log-rename-sessions} renames all sessions that lack a custom title.  This command is defined in @samp{agent-log-claude.el} because custom-title entries are a Claude Code-specific JSONL convention.  For each session that has a one-line summary in the index but no @samp{custom-title} entry in its JSONL file, the command writes the summary directly as the custom title.  With a prefix argument (@samp{C-u}), it overwrites existing custom titles as well, which is useful after changing the title format.
 
-This is a purely local, offline operation — no API calls are made.  Sessions must be summarized first via @code{agent-log-summarize-sessions} (@ref{Summary generation}).  Sessions that already have a custom title (e.g. from Claude Code's @samp{/rename} command) are skipped. @*
+This is a purely local, offline operation — no API calls are made.  Sessions must be summarized first via @code{agent-log-summarize-sessions} (@ref{Summary generation}).  Sessions that already have a custom title (e.g. from Claude Code's @samp{/rename} command) are skipped.
 
-After writing custom-title entries, the cached JSONL file sizes in the index are updated in a single bulk write so that @code{agent-log-sync-sessions} does not treat the modified files as stale and trigger unnecessary re-renders. @*
+After writing custom-title entries, the cached JSONL file sizes in the index are updated in a single bulk write so that @code{agent-log-sync-sessions} does not treat the modified files as stale and trigger unnecessary re-renders.
 
-The command reports how many sessions were renamed, how many were skipped, and how many lacked a summary. @*
+The command reports how many sessions were renamed, how many were skipped, and how many lacked a summary.
 
 @node AI search
 @section AI search
@@ -495,39 +496,39 @@ The command reports how many sessions were renamed, how many were skipped, and h
 @findex agent-log-search
 @findex agent-log-search-follow-link
 
-The command @code{agent-log-search} searches your session history using natural language.  It prompts for a query string (e.g., ``how did I implement the caching layer?'' or ``conversations about authentication in my web app last month'') and uses a two-stage LLM pipeline to find relevant sessions. @*
+The command @code{agent-log-search} searches your session history using natural language.  It prompts for a query string (e.g., ``how did I implement the caching layer?'' or ``conversations about authentication in my web app last month'') and uses a two-stage LLM pipeline to find relevant sessions.
 
-@strong{Stage 1: scope narrowing.}  The query, along with a summary of the archive's metadata (project names with session counts, date range), is sent to a scope-narrowing model.  This model returns structured JSON specifying which projects and date range to include.  If the query does not mention a specific project or timeframe, all sessions are included.  The model and backend for this stage are configured via @code{agent-log-search-scope-model} and @code{agent-log-search-scope-backend} (@ref{AI search options}). @*
+@strong{Stage 1: scope narrowing.}  The query, along with a summary of the archive's metadata (project names with session counts, date range), is sent to a scope-narrowing model.  This model returns structured JSON specifying which projects and date range to include.  If the query does not mention a specific project or timeframe, all sessions are included.  The model and backend for this stage are configured via @code{agent-log-search-scope-model} and @code{agent-log-search-scope-backend} (@ref{AI search options}).
 
-@strong{Stage 2: selection and narrative.}  The filtered session summaries (one-line and paragraph, from @code{agent-log-summarize-sessions}) are sent to a selection model along with the original query.  If the number of matching sessions exceeds what fits within the token budget (@code{agent-log-search-budget}), only the most recent sessions are included.  The prompt includes a human-readable description of the scope applied in stage 1 (projects, date range, how many sessions matched, and how many were actually sent).  The model produces a Markdown narrative explaining which sessions are relevant and why, with inline links to specific sessions.  If the scope is narrower than ``all projects, all dates'', or if sessions were truncated for budget, the model notes this so you know some sessions may have been excluded.  Session summaries are sanitized to valid UTF-8 before serialization so that non-ASCII content does not cause errors.  The model and backend for this stage are configured via @code{agent-log-search-model} and @code{agent-log-search-backend} (@ref{AI search options}). @*
+@strong{Stage 2: selection and narrative.}  The filtered session summaries (one-line and paragraph, from @code{agent-log-summarize-sessions}) are sent to a selection model along with the original query.  If the number of matching sessions exceeds what fits within the token budget (@code{agent-log-search-budget}), only the most recent sessions are included.  The prompt includes a human-readable description of the scope applied in stage 1 (projects, date range, how many sessions matched, and how many were actually sent).  The model produces a Markdown narrative explaining which sessions are relevant and why, with inline links to specific sessions.  If the scope is narrower than ``all projects, all dates'', or if sessions were truncated for budget, the model notes this so you know some sessions may have been excluded.  Session summaries are sanitized to valid UTF-8 before serialization so that non-ASCII content does not cause errors.  The model and backend for this stage are configured via @code{agent-log-search-model} and @code{agent-log-search-backend} (@ref{AI search options}).
 
-The result is displayed in a @samp{*agent-log-search*} buffer in @code{agent-log-search-mode} (@ref{@code{agent-log-search-mode}}).  Session references in the narrative are rendered as clickable links.  Pressing @samp{RET} or clicking on a link opens the corresponding rendered session log. @*
+The result is displayed in a @samp{*agent-log-search*} buffer in @code{agent-log-search-mode} (@ref{@code{agent-log-search-mode}}).  Session references in the narrative are rendered as clickable links.  Pressing @samp{RET} or clicking on a link opens the corresponding rendered session log.
 
-Before starting, the command checks for unsummarized sessions.  If any exist, it warns the user that those sessions will be excluded and asks for confirmation.  If no sessions have summaries at all, the command aborts with a message to run @code{agent-log-summarize-sessions} first (@ref{Summary generation}). @*
+Before starting, the command checks for unsummarized sessions.  If any exist, it warns the user that those sessions will be excluded and asks for confirmation.  If no sessions have summaries at all, the command aborts with a message to run @code{agent-log-summarize-sessions} first (@ref{Summary generation}).
 
-Before stage 2, the estimated token cost is compared against @code{agent-log-search-budget} (@ref{AI search options}).  If the estimate exceeds the threshold, the user is asked to confirm. @*
+Before stage 2, the estimated token cost is compared against @code{agent-log-search-budget} (@ref{AI search options}).  If the estimate exceeds the threshold, the user is asked to confirm.
 
-When @code{gptel-plus} is available, the combined dollar cost of both stages is displayed at the bottom of the results buffer. @*
+When @code{gptel-plus} is available, the combined dollar cost of both stages is displayed at the bottom of the results buffer.
 
 @node Session resumption
 @section Session resumption
 
 @findex agent-log-resume-session
 
-The command @code{agent-log-resume-session} resumes the session displayed in the current buffer in the coding agent.  The command extracts the session ID from the buffer (either from the buffer-local variable or from the front-matter comment) and dispatches to the buffer's backend via the @code{agent-log--resume-session} generic function.  For Claude Code sessions, this requires the @samp{claude-code} package and passes the session ID with the @samp{--resume} flag, starting in the session's project directory when possible.  The project directory is normalized with a trailing slash to match the format returned by @code{claude-code--directory}, ensuring that buffer names, concurrent session detection, and modeline display all work correctly.  For Codex sessions, this requires the @samp{codex} package and opens the session in a proper terminal buffer (eat or vterm), starting in the session's project directory when possible.  The keybinding is @samp{r} in @code{agent-log-mode}. @*
+The command @code{agent-log-resume-session} resumes the session displayed in the current buffer in the coding agent.  The command extracts the session ID from the buffer (either from the buffer-local variable or from the front-matter comment) and dispatches to the buffer's backend via the @code{agent-log--resume-session} generic function.  For Claude Code sessions, this requires the @samp{claude-code} package and passes the session ID with the @samp{--resume} flag, starting in the session's project directory when possible.  The project directory is normalized with a trailing slash to match the format returned by @code{claude-code--directory}, ensuring that buffer names, concurrent session detection, and modeline display all work correctly.  For Codex sessions, this requires the @samp{codex} package and opens the session in a proper terminal buffer (eat or vterm), starting in the session's project directory when possible.  The keybinding is @samp{r} in @code{agent-log-mode}.
 
 @node Secret redaction
 @chapter Secret redaction
 
-Because AI coding agents frequently see or handle secrets, their conversation logs can contain API keys, tokens, and other credentials in plain text.  The optional @samp{agent-log-redact} module scans each rendered entry for known secret formats and replaces every match with a deterministic placeholder of the form @samp{[REDACTED:LABEL:HASH8]}, where @samp{HASH8} is the first 8 hex chars of @samp{sha256(secret + salt)}.  The same secret always produces the same placeholder, so you can still reason about which credential appears where without exposing its value. @*
+Because AI coding agents frequently see or handle secrets, their conversation logs can contain API keys, tokens, and other credentials in plain text.  The optional @samp{agent-log-redact} module scans each rendered entry for known secret formats and replaces every match with a deterministic placeholder of the form @samp{[REDACTED:LABEL:HASH8]}, where @samp{HASH8} is the first 8 hex chars of @samp{sha256(secret + salt)}.  The same secret always produces the same placeholder, so you can still reason about which credential appears where without exposing its value.
 
-Enable it by loading the module: @*
+Enable it by loading the module:
 
 @lisp
 (require 'agent-log-redact)
 @end lisp
 
-After enabling for the first time, run @code{agent-log-redact-rebuild-all} to re-render any previously-rendered logs through the redactor. @*
+After enabling for the first time, run @code{agent-log-redact-rebuild-all} to re-render any previously-rendered logs through the redactor.
 
 @menu
 * Coverage::
@@ -539,78 +540,81 @@ After enabling for the first time, run @code{agent-log-redact-rebuild-all} to re
 @node Coverage
 @section Coverage
 
-The built-in pattern list (@code{agent-log-redact-patterns}) covers AWS access keys, GitHub tokens (classic, @samp{ghs_}, and fine-grained PATs), GitLab personal access tokens, Slack tokens, generic @samp{sk-} API keys (with a more specific @samp{sk-ant-} rule for Anthropic keys that fires first), Google API keys (@samp{AIza...}), JSON Web Tokens, database connection strings with embedded credentials (@samp{postgres}, @samp{mysql}, @samp{mongodb}, etc.), Google OAuth client secrets, PEM private-key blocks, and generic @samp{api_key} / @samp{password} / @samp{token} assignments with high-entropy values.  Add site-specific patterns via @code{agent-log-redact-extra-patterns} (same @samp{(REGEX . LABEL)} alist format); suppress known-safe matches via @code{agent-log-redact-allowlist} (a list of literal strings). @*
+The built-in pattern list (@code{agent-log-redact-patterns}) covers AWS access keys, GitHub tokens (classic, @samp{ghs_}, and fine-grained PATs), GitLab personal access tokens, Slack tokens, generic @samp{sk-} API keys (with a more specific @samp{sk-ant-} rule for Anthropic keys that fires first), Google API keys (@samp{AIza...}), JSON Web Tokens, database connection strings with embedded credentials (@samp{postgres}, @samp{mysql}, @samp{mongodb}, etc.), Google OAuth client secrets, PEM private-key blocks, and generic @samp{api_key} / @samp{password} / @samp{token} assignments with high-entropy values.  Add site-specific patterns via @code{agent-log-redact-extra-patterns} (same @samp{(REGEX . LABEL)} alist format); suppress known-safe matches via @code{agent-log-redact-allowlist} (a list of literal strings).
 
 @node Integration
 @section Integration
 
-Redaction is applied at two layers: @*
+Redaction is applied at two layers:
 
 @enumerate
 @item
-@emph{Render-time} via @samp{:filter-return} advice on @code{agent-log--render-entry}, so every rendered entry passes through the redactor on its way to the Markdown file.  Covers both the full-render path (@code{agent-log--render-to-file}) and the live-update path (@code{agent-log--append-rendered-line}). @*
+@emph{Render-time} via @samp{:filter-return} advice on @code{agent-log--render-entry}, so every rendered entry passes through the redactor on its way to the Markdown file.  Covers both the full-render path (@code{agent-log--render-to-file}) and the live-update path (@code{agent-log--append-rendered-line}).
 @item
-@emph{Source-level} via @code{agent-log-redact-scrub-jsonl}, which walks each .jsonl under @code{agent-log-redact-jsonl-roots} (Claude Code's @samp{~/.claude/projects/}, Codex's @samp{~/.codex/sessions/}), parses each line as JSON, and rewrites every string value through @code{agent-log-redact-text} atomically.  JSON object keys are preserved unchanged.  Files modified within @code{agent-log-redact-active-session-seconds} are skipped to avoid racing with an active session. @*
+@emph{Source-level} via @code{agent-log-redact-scrub-jsonl}, which walks each .jsonl under @code{agent-log-redact-jsonl-roots} (Claude Code's @samp{~/.claude/projects/}, Codex's @samp{~/.codex/sessions/}), parses each line as JSON, and rewrites non-opaque string values through @code{agent-log-redact-text} atomically.  JSON object keys and values under @code{agent-log-redact-opaque-json-keys} are preserved unchanged.  Files modified within @code{agent-log-redact-active-session-seconds} are skipped to avoid racing with an active session.
 @end enumerate
 
-Source-level scrubbing is the authoritative redaction: once the JSONL is clean, every downstream rendering of that session is automatically clean, and there is no plain-text copy of the secret on local disk.  Session-resume still works — a resumed conversation sees @samp{[REDACTED:label:hash]} strings in prior history, which any coding agent handles as normal text. @*
+Source-level scrubbing is the authoritative redaction for plaintext transcript fields: once the JSONL is clean, every downstream rendering of that session is automatically clean, and there is no plain-text copy of the secret on local disk.  Session-resume remains safe only if authenticated or encrypted resume fields are preserved byte-for-byte; by default, keys such as @samp{encrypted_content}, @samp{signature}, @samp{ciphertext}, @samp{nonce}, @samp{mac}, @samp{tag}, and suffixed variants such as @samp{thinking_signature} are treated as opaque.
 
-Neither layer is a substitute for preventing secrets from entering the transcript in the first place (that is the job of an upstream PreToolUse hook).  They are defense in depth: prevention at the edge, redaction at the core, and redaction at the view. @*
+Neither layer is a substitute for preventing secrets from entering the transcript in the first place (that is the job of an upstream PreToolUse hook).  They are defense in depth: prevention at the edge, redaction at the core, and redaction at the view.
 
 @node Commands (1)
 @section Commands
 
 @findex agent-log-redact-rebuild-all
-@code{agent-log-redact-rebuild-all} deletes every rendered @samp{.md} file under @code{agent-log-rendered-directory}, clears the index, and re-runs @code{agent-log-sync-sessions} so every session is re-rendered through the redactor.  Use after enabling redaction or after changing the pattern list. @*
+@code{agent-log-redact-rebuild-all} deletes every rendered @samp{.md} file under @code{agent-log-rendered-directory}, clears the index, and re-runs @code{agent-log-sync-sessions} so every session is re-rendered through the redactor.  Use after enabling redaction or after changing the pattern list.
 
 @findex agent-log-redact-existing-in-place
-@code{agent-log-redact-existing-in-place} is a faster alternative for the first-time migration.  It iterates every already-rendered @samp{.md} file, runs its contents through @code{agent-log-redact-text}, and rewrites only files whose content actually changed — no JSONL re-parsing.  Much faster than @code{agent-log-redact-rebuild-all} on large archives.  Sessions whose JSONL has grown since their last render are not refreshed by this command; run @code{agent-log-sync-sessions} afterward to pick up any new content through the advice-based redactor. @*
+@code{agent-log-redact-existing-in-place} is a faster alternative for the first-time migration.  It iterates every already-rendered @samp{.md} file, runs its contents through @code{agent-log-redact-text}, and rewrites only files whose content actually changed — no JSONL re-parsing.  Much faster than @code{agent-log-redact-rebuild-all} on large archives.  Sessions whose JSONL has grown since their last render are not refreshed by this command; run @code{agent-log-sync-sessions} afterward to pick up any new content through the advice-based redactor.
 
 @findex agent-log-redact-scrub-jsonl
-@code{agent-log-redact-scrub-jsonl} is the source-level scrubber.  It walks every directory in @code{agent-log-redact-jsonl-roots} recursively, and for every @samp{.jsonl} older than @code{agent-log-redact-active-session-seconds} examines each line.  Idempotency is enforced at three layers.  First, @code{agent-log-redact-text} skips any regex match whose captured text already contains a @samp{[REDACTED:...]} substring, so a pattern with a permissive character class cannot swallow and re-hash its own placeholder (e.g. the @samp{db-password} pattern captures @samp{[^@@/ \n]+} as the password, which would otherwise match a previously-redacted placeholder on a subsequent pass).  Second, lines that contain no pattern match at all are left verbatim — no JSON round-trip.  Third, lines that match syntactically but whose recursive walk redacts no actual string are also left verbatim (this covers the case where a pattern matches inside an already-redacted placeholder that the first layer skips).  Only lines where at least one string value is actually rewritten trigger JSON re-serialization.  The file is rewritten atomically (temporary file + rename) only when at least one line actually changed.  Both fast paths are required because JSON parse + serialize is not guaranteed to be byte-identical for all valid inputs — unconditional re-serialization would cause spurious drift across re-runs.  Lines that fail to parse as JSON are preserved unchanged, so malformed or truncated entries survive scrubbing.  The write path disables Emacs lockfiles so concurrent scrubber invocations do not deadlock on stale @samp{.#} lock symlinks.  Run once after enabling redaction to clean historical sessions, and periodically afterward (manually, or via a cron-like schedule) to scrub newly-completed sessions. @*
+@code{agent-log-redact-scrub-jsonl} is the source-level scrubber.  It walks every directory in @code{agent-log-redact-jsonl-roots} recursively, and for every @samp{.jsonl} older than @code{agent-log-redact-active-session-seconds} examines each line.  Idempotency is enforced at three layers.  First, @code{agent-log-redact-text} skips any regex match whose captured text already contains a @samp{[REDACTED:...]} substring, so a pattern with a permissive character class cannot swallow and re-hash its own placeholder (e.g. the @samp{db-password} pattern captures @samp{[^@@/ \n]+} as the password, which would otherwise match a previously-redacted placeholder on a subsequent pass).  Second, lines that contain no pattern match at all are left verbatim — no JSON round-trip.  Third, lines that match syntactically but whose recursive walk redacts no actual string are also left verbatim (this covers matches inside already-redacted placeholders and opaque fields such as Codex @samp{encrypted_content}).  Only lines where at least one non-opaque string value is actually rewritten trigger JSON re-serialization.  The file is rewritten atomically (temporary file + rename) only when at least one line actually changed.  Both fast paths are required because JSON parse + serialize is not guaranteed to be byte-identical for all valid inputs — unconditional re-serialization would cause spurious drift across re-runs.  Lines that fail to parse as JSON are preserved unchanged, so malformed or truncated entries survive scrubbing.  The write path disables Emacs lockfiles so concurrent scrubber invocations do not deadlock on stale @samp{.#} lock symlinks.  Run once after enabling redaction to clean historical sessions, and periodically afterward (manually, or via a cron-like schedule) to scrub newly-completed sessions.
 
 @findex agent-log-redact-preview
-@code{agent-log-redact-preview} lists every potential match in the current buffer — with its label, position, and a truncated preview — in a dedicated report buffer.  Useful for tuning patterns or adding entries to @code{agent-log-redact-allowlist} when a legitimate value triggers a false positive. @*
+@code{agent-log-redact-preview} lists every potential match in the current buffer — with its label, position, and a truncated preview — in a dedicated report buffer.  Useful for tuning patterns or adding entries to @code{agent-log-redact-allowlist} when a legitimate value triggers a false positive.
 
 @node User options (1)
 @section User options
 
 @vindex agent-log-redact-enabled
-@code{agent-log-redact-enabled} (default @samp{t}) toggles redaction globally.  Set to @samp{nil} to bypass the redactor without unloading the module. @*
+@code{agent-log-redact-enabled} (default @samp{t}) toggles redaction globally.  Set to @samp{nil} to bypass the redactor without unloading the module.
 
 @vindex agent-log-redact-patterns
-@code{agent-log-redact-patterns} is the built-in @samp{(REGEX . LABEL)} alist.  Each entry is applied in order.  If a regex contains a capture group, only the first capture group is replaced; otherwise the whole match is replaced.  Use a capture group when you want to preserve surrounding context (e.g. the @samp{password=} prefix in a @samp{password=VALUE} match). @*
+@code{agent-log-redact-patterns} is the built-in @samp{(REGEX . LABEL)} alist.  Each entry is applied in order.  If a regex contains a capture group, only the first capture group is replaced; otherwise the whole match is replaced.  Use a capture group when you want to preserve surrounding context (e.g. the @samp{password=} prefix in a @samp{password=VALUE} match).
 
 @vindex agent-log-redact-extra-patterns
-@code{agent-log-redact-extra-patterns} is appended to the built-in list on every scan.  Use it to add site-specific secret formats without editing the built-in. @*
+@code{agent-log-redact-extra-patterns} is appended to the built-in list on every scan.  Use it to add site-specific secret formats without editing the built-in.
 
 @vindex agent-log-redact-allowlist
-@code{agent-log-redact-allowlist} is a list of literal strings that are never redacted, even when matched by a pattern.  Use to suppress known false positives such as public test keys. @*
+@code{agent-log-redact-allowlist} is a list of literal strings that are never redacted, even when matched by a pattern.  Use to suppress known false positives such as public test keys.
 
 @vindex agent-log-redact-hash-salt
-@code{agent-log-redact-hash-salt} is an optional salt prepended to secrets before hashing.  An empty salt (the default) is safe — the 8-char truncation already makes recovery impractical.  Set a non-empty salt if you sync the same logs to multiple machines and want placeholders to differ across them. @*
+@code{agent-log-redact-hash-salt} is an optional salt prepended to secrets before hashing.  An empty salt (the default) is safe — the 8-char truncation already makes recovery impractical.  Set a non-empty salt if you sync the same logs to multiple machines and want placeholders to differ across them.
 
 @vindex agent-log-redact-jsonl-roots
-@code{agent-log-redact-jsonl-roots} lists the directories the source-level scrubber walks.  Defaults to Claude Code's @samp{~/.claude/projects/} and Codex's @samp{~/.codex/sessions/}. @*
+@code{agent-log-redact-jsonl-roots} lists the directories the source-level scrubber walks.  Defaults to Claude Code's @samp{~/.claude/projects/} and Codex's @samp{~/.codex/sessions/}.
+
+@vindex agent-log-redact-opaque-json-keys
+@code{agent-log-redact-opaque-json-keys} lists JSON keys whose values are never source-redacted.  This protects authenticated ciphertext and signature fields used by agent resume protocols.  Keys ending in @samp{_signature}, @samp{_ciphertext}, @samp{_nonce}, @samp{_mac}, or @samp{_tag} are also treated as opaque.
 
 @vindex agent-log-redact-active-session-seconds
-@code{agent-log-redact-active-session-seconds} controls how recently-modified a .jsonl must be before the scrubber skips it.  Default 300 (five minutes).  Prevents racing with a session that is still writing. @*
+@code{agent-log-redact-active-session-seconds} controls how recently-modified a .jsonl must be before the scrubber skips it.  Default 300 (five minutes).  Prevents racing with a session that is still writing.
 
 @vindex agent-log-auto-redact-sessions
-@code{agent-log-auto-redact-sessions}, when non-nil, scrubs JSONL automatically after each Claude Code session ends.  Installs a handler on @code{claude-code-event-hook} that fires on @samp{:type stop} and, after @code{agent-log-redact-active-session-seconds} plus 30 seconds, launches an @samp{emacs --batch} subprocess that runs @code{agent-log-redact-scrub-jsonl}.  Using a subprocess is essential: scrubbing thousands of files inline in the interactive Emacs would block the UI for minutes.  Codex has no equivalent event hook, so Codex sessions are only scrubbed on manual invocation.  This is the companion to @code{agent-log-auto-sync-sessions} and @code{agent-log-auto-summarize-sessions} — same pattern, different action. @*
+@code{agent-log-auto-redact-sessions}, when non-nil, scrubs JSONL automatically after each Claude Code session ends.  Installs a handler on @code{claude-code-event-hook} that fires on @samp{:type stop} and, after @code{agent-log-redact-active-session-seconds} plus 30 seconds, launches an @samp{emacs --batch} subprocess that runs @code{agent-log-redact-scrub-jsonl}.  Using a subprocess is essential: scrubbing thousands of files inline in the interactive Emacs would block the UI for minutes.  Codex has no equivalent event hook, so Codex sessions are only scrubbed on manual invocation.  This is the companion to @code{agent-log-auto-sync-sessions} and @code{agent-log-auto-summarize-sessions} — same pattern, different action.
 
 @node @code{agent-log-mode}
 @chapter @code{agent-log-mode}
 
 @findex agent-log-mode
 
-@code{agent-log-mode} is the major mode used for rendered session buffers.  It derives from @code{markdown-view-mode}, inheriting Markdown fontification in a read-only buffer.  Buffers are never marked as modified, so @samp{q} (@code{quit-window}) closes them without prompting to save.  The mode activates @code{outline-minor-mode} with a regexp that matches Markdown headings (=## =, =### =, =#### =), enabling section folding. @*
+@code{agent-log-mode} is the major mode used for rendered session buffers.  It derives from @code{markdown-view-mode}, inheriting Markdown fontification in a read-only buffer.  Buffers are never marked as modified, so @samp{q} (@code{quit-window}) closes them without prompting to save.  The mode activates @code{outline-minor-mode} with a regexp that matches Markdown headings (=## =, =### =, =#### =), enabling section folding.
 
-Two invisibility specs are added: @code{agent-log-collapsed} (which shows the heading but hides the body) and @code{agent-log-hidden} (which hides both heading and body).  These are used by the section visibility commands (@ref{Section visibility}) and the display configuration options (@ref{Display of thinking and tool sections}). @*
+Two invisibility specs are added: @code{agent-log-collapsed} (which shows the heading but hides the body) and @code{agent-log-hidden} (which hides both heading and body).  These are used by the section visibility commands (@ref{Section visibility}) and the display configuration options (@ref{Display of thinking and tool sections}).
 
-When a buffer in this mode is killed, the file watcher is cleaned up and the index is updated with the final JSONL file size. @*
+When a buffer in this mode is killed, the file watcher is cleaned up and the index is updated with the final JSONL file size.
 
-The full keymap is: @*
+The full keymap is:
 
 @multitable {aaaaa} {aaaaaaaaaaaaaaaaaaaaaaaaaa} {aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}
 @headitem Key
@@ -658,9 +662,9 @@ The full keymap is: @*
 
 @findex agent-log-search-mode
 
-@code{agent-log-search-mode} is the major mode used for the @samp{*agent-log-search*} result buffer.  It derives from @code{markdown-view-mode}, providing Markdown fontification in a read-only buffer.  Session references in the LLM's narrative are replaced with clickable links: pressing @samp{RET} or clicking on them opens the corresponding rendered session log via @code{agent-log-search-follow-link}. @*
+@code{agent-log-search-mode} is the major mode used for the @samp{*agent-log-search*} result buffer.  It derives from @code{markdown-view-mode}, providing Markdown fontification in a read-only buffer.  Session references in the LLM's narrative are replaced with clickable links: pressing @samp{RET} or clicking on them opens the corresponding rendered session log via @code{agent-log-search-follow-link}.
 
-The keymap is minimal: @*
+The keymap is minimal:
 
 @multitable {aaaaa} {aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa} {aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}
 @headitem Key
@@ -679,13 +683,13 @@ The keymap is minimal: @*
 
 @findex agent-log-menu
 
-The command @code{agent-log-menu} opens a transient menu that arranges all @code{agent-log} commands in side-by-side columns: Open, Sync & AI, and Settings are always visible; a fourth Navigate column appears when the current buffer is in @code{agent-log-mode}.  The keybinding is @samp{?} in @code{agent-log-mode}.  The menu is also available globally via its autoload, so you can bind it to a key of your choice outside of @code{agent-log-mode}. @*
+The command @code{agent-log-menu} opens a transient menu that arranges all @code{agent-log} commands in side-by-side columns: Open, Sync & AI, and Settings are always visible; a fourth Navigate column appears when the current buffer is in @code{agent-log-mode}.  The keybinding is @samp{?} in @code{agent-log-mode}.  The menu is also available globally via its autoload, so you can bind it to a key of your choice outside of @code{agent-log-mode}.
 
-The Open column includes @code{agent-log-resume-session} (bound to @samp{s}), which opens the session displayed in the current log in the coding agent.  The Sync & AI column includes the @code{agent-log-search} command, bound to @samp{/}. @*
+The Open column includes @code{agent-log-resume-session} (bound to @samp{s}), which opens the session displayed in the current log in the coding agent.  The Sync & AI column includes the @code{agent-log-search} command, bound to @samp{/}.
 
-The Navigate column groups movement commands (@samp{n}, @samp{p} for stepping through turns), section folding (@samp{TAB} to toggle at point, @samp{C} to collapse all, @samp{E} to expand all), and buffer operations (@samp{G} to re-render, @samp{w} to copy the current turn).  Note that the collapse and expand commands are one-shot operations on the current buffer view; the persistent per-type visibility defaults (hidden, collapsed, visible) are controlled by the Settings toggles (@samp{-t} for thinking, @samp{-o} for tools). @*
+The Navigate column groups movement commands (@samp{n}, @samp{p} for stepping through turns), section folding (@samp{TAB} to toggle at point, @samp{C} to collapse all, @samp{E} to expand all), and buffer operations (@samp{G} to re-render, @samp{w} to copy the current turn).  Note that the collapse and expand commands are one-shot operations on the current buffer view; the persistent per-type visibility defaults (hidden, collapsed, visible) are controlled by the Settings toggles (@samp{-t} for thinking, @samp{-o} for tools).
 
-The Settings column displays the current value of each option (e.g., @code{collapsed}, @code{on}, @code{off}) highlighted with the @code{transient-value} face, matching the convention used by @samp{magit} and other transient-based menus. @*
+The Settings column displays the current value of each option (e.g., @code{collapsed}, @code{on}, @code{off}) highlighted with the @code{transient-value} face, matching the convention used by @samp{magit} and other transient-based menus.
 
 @node How it works
 @chapter How it works
@@ -701,16 +705,16 @@ The Settings column displays the current value of each option (e.g., @code{colla
 @node Backend architecture
 @section Backend architecture
 
-The package uses a generic interface to support multiple AI coding agents.  The base type @code{agent-log-backend} (defined with @code{cl-defstruct}) provides shared slots for the backend name, key symbol, root directory, and rendered directory.  Each backend extends this type via @code{:include} and implements a set of generic functions (@code{cl-defgeneric} / @code{cl-defmethod}) that handle backend-specific operations: session discovery, JSONL entry normalization, conversation filtering, tool input summarization, and session resumption. @*
+The package uses a generic interface to support multiple AI coding agents.  The base type @code{agent-log-backend} (defined with @code{cl-defstruct}) provides shared slots for the backend name, key symbol, root directory, and rendered directory.  Each backend extends this type via @code{:include} and implements a set of generic functions (@code{cl-defgeneric} / @code{cl-defmethod}) that handle backend-specific operations: session discovery, JSONL entry normalization, conversation filtering, tool input summarization, and session resumption.
 
-Backend files are loaded lazily.  When a backend is first accessed (e.g. during @code{agent-log-browse-sessions}), the package calls @code{require} on the backend's feature name and the backend registers a singleton instance in a global registry.  The registry maps backend key symbols to struct instances, so all dispatch goes through the struct's type. @*
+Backend files are loaded lazily.  When a backend is first accessed (e.g. during @code{agent-log-browse-sessions}), the package calls @code{require} on the backend's feature name and the backend registers a singleton instance in a global registry.  The registry maps backend key symbols to struct instances, so all dispatch goes through the struct's type.
 
-The rendering pipeline, session browser, live update mechanism, AI summaries, and AI search all operate on a normalized intermediate representation.  Each backend's @code{agent-log--normalize-entries} method converts its native JSONL format into canonical plists that the generic code expects.  Core functions such as @code{agent-log--render-to-file} and @code{agent-log--extract-conversation-text} receive a backend instance and thread it through to generic dispatch points (conversation filtering, entry classification, tool summarization, text extraction).  The convenience function @code{agent-log--read-all-sessions} returns merged sessions from all active backends, sorted most-recent-first; individual buffers store their backend in the buffer-local variable @code{agent-log--backend}, set when a session is opened.  This means the core of the package is backend-agnostic: adding a new backend requires only implementing the generic functions, with no changes to the core file. @*
+The rendering pipeline, session browser, live update mechanism, AI summaries, and AI search all operate on a normalized intermediate representation.  Each backend's @code{agent-log--normalize-entries} method converts its native JSONL format into canonical plists that the generic code expects.  Core functions such as @code{agent-log--render-to-file} and @code{agent-log--extract-conversation-text} receive a backend instance and thread it through to generic dispatch points (conversation filtering, entry classification, tool summarization, text extraction).  The convenience function @code{agent-log--read-all-sessions} returns merged sessions from all active backends, sorted most-recent-first; individual buffers store their backend in the buffer-local variable @code{agent-log--backend}, set when a session is opened.  This means the core of the package is backend-agnostic: adding a new backend requires only implementing the generic functions, with no changes to the core file.
 
 @node Data sources
 @section Data sources
 
-Each backend reads conversation data from a different directory layout. @*
+Each backend reads conversation data from a different directory layout.
 
 @menu
 * Claude Code::
@@ -720,35 +724,35 @@ Each backend reads conversation data from a different directory layout. @*
 @node Claude Code
 @subsection Claude Code
 
-The Claude Code backend reads from two places: @*
+The Claude Code backend reads from two places:
 
 @enumerate
 @item
-@samp{~/.claude/history.jsonl}: a global index mapping session IDs to projects and timestamps. @*
+@samp{~/.claude/history.jsonl}: a global index mapping session IDs to projects and timestamps.
 @item
-@samp{~/.claude/projects/<encoded-path>/<uuid>.jsonl}: one file per session, containing all messages as JSON lines. @*
+@samp{~/.claude/projects/<encoded-path>/<uuid>.jsonl}: one file per session, containing all messages as JSON lines.
 @end enumerate
 
-The encoded path replaces @samp{/}, @samp{.}, and space characters with @samp{-}.  The package tries both the expanded path and its @code{file-truename} when locating a session directory, which handles symlinked project paths. @*
+The encoded path replaces @samp{/}, @samp{.}, and space characters with @samp{-}.  The package tries both the expanded path and its @code{file-truename} when locating a session directory, which handles symlinked project paths.
 
 @node Codex
 @subsection Codex
 
-The Codex backend reads from: @*
+The Codex backend reads from:
 
 @enumerate
 @item
-@samp{~/.codex/history.jsonl}: a global index with one line per user message, containing the session ID, a Unix epoch timestamp, and the message text. @*
+@samp{~/.codex/history.jsonl}: a global index with one line per user message, containing the session ID, a Unix epoch timestamp, and the message text.
 @item
-@samp{~/.codex/sessions/YYYY/MM/DD/rollout-<date>-<uuid>.jsonl}: one file per session, organized by date in a nested directory tree. @*
+@samp{~/.codex/sessions/YYYY/MM/DD/rollout-<date>-<uuid>.jsonl}: one file per session, organized by date in a nested directory tree.
 @end enumerate
 
-Each line in a Codex session file is an envelope @code{@{timestamp, type, payload@}}.  The @code{type} field determines how the entry is processed: @code{session_meta} entries provide session metadata (working directory, model, CLI version); @code{response_item} entries carry the conversation content (user and assistant messages, function calls and their outputs, web searches, reasoning blocks); @code{event_msg} and @code{turn_context} entries are internal bookkeeping and are skipped during rendering.  The normalization step converts this envelope format to the canonical flat representation used by the rendering pipeline. @*
+Each line in a Codex session file is an envelope @code{@{timestamp, type, payload@}}.  The @code{type} field determines how the entry is processed: @code{session_meta} entries provide session metadata (working directory, model, CLI version); @code{response_item} entries carry the conversation content (user and assistant messages, function calls and their outputs, web searches, reasoning blocks); @code{event_msg} and @code{turn_context} entries are internal bookkeeping and are skipped during rendering.  The normalization step converts this envelope format to the canonical flat representation used by the rendering pipeline.
 
 @node Rendered directory structure
 @section Rendered directory structure
 
-The rendered directory mirrors the project structure: @*
+The rendered directory mirrors the project structure:
 
 @example
 ~/.claude/rendered/
@@ -760,21 +764,21 @@ The rendered directory mirrors the project structure: @*
   _index.el
 @end example
 
-Each @samp{.md} file contains HTML-comment front matter (session ID, source path, rendered timestamp, JSONL size) followed by the full conversation rendered as Markdown.  The @samp{_index.el} file is a hash table mapping session IDs to metadata (rendered file path, JSONL size, and optionally a summary). @*
+Each @samp{.md} file contains HTML-comment front matter (session ID, source path, rendered timestamp, JSONL size) followed by the full conversation rendered as Markdown.  The @samp{_index.el} file is a hash table mapping session IDs to metadata (rendered file path, JSONL size, and optionally a summary).
 
 @node Rendering pipeline
 @section Rendering pipeline
 
-The rendering pipeline operates in three stages: parse, normalize, filter.  First, the JSONL file is parsed into raw plists.  Then each backend's @code{agent-log--normalize-entries} method converts the raw entries to a canonical format (for Claude Code this is a no-op since the native format is already canonical; for Codex it unwraps the envelope, converts content types, strips system XML, and merges consecutive entries of the same role into single turns).  Finally, the backend's @code{agent-log--filter-conversation} and @code{agent-log--conversation-entry-p} methods select @code{user} and @code{assistant} entries while excluding system-generated messages.  For Claude Code, system entries are those whose content starts with known XML tags such as @samp{<local-command-stdout>} or @samp{<command-name>}.  For Codex, system entries are those starting with @samp{<environment_context>}, @samp{<permissions>}, @samp{<turn_aborted>}, or @samp{<collaboration_mode>}. @*
+The rendering pipeline operates in three stages: parse, normalize, filter.  First, the JSONL file is parsed into raw plists.  Then each backend's @code{agent-log--normalize-entries} method converts the raw entries to a canonical format (for Claude Code this is a no-op since the native format is already canonical; for Codex it unwraps the envelope, converts content types, strips system XML, and merges consecutive entries of the same role into single turns).  Finally, the backend's @code{agent-log--filter-conversation} and @code{agent-log--conversation-entry-p} methods select @code{user} and @code{assistant} entries while excluding system-generated messages.  For Claude Code, system entries are those whose content starts with known XML tags such as @samp{<local-command-stdout>} or @samp{<command-name>}.  For Codex, system entries are those starting with @samp{<environment_context>}, @samp{<permissions>}, @samp{<turn_aborted>}, or @samp{<collaboration_mode>}.
 
-Filtered entries are rendered as Markdown with @samp{##} headings for conversation turns and @samp{####} headings for tool calls and thinking blocks.  User turns show any text content followed by tool results.  Assistant turns show thinking blocks, text content, and tool-use summaries. @*
+Filtered entries are rendered as Markdown with @samp{##} headings for conversation turns and @samp{####} headings for tool calls and thinking blocks.  User turns show any text content followed by tool results.  Assistant turns show thinking blocks, text content, and tool-use summaries.
 
-The session header (the @samp{# Session: ...} line at the top of each rendered file) derives its project name from the @code{progress} entry in the JSONL, which contains the working directory.  Not all sessions have a @code{progress} entry; when one is absent, the package falls back to the project path recorded in @samp{history.jsonl}. @*
+The session header (the @samp{# Session: ...} line at the top of each rendered file) derives its project name from the @code{progress} entry in the JSONL, which contains the working directory.  Not all sessions have a @code{progress} entry; when one is absent, the package falls back to the project path recorded in @samp{history.jsonl}.
 
 @node Live update mechanism
 @section Live update mechanism
 
-When @code{agent-log-live-update} is non-@code{nil} and a rendered buffer is open, the package registers a @code{file-notify} watcher on the source JSONL file.  When the file grows, the watcher reads only the new bytes (from the previously recorded offset to the new file size), handling incomplete UTF-8 sequences at chunk boundaries.  New complete lines are parsed and rendered incrementally, appended to both the buffer and the @samp{.md} file on disk.  Partial lines (those not terminated by a newline) are buffered and completed when the next chunk arrives. @*
+When @code{agent-log-live-update} is non-@code{nil} and a rendered buffer is open, the package registers a @code{file-notify} watcher on the source JSONL file.  When the file grows, the watcher reads only the new bytes (from the previously recorded offset to the new file size), handling incomplete UTF-8 sequences at chunk boundaries.  New complete lines are parsed and rendered incrementally, appended to both the buffer and the @samp{.md} file on disk.  Partial lines (those not terminated by a newline) are buffered and completed when the next chunk arrives.
 
 @node Troubleshooting
 @chapter Troubleshooting
@@ -788,17 +792,17 @@ When @code{agent-log-live-update} is non-@code{nil} and a rendered buffer is ope
 @node No sessions found
 @section No sessions found
 
-Ensure that @code{agent-log-directory} points to the correct configuration directory (@ref{Directory configuration}).  The package reads @samp{history.jsonl} in that directory and looks for session files under @samp{projects/}. @*
+Ensure that @code{agent-log-directory} points to the correct configuration directory (@ref{Directory configuration}).  The package reads @samp{history.jsonl} in that directory and looks for session files under @samp{projects/}.
 
 @node Rendered files not updating
 @section Rendered files not updating
 
-If a rendered file appears stale, press @samp{g} (@code{agent-log-refresh}) in the buffer to force a full re-render (@ref{Sync and rendering}).  You can also delete the index file (@samp{_index.el} in the rendered directory) to force re-rendering of all sessions on next access. @*
+If a rendered file appears stale, press @samp{g} (@code{agent-log-refresh}) in the buffer to force a full re-render (@ref{Sync and rendering}).  You can also delete the index file (@samp{_index.el} in the rendered directory) to force re-rendering of all sessions on next access.
 
 @node Live updates not working
 @section Live updates not working
 
-Verify that @code{agent-log-live-update} is set to @code{t} (@ref{Live updates}).  Live updates rely on @code{file-notify}, which requires OS-level file watching support.  On some systems (e.g., remote filesystems via TRAMP), file notifications may not be available. @*
+Verify that @code{agent-log-live-update} is set to @code{t} (@ref{Live updates}).  Live updates rely on @code{file-notify}, which requires OS-level file watching support.  On some systems (e.g., remote filesystems via TRAMP), file notifications may not be available.
 
 @node Development
 @chapter Development
@@ -811,7 +815,7 @@ make compile  # byte-compile with warnings-as-errors
 @node License
 @chapter License
 
-GPL-3.0-or-later. @*
+GPL-3.0-or-later.
 
 @node Indices
 @chapter Indices
