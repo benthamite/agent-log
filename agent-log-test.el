@@ -1363,6 +1363,49 @@ the message content (string or list)."
 (defvar agent-log-test--codex-backend agent-log-codex--instance
   "Codex backend instance for use in tests.")
 
+;;;;;; Session discovery
+
+(ert-deftest agent-log-test-codex-find-session-for-project/allows-subagent ()
+  "Finds the newest matching Codex session by default."
+  (let* ((dir "/tmp/project")
+         (sessions
+          `(("child" :project ,dir :timestamp 2000
+             :source (:subagent (:thread_spawn (:parent_thread_id "parent"))))
+            ("parent" :project ,dir :timestamp 1000 :source "cli"))))
+    (should (equal (car (agent-log-codex--find-session-for-project
+                         dir sessions))
+                   "child"))))
+
+(ert-deftest agent-log-test-codex-find-session-for-project/top-level-only ()
+  "Ignores subagents when resolving the session for a live terminal buffer."
+  (let* ((dir "/tmp/project")
+         (sessions
+          `(("child" :project ,dir :timestamp 2000
+             :source (:subagent (:thread_spawn (:parent_thread_id "parent"))))
+            ("parent" :project ,dir :timestamp 1000 :source "cli"))))
+    (should (equal (car (agent-log-codex--find-session-for-project
+                         dir sessions t))
+                   "parent"))))
+
+(ert-deftest agent-log-test-codex-find-session-for-project/process-start ()
+  "Uses process start time to distinguish top-level sessions in one project."
+  (let* ((dir "/tmp/project")
+         (sessions
+          `(("newer" :project ,dir :timestamp 200000 :source "cli")
+            ("older" :project ,dir :timestamp 100000 :source "cli"))))
+    (should (equal (car (agent-log-codex--find-session-for-project
+                         dir sessions t 101000))
+                   "older"))))
+
+(ert-deftest agent-log-test-codex-find-session-for-project/process-start-miss ()
+  "Returns nil instead of an unrelated stale session when launch times miss."
+  (let* ((dir "/tmp/project")
+         (sessions `(("old" :project ,dir :timestamp 100000 :source "cli"))))
+    (should-not (agent-log-codex--find-session-for-project
+                 dir sessions t (+ 100000
+                                   agent-log-codex--session-start-match-window-ms
+                                   1)))))
+
 ;;;;;; Entry normalization
 
 (ert-deftest agent-log-test-codex-normalize/session-meta ()

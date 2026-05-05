@@ -71,13 +71,17 @@
                (= 4 hex) "-" (= 12 hex)) ".jsonl" eos)
   "Regexp extracting a session UUID from a Codex rollout filename.")
 
+(defconst agent-log-codex--session-start-match-window-ms (* 5 60 1000)
+  "Maximum launch-time delta for matching a Codex process to a session.")
+
 ;;;;; Generic method implementations
 
 ;;;;;; Session discovery
 
 (cl-defmethod agent-log--read-sessions ((backend agent-log-codex))
   "Parse `history.jsonl' and session files, return alist of sessions.
-Each value is a plist (:display :timestamp :project :file :file-dir :backend)."
+Each value is a plist (:display :timestamp :project :file :file-dir
+:backend :source)."
   (let* ((history-file (expand-file-name "history.jsonl"
                                          (agent-log-backend-directory backend)))
          (file-index (agent-log--build-session-file-index backend))
@@ -121,7 +125,8 @@ Each value is a plist (:display :timestamp :project :file :file-dir :backend)."
                      :project cwd
                      :file-dir (file-name-directory file)
                      :file file
-                     :backend backend)
+                     :backend backend
+                     :source (plist-get session-meta :source))
                result)))
      file-index)
     (sort result (lambda (a b)
@@ -501,28 +506,86 @@ Codex process."
 (cl-defmethod agent-log--current-buffer-session-file ((backend agent-log-codex))
   "Return the JSONL file for the Codex session in the current buffer.
 BACKEND is the Codex backend instance.  Since Codex does not
-publish a live session ID, fall back to the most recent session
-whose recorded CWD matches the buffer's directory."
-  (when-let* ((dir (codex--buffer-directory-for (current-buffer)))
-              (match (agent-log-codex--find-session-for-project
-                      dir (agent-log--read-sessions backend))))
-    (plist-get (cdr match) :file)))
+publish a live session ID for fresh sessions, prefer a session
+whose recorded CWD matches the buffer's directory and whose
+session timestamp is near the terminal process start time."
+  (when-let* ((dir (codex--buffer-directory-for (current-buffer))))
+    (let* ((process-start-ms (agent-log-codex--buffer-process-start-ms))
+           (match (agent-log-codex--find-session-for-project
+                   dir (agent-log--read-sessions backend)
+                   t process-start-ms)))
+      (plist-get (cdr match) :file))))
 
-(defun agent-log-codex--find-session-for-project (directory sessions)
+(defun agent-log-codex--find-session-for-project
+    (directory sessions &optional top-level-only target-timestamp-ms)
   "Find the latest session in SESSIONS whose project matches DIRECTORY.
 SESSIONS should be sorted newest-first (as from
 `agent-log--read-sessions').  DIRECTORY is compared against each
 session's :project field using both the expanded path and
-`file-truename'."
+`file-truename'.  When TOP-LEVEL-ONLY is non-nil, ignore Codex
+subagent sessions, which inherit the parent's CWD but do not own a
+terminal buffer.  When TARGET-TIMESTAMP-MS is non-nil, return the
+matching session whose timestamp is closest to it, provided the
+timestamp is within `agent-log-codex--session-start-match-window-ms'."
   (let ((targets (agent-log-codex--directory-match-targets directory)))
-    (cl-find-if (lambda (session)
-                  (let ((project (plist-get (cdr session) :project)))
-                    (and (stringp project)
-                         (not (string-empty-p project))
-                         (member (directory-file-name
-                                  (expand-file-name project))
-                                 targets))))
-                sessions)))
+    (let ((matches
+           (cl-remove-if-not
+            (lambda (session)
+              (let ((project (plist-get (cdr session) :project)))
+                (and (stringp project)
+                     (not (string-empty-p project))
+                     (member (directory-file-name
+                              (expand-file-name project))
+                             targets)
+                     (or (not top-level-only)
+                         (not (agent-log-codex--subagent-session-p
+                               session))))))
+            sessions)))
+      (if (numberp target-timestamp-ms)
+          (agent-log-codex--nearest-session-by-timestamp
+           matches target-timestamp-ms)
+        (car matches)))))
+
+(defun agent-log-codex--subagent-session-p (session)
+  "Return non-nil when SESSION metadata describes a Codex subagent."
+  (let ((source (plist-get (cdr session) :source)))
+    (and (listp source)
+         (plist-member source :subagent))))
+
+(defun agent-log-codex--nearest-session-by-timestamp
+    (sessions target-timestamp-ms)
+  "Return the session in SESSIONS launched nearest TARGET-TIMESTAMP-MS."
+  (car
+   (sort
+    (cl-remove-if-not
+     (lambda (session)
+       (agent-log-codex--timestamp-near-p
+        (plist-get (cdr session) :timestamp) target-timestamp-ms))
+     sessions)
+    (lambda (a b)
+      (< (agent-log-codex--timestamp-distance
+          (plist-get (cdr a) :timestamp) target-timestamp-ms)
+         (agent-log-codex--timestamp-distance
+          (plist-get (cdr b) :timestamp) target-timestamp-ms))))))
+
+(defun agent-log-codex--timestamp-near-p (timestamp target-timestamp-ms)
+  "Return non-nil when TIMESTAMP is near TARGET-TIMESTAMP-MS."
+  (and (numberp timestamp)
+       (<= (agent-log-codex--timestamp-distance
+            timestamp target-timestamp-ms)
+           agent-log-codex--session-start-match-window-ms)))
+
+(defun agent-log-codex--timestamp-distance (timestamp target-timestamp-ms)
+  "Return absolute distance between TIMESTAMP and TARGET-TIMESTAMP-MS."
+  (abs (- timestamp target-timestamp-ms)))
+
+(defun agent-log-codex--buffer-process-start-ms ()
+  "Return the current buffer's process start time in milliseconds."
+  (when-let* ((process (get-buffer-process (current-buffer)))
+              (pid (process-id process))
+              (attributes (process-attributes pid))
+              (start (alist-get 'start attributes)))
+    (round (* 1000 (float-time start)))))
 
 (defun agent-log-codex--directory-match-targets (directory)
   "Return a deduplicated list of canonical forms of DIRECTORY for matching."
