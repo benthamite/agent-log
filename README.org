@@ -289,7 +289,7 @@ If the rendered directory does not yet exist, the command creates it.
 #+findex: agent-log-sync-sessions
 #+findex: agent-log-refresh
 
-By default, rendering is lazy: sessions are rendered to =.md= files on first access via ~agent-log-browse-sessions~ or ~agent-log-open-file~.  The package maintains an index file (=_index.el=) in the rendered directory that maps session IDs to rendered file paths and JSONL file sizes.  When you access a session, the package compares the current JSONL file size against the indexed size; if they differ, the session is re-rendered.
+By default, rendering is lazy: sessions are rendered to =.md= files on first access via ~agent-log-browse-sessions~ or ~agent-log-open-file~.  The package maintains an index file (=_index.el=) in the rendered directory that maps session IDs to rendered file paths and JSONL file sizes.  When you access a session, the package compares the current JSONL file size and the rendered path implied by the current metadata against the indexed values; if either differs, the session is re-rendered.  This lets placeholder paths from newly-created sessions update once the session metadata or first user message provides a better date or title.
 
 The command ~agent-log-sync-sessions~ renders all unrendered or stale sessions in bulk.  It processes sessions one at a time using ~run-with-timer~ to avoid blocking Emacs.  A progress message reports how many sessions were rendered.
 
@@ -635,7 +635,7 @@ The rendering pipeline operates in three stages: parse, normalize, filter.  Firs
 
 Filtered entries are rendered as Markdown with =##= headings for conversation turns and =####= headings for tool calls and thinking blocks.  User turns show any text content followed by tool results.  Assistant turns show thinking blocks, text content, and tool-use summaries.
 
-The session header (the =# Session: ...= line at the top of each rendered file) derives its project name from the ~progress~ entry in the JSONL, which contains the working directory.  Not all sessions have a ~progress~ entry; when one is absent, the package falls back to the project path recorded in =history.jsonl=.
+The session header (the =# Session: ...= line at the top of each rendered file) derives its project name from the ~progress~ entry in the JSONL, which contains the working directory.  Not all sessions have a ~progress~ entry; when one is absent, the package falls back to the project path recorded in =history.jsonl=.  The session date prefers the first conversation turn timestamp, falling back to the progress or session metadata timestamp when a log has been created but no user message has been recorded yet.
 
 ** Live update mechanism
 :PROPERTIES:

@@ -247,6 +247,22 @@ the message content (string or list)."
   (let ((entries (list (list :type "user"))))
     (should (null (agent-log--find-progress-entry entries)))))
 
+(ert-deftest agent-log-test-find-session-timestamp/first-message ()
+  "Uses the first conversation timestamp when present."
+  (let ((entries (list (list :type "progress"
+                             :timestamp "2023-11-14T11:00:00Z")
+                       (list :type "user"
+                             :timestamp "2023-11-14T12:00:00Z"))))
+    (should (equal (agent-log--find-session-timestamp entries)
+                   "2023-11-14T12:00:00Z"))))
+
+(ert-deftest agent-log-test-find-session-timestamp/progress-fallback ()
+  "Falls back to the progress timestamp before conversation starts."
+  (let ((entries (list (list :type "progress"
+                             :timestamp "2023-11-14T11:00:00Z"))))
+    (should (equal (agent-log--find-session-timestamp entries)
+                   "2023-11-14T11:00:00Z"))))
+
 (ert-deftest agent-log-test-first-user-text/string-content ()
   "Extracts text from string content."
   (let ((entries (list (list :type "user"
@@ -885,6 +901,15 @@ the message content (string or list)."
     (let ((result (agent-log--extract-session-metadata-from-entries entries)))
       (should (equal (plist-get result :project) "unknown")))))
 
+(ert-deftest agent-log-test-extract-session-metadata-from-entries/progress-date ()
+  "Uses progress timestamp when no conversation timestamp exists."
+  (let ((entries (list (list :type "progress"
+                             :cwd "/home/user/project"
+                             :timestamp "2023-11-14T12:00:00Z"))))
+    (let ((result (agent-log--extract-session-metadata-from-entries entries)))
+      (should (equal (plist-get result :project) "project"))
+      (should (string-match-p "2023-11-14" (plist-get result :date))))))
+
 ;;;;; Rendered filepath
 
 (ert-deftest agent-log-test-rendered-filepath/generates-path ()
@@ -1204,6 +1229,23 @@ the message content (string or list)."
                            (buffer-string))))
             (should (string-match-p "MARKER: original render" content))))))))
 
+(ert-deftest agent-log-test-ensure-rendered/path-change-rerenders ()
+  "Re-renders when metadata implies a better rendered path."
+  (agent-log-test--with-temp-dir
+    (let* ((agent-log-rendered-directory
+            (expand-file-name "rendered" agent-log-test--dir))
+           (jsonl-content "{\"type\":\"user\",\"timestamp\":\"2023-11-14T12:00:00Z\",\"message\":{\"role\":\"user\",\"content\":\"hi\"}}\n")
+           (jsonl-path (agent-log-test--write-file "test.jsonl" jsonl-content))
+           (old-metadata (list :file jsonl-path :timestamp 1700000000000
+                               :project "/project" :display ""))
+           (new-metadata (list :file jsonl-path :timestamp 1700000000000
+                               :project "/project" :display "hi"))
+           (path1 (agent-log--ensure-rendered "s1" old-metadata))
+           (path2 (agent-log--ensure-rendered "s1" new-metadata)))
+      (should-not (equal path1 path2))
+      (should (string-match-p "hi\\.md\\'" path2))
+      (should (file-exists-p path2)))))
+
 ;;;;; Incremental text processing
 
 (ert-deftest agent-log-test-process-incremental-text/complete-lines ()
@@ -1334,6 +1376,31 @@ the message content (string or list)."
     (should (= (length result) 1))
     (should (equal (plist-get (car result) :type) "progress"))
     (should (equal (plist-get (car result) :cwd) "/tmp/project"))))
+
+(ert-deftest agent-log-test-codex-render/session-meta-only-has-date ()
+  "Renders a session_meta-only Codex file with a real session date."
+  (agent-log-test--with-temp-dir
+    (let* ((jsonl-content
+            (concat
+             "{\"type\":\"session_meta\","
+             "\"timestamp\":\"2026-04-01T18:00:00Z\","
+             "\"payload\":{\"id\":\"abc\","
+             "\"cwd\":\"/tmp/project\","
+             "\"timestamp\":\"2026-04-01T18:00:00Z\"}}\n"))
+           (jsonl-path (agent-log-test--write-file "codex.jsonl" jsonl-content))
+           (output-path (expand-file-name "output.md" agent-log-test--dir))
+           (metadata (list :file jsonl-path
+                           :timestamp 1775066400000
+                           :project "/tmp/project"
+                           :display ""
+                           :backend agent-log-test--codex-backend)))
+      (agent-log--render-to-file "abc" metadata output-path)
+      (let ((content (with-temp-buffer
+                       (insert-file-contents output-path)
+                       (buffer-string))))
+        (should (string-match-p "# Session: project" content))
+        (should (string-match-p "2026-04-01" content))
+        (should-not (string-match-p "unknown" content))))))
 
 (ert-deftest agent-log-test-codex-normalize/user-message ()
   "Normalizes a user message response_item."

@@ -528,9 +528,8 @@ a project, then for a session within that project."
          (backend (agent-log--backend-for-file file))
          (session-id (agent-log--session-id-from-file backend file))
          (entries (agent-log--parse-and-normalize file backend))
-         (first-msg (agent-log--find-first-message entries))
          (progress (agent-log--find-progress-entry entries))
-         (ts-iso (when first-msg (plist-get first-msg :timestamp)))
+         (ts-iso (agent-log--find-session-timestamp entries))
          (epoch-ms (when (stringp ts-iso)
                      (agent-log--iso-to-epoch-ms ts-iso)))
          (display (or (and backend
@@ -780,11 +779,10 @@ JSONL-SIZE the source file size in bytes."
 (defun agent-log--extract-session-metadata-from-entries (entries)
   "Extract project and date from ENTRIES as a plist.
 Returns (:project SHORT-NAME :date DATE-STRING)."
-  (let* ((first-msg (agent-log--find-first-message entries))
-         (progress (agent-log--find-progress-entry entries))
-         (date (when first-msg
-                 (agent-log--format-iso-timestamp
-                  (plist-get first-msg :timestamp))))
+  (let* ((progress (agent-log--find-progress-entry entries))
+         (timestamp (agent-log--find-session-timestamp entries))
+         (date (when timestamp
+                 (agent-log--format-iso-timestamp timestamp)))
          (project (when progress (or (plist-get progress :cwd) ""))))
     (list :project (agent-log--short-project (or project ""))
           :date (or date "unknown"))))
@@ -828,11 +826,14 @@ Returns the path to the rendered file."
   (let* ((index (agent-log--read-index))
          (index-entry (gethash session-id index))
          (rendered-path (when index-entry (plist-get index-entry :file)))
+         (desired-path (agent-log--rendered-filepath session-id metadata))
          (cached-size (when index-entry (plist-get index-entry :jsonl-size)))
          (jsonl-file (plist-get metadata :file))
          (current-size (file-attribute-size (file-attributes jsonl-file))))
     (if (and rendered-path
              (file-exists-p rendered-path)
+             (string= (expand-file-name rendered-path)
+                      (expand-file-name desired-path))
              cached-size current-size
              (= cached-size current-size))
         rendered-path
@@ -1054,6 +1055,16 @@ agent-log format (e.g. Codex envelopes to flat entries)."
   "Return the first progress entry from ENTRIES."
   (seq-find (lambda (e) (equal (plist-get e :type) "progress"))
             entries))
+
+(defun agent-log--find-session-timestamp (entries)
+  "Return the best session timestamp from ENTRIES.
+Prefer the first user or assistant timestamp, falling back to the
+progress/session metadata timestamp for logs without conversation
+turns yet."
+  (or (when-let* ((first-msg (agent-log--find-first-message entries)))
+        (plist-get first-msg :timestamp))
+      (when-let* ((progress (agent-log--find-progress-entry entries)))
+        (plist-get progress :timestamp))))
 
 ;;;;; Rendering
 

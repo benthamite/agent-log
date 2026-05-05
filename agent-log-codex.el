@@ -383,9 +383,9 @@ or entries containing only tool results with no user text."
 
 (cl-defmethod agent-log--extract-session-metadata ((_backend agent-log-codex) entries)
   "Extract project and date from ENTRIES into buffer-local variables."
-  (when-let* ((first-msg (agent-log--find-first-message entries)))
+  (when-let* ((timestamp (agent-log--find-session-timestamp entries)))
     (setq agent-log--session-date
-          (agent-log--format-iso-timestamp (plist-get first-msg :timestamp))))
+          (agent-log--format-iso-timestamp timestamp)))
   (when-let* ((progress (agent-log--find-progress-entry entries))
               (cwd (plist-get progress :cwd))
               ((not (string-empty-p cwd))))
