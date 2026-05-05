@@ -1701,6 +1701,9 @@ preceding separator."
 Used to distinguish \"already processed, nothing to summarize\" from
 \"not yet summarized\" (nil).")
 
+(defconst agent-log--summary-conversation-hash-version 1
+  "Version tag for hashes stored in `:summary-conversation-hash'.")
+
 (defconst agent-log--summary-system-message
   "You are a concise summarizer. Given a conversation between a user and an AI \
 coding assistant, produce a JSON object with exactly two fields:
@@ -1736,32 +1739,53 @@ inferring the backend from the model when needed."
 (defun agent-log--extract-conversation-text (entries &optional backend)
   "Extract a condensed text representation of ENTRIES for summarization.
 BACKEND is used for filtering and text extraction.
-Returns a string with user and assistant messages, truncated to
+Returns a string with user and assistant messages limited to
 `agent-log-summary-max-content-length'."
+  (agent-log--limit-summary-text
+   (agent-log--conversation-text entries backend)))
+
+(defun agent-log--conversation-text (entries &optional backend)
+  "Extract the full user and assistant text from ENTRIES.
+BACKEND is used for filtering and text extraction."
   (let* ((backend (or backend (agent-log--default-backend)))
          (conversation (if backend
                            (agent-log--filter-conversation backend entries)
                          entries))
-         (parts '())
-         (total 0)
-         (max-len agent-log-summary-max-content-length))
+         (parts '()))
     (dolist (entry conversation)
-      (when (< total max-len)
-        (let* ((message (plist-get entry :message))
-               (role (plist-get message :role))
-               (content (plist-get message :content))
-               (text (if backend
-                         (agent-log--extract-message-text backend content)
-                       ""))
-               (prefix (if (equal role "user") "User: " "Assistant: "))
-               (line (concat prefix text "\n\n")))
-          (when (and text (not (string-empty-p (string-trim text))))
-            (push line parts)
-            (cl-incf total (length line))))))
-    (let ((result (string-join (nreverse parts))))
-      (if (> (length result) max-len)
-          (substring result 0 max-len)
-        result))))
+      (when-let* ((text (agent-log--conversation-entry-text entry backend)))
+        (push text parts)))
+    (string-join (nreverse parts))))
+
+(defun agent-log--conversation-entry-text (entry backend)
+  "Return the summary text for ENTRY using BACKEND."
+  (let* ((message (plist-get entry :message))
+         (role (plist-get message :role))
+         (content (plist-get message :content))
+         (text (if backend
+                   (agent-log--extract-message-text backend content)
+                 "")))
+    (when (and text (not (string-empty-p (string-trim text))))
+      (concat (if (equal role "user") "User: " "Assistant: ")
+              text "\n\n"))))
+
+(defun agent-log--limit-summary-text (text)
+  "Limit TEXT to `agent-log-summary-max-content-length'.
+When TEXT is too long, keep both the beginning and the end so summaries
+can reflect resumed work appended to an older session."
+  (let ((max-len agent-log-summary-max-content-length)
+        (len (length text)))
+    (cond
+     ((<= len max-len) text)
+     ((< max-len 80) (substring text 0 max-len))
+     (t
+      (let* ((marker "\n\n[... omitted middle of long session ...]\n\n")
+             (available (- max-len (length marker)))
+             (head (/ available 2))
+             (tail (- available head)))
+        (concat (substring text 0 head)
+                marker
+                (substring text (- len tail))))))))
 
 (defun agent-log--build-summary-prompt (conversation-text)
   "Build a prompt for summarizing CONVERSATION-TEXT."
@@ -1787,7 +1811,7 @@ Returns (SUMMARY . ONELINE) or nil."
     (error nil)))
 
 (defun agent-log--sessions-needing-summary (sessions index)
-  "Return sessions from SESSIONS that lack a summary in INDEX.
+  "Return sessions from SESSIONS needing a summary per INDEX.
 Sessions with a live agent process are excluded by session ID."
   (let ((active-ids (cl-loop for backend in (agent-log--active-backend-instances)
                              append (agent-log--active-session-ids backend))))
@@ -1795,13 +1819,43 @@ Sessions with a live agent process are excluded by session ID."
      (lambda (session)
        (let* ((sid (car session))
               (entry (gethash sid index)))
-         (and (not (and entry (plist-get entry :summary-oneline)))
-              (not (member sid active-ids)))))
+         (and (not (member sid active-ids))
+              (not (agent-log--session-summary-current-p session entry)))))
      sessions)))
+
+(defun agent-log--session-summary-current-p (session entry)
+  "Return non-nil if SESSION has a current summary in ENTRY."
+  (and entry
+       (plist-get entry :summary-oneline)
+       (when-let* ((stored-hash (plist-get entry :summary-conversation-hash)))
+         (condition-case nil
+             (equal stored-hash
+                    (agent-log--session-conversation-hash (cdr session)))
+           (error nil)))))
+
+(defun agent-log--session-real-summary-current-p (session entry)
+  "Return non-nil if SESSION has a current non-sentinel summary in ENTRY."
+  (and (agent-log--session-summary-current-p session entry)
+       (not (equal (plist-get entry :summary-oneline)
+                   agent-log--no-conversation-sentinel))))
+
+(defun agent-log--session-conversation-hash (metadata)
+  "Return the current conversation hash for session METADATA."
+  (let* ((backend (plist-get metadata :backend))
+         (jsonl-file (plist-get metadata :file))
+         (entries (agent-log--parse-and-normalize jsonl-file backend)))
+    (agent-log--conversation-text-hash
+     (agent-log--conversation-text entries backend))))
+
+(defun agent-log--conversation-text-hash (text)
+  "Return a versioned SHA-256 hash for conversation TEXT."
+  (format "v%d:%s"
+          agent-log--summary-conversation-hash-version
+          (secure-hash 'sha256 (encode-coding-string text 'utf-8-unix))))
 
 ;;;###autoload
 (defun agent-log-summarize-sessions ()
-  "Generate AI summaries for all sessions that lack one.
+  "Generate AI summaries for all sessions lacking a current one.
 If summary generation is already in progress, stop it instead."
   (interactive)
   (unless (require 'gptel nil t)
@@ -1816,7 +1870,8 @@ If summary generation is already in progress, stop it instead."
            (index (agent-log--read-index))
            (pending (agent-log--sessions-needing-summary sessions index)))
       (if (null pending)
-          (message "All %d sessions already have summaries" (length sessions))
+          (message "All %d sessions already have current summaries"
+                   (length sessions))
         (setq agent-log--summarize-active t
               agent-log--summarize-stop nil)
         (cl-incf agent-log--summarize-generation)
@@ -1863,16 +1918,20 @@ nothing."
         (condition-case err
             (let* ((backend (plist-get meta :backend))
                    (entries (agent-log--parse-and-normalize jsonl-file backend))
-                   (text (agent-log--extract-conversation-text entries backend)))
+                   (full-text (agent-log--conversation-text entries backend))
+                   (text (agent-log--limit-summary-text full-text))
+                   (conversation-hash
+                    (agent-log--conversation-text-hash full-text)))
               (if (string-empty-p (string-trim text))
                   (progn
                     (agent-log--index-update-props
                      sid (list :summary agent-log--no-conversation-sentinel
-                               :summary-oneline agent-log--no-conversation-sentinel))
+                               :summary-oneline agent-log--no-conversation-sentinel
+                               :summary-conversation-hash conversation-hash))
                     (agent-log--summarize-next
                      (cdr remaining) (1+ done) total gen))
                 (agent-log--summarize-one
-                 sid meta text remaining done total gen)))
+                 sid meta text conversation-hash remaining done total gen)))
           (error
            (message "Failed to summarize %s: %s"
                     sid (error-message-string err))
@@ -1883,11 +1942,13 @@ nothing."
                            (cdr remaining)
                            (1+ done) total gen)))))))
 
-(defun agent-log--summarize-one (sid meta text remaining done total gen)
+(defun agent-log--summarize-one
+    (sid meta text conversation-hash remaining done total gen)
   "Send a gptel request to summarize session SID.
 META is the session metadata plist.  TEXT is the extracted
-conversation text.  REMAINING, DONE, TOTAL, and GEN are
-chain-continuation state for `agent-log--summarize-next'."
+conversation text.  CONVERSATION-HASH fingerprints the full
+conversation.  REMAINING, DONE, TOTAL, and GEN are chain-continuation
+state for `agent-log--summarize-next'."
   (let* ((prompt (agent-log--build-summary-prompt text))
          (resolved (agent-log--resolve-summary-backend-and-model))
          (gptel-backend (car resolved))
@@ -1904,7 +1965,8 @@ chain-continuation state for `agent-log--summarize-next'."
       :callback
       (lambda (response info)
         (agent-log--summarize-callback
-         response info request-id sid remaining done total gen)))))
+         response info request-id sid conversation-hash
+         remaining done total gen)))))
 
 (defun agent-log--summarize-display-name (meta text sid)
   "Return a human-readable display name from META, TEXT, or SID."
@@ -1917,40 +1979,47 @@ chain-continuation state for `agent-log--summarize-next'."
           sid)
       display)))
 
-(defun agent-log--summarize-callback (response info request-id sid remaining done total gen)
+(defun agent-log--summarize-callback
+    (response info request-id sid conversation-hash remaining done total gen)
   "Handle the gptel RESPONSE for a summary request.
-INFO is the gptel callback info plist (used to extract error details
-when RESPONSE is nil).  REQUEST-ID, SID, REMAINING, DONE, TOTAL, and
-GEN are chain-continuation state.  Non-string responses (tool-calls,
-reasoning blocks) are ignored; only the final string response or an
-error (nil) consumes the request guard and advances the chain."
+INFO is the gptel callback info plist.  REQUEST-ID identifies the
+in-flight request.  SID is the session ID.  CONVERSATION-HASH
+fingerprints the summarized content.  REMAINING, DONE, TOTAL, and GEN
+are chain-continuation state.  Non-string responses are ignored; only
+the final string response or an error consumes the request guard and
+advances the chain."
   (when (eq agent-log--summarize-request-id request-id)
     (cond
      ((stringp response)
       (agent-log--summarize-handle-success
-       response sid remaining done total gen))
+       response sid conversation-hash remaining done total gen))
      ((null response)
       (agent-log--summarize-handle-failure
        info sid remaining done total gen)))))
 
-(defun agent-log--summarize-handle-success (response sid remaining done total gen)
+(defun agent-log--summarize-handle-success
+    (response sid conversation-hash remaining done total gen)
   "Record the successful summary RESPONSE for session SID.
-RESPONSE is the LLM's reply.  REMAINING, DONE, TOTAL, and GEN are
-chain-continuation state passed to `agent-log--summarize-next' for the
-next session."
+RESPONSE is the LLM's reply.  CONVERSATION-HASH fingerprints the full
+conversation.  REMAINING, DONE, TOTAL, and GEN are chain-continuation
+state passed to `agent-log--summarize-next' for the next session."
   (setq agent-log--summarize-request-id nil
         agent-log--summarize-consecutive-failures 0)
   (when (and agent-log--summarize-active
              (= gen agent-log--summarize-generation))
     (let ((parsed (agent-log--parse-summary-response response)))
       (if parsed
-          (progn
+          (let* ((previous-entry (gethash sid (agent-log--read-index)))
+                 (previous-oneline
+                  (plist-get previous-entry :summary-oneline)))
             (agent-log--index-update-props
              sid (list :summary (car parsed)
-                       :summary-oneline (cdr parsed)))
+                       :summary-oneline (cdr parsed)
+                       :summary-conversation-hash conversation-hash))
             (when agent-log-auto-rename-sessions
               (when (require 'agent-log-claude nil t)
-                (agent-log-claude--maybe-rename-session sid (cdr parsed)))))
+                (agent-log-claude--maybe-rename-session
+                 sid (cdr parsed) previous-oneline))))
         (message "Failed to parse summary for %s" sid)))
     (run-with-timer
      0.1 nil
@@ -2163,11 +2232,11 @@ inferring the backend from the model when needed."
 (defun agent-log--search-gather-metadata (sessions index)
   "Compute metadata for SESSIONS and INDEX needed by the search pipeline.
 Returns a plist with:
-  :projects     - alist of (SHORT-NAME . COUNT) for projects with summaries
+  :projects     - alist of (SHORT-NAME . COUNT) for current summaries
   :date-earliest - earliest timestamp (epoch-ms) among summarized sessions
   :date-latest   - latest timestamp (epoch-ms) among summarized sessions
-  :summarized    - count of sessions with summaries
-  :unsummarized  - count of sessions without summaries"
+  :summarized    - count of sessions with current summaries
+  :unsummarized  - count of sessions without current summaries"
   (let ((project-counts (make-hash-table :test #'equal))
         (active-ids (cl-loop for backend in (agent-log--active-backend-instances)
                              append (agent-log--active-session-ids backend)))
@@ -2180,11 +2249,17 @@ Returns a plist with:
              (meta (cdr session))
              (entry (gethash sid index))
              (ts (plist-get meta :timestamp))
-             (project (agent-log--short-project (plist-get meta :project))))
+             (project (agent-log--short-project (plist-get meta :project)))
+             (active (member sid active-ids))
+             (current-summary
+              (and (not active)
+                   (agent-log--session-summary-current-p session entry))))
         (let ((oneline (and entry (plist-get entry :summary-oneline))))
           (cond
            ;; Has a real summary: count it and track its metadata.
-           ((and oneline (not (equal oneline agent-log--no-conversation-sentinel)))
+           ((and current-summary
+                 oneline
+                 (not (equal oneline agent-log--no-conversation-sentinel)))
             (cl-incf summarized)
             (cl-incf (gethash project project-counts 0))
             (when (or (null earliest) (and (numberp ts) (< ts earliest)))
@@ -2192,10 +2267,11 @@ Returns a plist with:
             (when (or (null latest) (and (numberp ts) (> ts latest)))
               (setq latest ts)))
            ;; Empty session (sentinel) or active session: silently skip.
-           ((or (equal oneline agent-log--no-conversation-sentinel)
-                (member sid active-ids))
+           ((or active
+                (and current-summary
+                     (equal oneline agent-log--no-conversation-sentinel)))
             nil)
-           ;; No summary at all: genuinely unsummarized.
+           ;; No current summary: genuinely unsummarized.
            (t (cl-incf unsummarized))))))
     (let (projects)
       (maphash (lambda (name count) (push (cons name count) projects))
@@ -2222,7 +2298,7 @@ Returns a plist with:
          (date-to (if latest
                       (format-time-string "%Y-%m-%d" (/ latest 1000))
                     "unknown")))
-    (format "User query: %S\n\nArchive metadata:\n- Projects:\n%s\n- Date range: %s to %s\n- Total sessions with summaries: %d"
+    (format "User query: %S\n\nArchive metadata:\n- Projects:\n%s\n- Date range: %s to %s\n- Total sessions with current summaries: %d"
             query project-lines date-from date-to summarized)))
 
 (defun agent-log--search-parse-scope-response (response)
@@ -2264,7 +2340,7 @@ Returns a plist (:projects LIST-OR-ALL :date-after EPOCH-OR-NIL
 (defun agent-log--search-apply-scope (sessions index scope)
   "Filter SESSIONS using INDEX and SCOPE criteria.
 Returns sessions that match the project filter, fall within the
-date range, and have a summary in the INDEX."
+date range, and have a current summary in the INDEX."
   (let ((projects (plist-get scope :projects))
         (date-after (plist-get scope :date-after))
         (date-before (plist-get scope :date-before)))
@@ -2277,10 +2353,7 @@ date range, and have a summary in the INDEX."
               (project (agent-log--short-project (plist-get meta :project))))
          (and
           ;; Must have a summary.
-          entry
-          (plist-get entry :summary-oneline)
-          (not (equal (plist-get entry :summary-oneline)
-                      agent-log--no-conversation-sentinel))
+          (agent-log--session-real-summary-current-p session entry)
           ;; Project filter.
           (or (equal projects "all")
               (member project projects))
@@ -2594,10 +2667,10 @@ clickable links to the matching logs."
          (unsummarized (plist-get metadata :unsummarized))
          (summarized (plist-get metadata :summarized)))
     (when (zerop summarized)
-      (user-error "No sessions have summaries; run `agent-log-summarize-sessions' first"))
+      (user-error "No sessions have current summaries; run `agent-log-summarize-sessions' first"))
     (when (> unsummarized 0)
       (unless (y-or-n-p
-               (format "%d session(s) lack summaries and will be excluded. Continue? "
+               (format "%d session(s) lack current summaries and will be excluded. Continue? "
                        unsummarized))
         (user-error "Search aborted")))
     (setq agent-log--search-sessions-cache sessions

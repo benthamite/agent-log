@@ -464,18 +464,40 @@ JSON parsers) are decoded; text properties are stripped."
   (if (multibyte-string-p str) str
     (decode-coding-string str 'utf-8)))
 
-(defun agent-log-claude--maybe-rename-session (session-id oneline)
+(defun agent-log-claude--maybe-rename-session
+    (session-id oneline &optional previous-oneline)
   "Rename SESSION-ID from ONELINE summary if appropriate.
-Finds the session JSONL file, checks it has no custom-title yet,
-and writes ONELINE as the title.  Does nothing if ONELINE is nil,
-empty, or the sentinel value."
+Finds the session JSONL file and writes ONELINE when no custom title
+exists.  If PREVIOUS-ONELINE matches the latest existing custom title,
+append ONELINE as an updated title.
+Does nothing if ONELINE is nil, empty, or the sentinel value."
   (when (and oneline
              (not (string-empty-p oneline))
              (not (equal oneline agent-log--no-conversation-sentinel)))
     (when-let* ((jsonl-file (agent-log--find-session-file-any session-id)))
-      (unless (agent-log-claude--session-has-custom-title-p jsonl-file)
+      (when (agent-log-claude--should-write-summary-title-p
+             jsonl-file previous-oneline)
         (agent-log-claude--append-custom-title
          jsonl-file session-id oneline)))))
+
+(defun agent-log-claude--should-write-summary-title-p
+    (jsonl-file previous-oneline)
+  "Return non-nil if JSONL-FILE should receive a summary title.
+PREVIOUS-ONELINE is the previous summary title, if one existed."
+  (let ((latest-title (agent-log-claude--latest-custom-title jsonl-file)))
+    (or (null latest-title)
+        (and previous-oneline
+             (not (string-empty-p previous-oneline))
+             (equal latest-title previous-oneline)))))
+
+(defun agent-log-claude--latest-custom-title (jsonl-file)
+  "Return the latest custom title in JSONL-FILE, or nil."
+  (cl-loop for line in (reverse (agent-log--read-file-lines jsonl-file))
+           for entry = (ignore-errors (json-parse-string line
+                                                         :object-type 'plist))
+           when (and (equal (plist-get entry :type) "custom-title")
+                     (plist-get entry :customTitle))
+           return (plist-get entry :customTitle)))
 
 (defun agent-log-claude--session-end-handler (message)
   "Handle a Claude Code event MESSAGE, triggering actions on session end.

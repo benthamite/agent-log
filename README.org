@@ -207,7 +207,7 @@ The user option ~agent-log-summary-backend~ specifies the =gptel= backend name t
 
 The user option ~agent-log-summary-model~ specifies the =gptel= model to use, for example ~claude-haiku-4-5-20251001~.  A smaller, faster model is often sufficient for summarization.  When ~nil~ (the default), it uses ~gptel-model~.
 
-The user option ~agent-log-summary-max-content-length~ sets the maximum number of characters of conversation text sent to the LLM for summarization.  The package extracts the plain text of user and assistant messages (ignoring tool calls and thinking blocks) and truncates the result to this limit.  The default value is ~8000~.  Increase this for longer, more detailed summaries at the cost of higher token usage; decrease it if you want to minimize API costs.
+The user option ~agent-log-summary-max-content-length~ sets the maximum number of characters of conversation text sent to the LLM for summarization.  The package extracts the plain text of user and assistant messages (ignoring tool calls and thinking blocks) and limits the result to this length.  When a conversation is longer than the limit, agent-log keeps both the beginning and the end so summaries can reflect resumed work appended to an older session.  The default value is ~8000~.  Increase this for longer, more detailed summaries at the cost of higher token usage; decrease it if you want to minimize API costs.
 
 ** AI search options
 :PROPERTIES:
@@ -339,13 +339,13 @@ The command ~agent-log-copy-turn~ copies the current turn to the kill ring.  A "
 #+findex: agent-log-summarize-sessions
 #+findex: agent-log-stop-summarize-sessions
 
-The command ~agent-log-summarize-sessions~ generates AI summaries for all sessions that do not yet have one.  It requires the =gptel= package.  The command processes sessions sequentially, sending each conversation's text to the configured LLM ([[#h:summary-generation-options][Summary generation options]]) and storing the response in the index.  Summary requests disable ~gptel-use-tools~ so that globally configured tools (e.g. MCP servers) are not included in the request.
+The command ~agent-log-summarize-sessions~ generates AI summaries for all sessions that do not yet have a current one.  It requires the =gptel= package.  The command processes sessions sequentially, sending each conversation's text to the configured LLM ([[#h:summary-generation-options][Summary generation options]]) and storing the response in the index.  Summary requests disable ~gptel-use-tools~ so that globally configured tools (e.g. MCP servers) are not included in the request.
 
 Each summary consists of two parts: a one-line summary (up to 80 characters) used in the session browser display, and a paragraph summary (3--5 sentences) shown at the top of rendered buffers.  The LLM is instructed to return a JSON object with ~oneline~ and ~summary~ fields.
 
 Progress is displayed in the echo area, showing which session is being summarized and the model in use.  If you invoke ~agent-log-summarize-sessions~ while summarization is already running, it stops the current run instead.  You can also stop explicitly with ~agent-log-stop-summarize-sessions~.
 
-Summaries are persisted in the index file, so they survive across Emacs sessions and do not need to be regenerated.  When you open a session that has a summary, the paragraph summary is inserted as a blockquote below the session header.
+Summaries are persisted in the index file together with a fingerprint of the conversation text they describe, so they survive across Emacs sessions and are refreshed only when the underlying conversation changes.  If you resume a previously summarized session and continue working, the next summarization run treats the old summary as stale and generates a replacement.  Legacy summaries created before this fingerprint existed are refreshed once.  When you open a session that has a current summary, the paragraph summary is inserted as a blockquote below the session header.
 
 *** Automatic sync and summarization on session end
 :PROPERTIES:
@@ -375,7 +375,7 @@ Sessions with a live agent process are excluded from summarization by session ID
 
 The user option ~agent-log-auto-rename-sessions~ controls whether sessions are renamed automatically when they receive an AI summary.  When set to non-~nil~, each time ~agent-log-summarize-sessions~ successfully generates a summary for a session, the one-line summary is slugified and written as a =custom-title= entry in the session JSONL file.  This makes the name immediately visible in Claude Code's =/resume= picker without any manual step.
 
-The default value is ~nil~.  Set it to ~t~ if you want session names to stay in sync with summaries automatically.
+The default value is ~nil~.  Set it to ~t~ if you want session names to stay in sync with summaries automatically.  When a refreshed summary replaces an older summary-generated title, the title is refreshed too; titles that do not match the previous summary are treated as user-provided and left alone.
 
 The command ~agent-log-rename-sessions~ renames all sessions that lack a custom title.  This command is defined in =agent-log-claude.el= because custom-title entries are a Claude Code-specific JSONL convention.  For each session that has a one-line summary in the index but no =custom-title= entry in its JSONL file, the command writes the summary directly as the custom title.  With a prefix argument (=C-u=), it overwrites existing custom titles as well, which is useful after changing the title format.
 
@@ -397,11 +397,11 @@ The command ~agent-log-search~ searches your session history using natural langu
 
 *Stage 1: scope narrowing.*  The query, along with a summary of the archive's metadata (project names with session counts, date range), is sent to a scope-narrowing model.  This model returns structured JSON specifying which projects and date range to include.  If the query does not mention a specific project or timeframe, all sessions are included.  The model and backend for this stage are configured via ~agent-log-search-scope-model~ and ~agent-log-search-scope-backend~ ([[#h:ai-search-options][AI search options]]).
 
-*Stage 2: selection and narrative.*  The filtered session summaries (one-line and paragraph, from ~agent-log-summarize-sessions~) are sent to a selection model along with the original query.  If the number of matching sessions exceeds what fits within the token budget (~agent-log-search-budget~), only the most recent sessions are included.  The prompt includes a human-readable description of the scope applied in stage 1 (projects, date range, how many sessions matched, and how many were actually sent).  The model produces a Markdown narrative explaining which sessions are relevant and why, with inline links to specific sessions.  If the scope is narrower than "all projects, all dates", or if sessions were truncated for budget, the model notes this so you know some sessions may have been excluded.  Session summaries are sanitized to valid UTF-8 before serialization so that non-ASCII content does not cause errors.  The model and backend for this stage are configured via ~agent-log-search-model~ and ~agent-log-search-backend~ ([[#h:ai-search-options][AI search options]]).
+*Stage 2: selection and narrative.*  The filtered current session summaries (one-line and paragraph, from ~agent-log-summarize-sessions~) are sent to a selection model along with the original query.  If the number of matching sessions exceeds what fits within the token budget (~agent-log-search-budget~), only the most recent sessions are included.  The prompt includes a human-readable description of the scope applied in stage 1 (projects, date range, how many sessions matched, and how many were actually sent).  The model produces a Markdown narrative explaining which sessions are relevant and why, with inline links to specific sessions.  If the scope is narrower than "all projects, all dates", or if sessions were truncated for budget, the model notes this so you know some sessions may have been excluded.  Session summaries are sanitized to valid UTF-8 before serialization so that non-ASCII content does not cause errors.  The model and backend for this stage are configured via ~agent-log-search-model~ and ~agent-log-search-backend~ ([[#h:ai-search-options][AI search options]]).
 
 The result is displayed in a =*agent-log-search*= buffer in ~agent-log-search-mode~ ([[#h:agent-log-search-mode][~agent-log-search-mode~]]).  Session references in the narrative are rendered as clickable links.  Pressing =RET= or clicking on a link opens the corresponding rendered session log.
 
-Before starting, the command checks for unsummarized sessions.  If any exist, it warns the user that those sessions will be excluded and asks for confirmation.  If no sessions have summaries at all, the command aborts with a message to run ~agent-log-summarize-sessions~ first ([[#h:summary-generation][Summary generation]]).
+Before starting, the command checks for sessions without current summaries.  If any exist, it warns the user that those sessions will be excluded and asks for confirmation.  If no sessions have current summaries at all, the command aborts with a message to run ~agent-log-summarize-sessions~ first ([[#h:summary-generation][Summary generation]]).
 
 Before stage 2, the estimated token cost is compared against ~agent-log-search-budget~ ([[#h:ai-search-options][AI search options]]).  If the estimate exceeds the threshold, the user is asked to confirm.
 
@@ -624,7 +624,7 @@ The rendered directory mirrors the project structure:
   _index.el
 #+end_example
 
-Each =.md= file contains HTML-comment front matter (session ID, source path, rendered timestamp, JSONL size) followed by the full conversation rendered as Markdown.  The =_index.el= file is a hash table mapping session IDs to metadata (rendered file path, JSONL size, and optionally a summary).
+Each =.md= file contains HTML-comment front matter (session ID, source path, rendered timestamp, JSONL size) followed by the full conversation rendered as Markdown.  The =_index.el= file is a hash table mapping session IDs to metadata (rendered file path, JSONL size, and optionally a summary plus the conversation fingerprint it describes).
 
 ** Rendering pipeline
 :PROPERTIES:

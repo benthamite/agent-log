@@ -1093,6 +1093,21 @@ the message content (string or list)."
     (let ((result (agent-log--extract-conversation-text entries)))
       (should (<= (length result) 30)))))
 
+(ert-deftest agent-log-test-extract-conversation-text/preserves-tail ()
+  "Keeps the end of long sessions for summaries."
+  (let ((agent-log-summary-max-content-length 120)
+        (entries (list (list :type "user"
+                             :message (list :role "user"
+                                            :content (make-string 80 ?a)))
+                       (list :type "assistant"
+                             :message (list :role "assistant"
+                                            :content (list (list :type "text"
+                                                                  :text "tail marker")))))))
+    (let ((result (agent-log--extract-conversation-text entries)))
+      (should (<= (length result) 120))
+      (should (string-match-p "User: a" result))
+      (should (string-match-p "tail marker" result)))))
+
 (ert-deftest agent-log-test-extract-conversation-text/filters-non-conversation ()
   "Excludes non-conversation entries."
   (let ((entries (list (list :type "progress" :cwd "/tmp")
@@ -1140,21 +1155,91 @@ the message content (string or list)."
     (should (= (length (agent-log--sessions-needing-summary sessions index)) 2))))
 
 (ert-deftest agent-log-test-sessions-needing-summary/some-summarized ()
-  "Excludes sessions with existing summaries."
-  (let ((sessions (list (list "s1" :file "/a.jsonl")
-                        (list "s2" :file "/b.jsonl")))
-        (index (make-hash-table :test #'equal)))
-    (puthash "s1" (list :summary-oneline "A test") index)
-    (should (= (length (agent-log--sessions-needing-summary sessions index)) 1))
-    (should (equal (caar (agent-log--sessions-needing-summary sessions index)) "s2"))))
+  "Excludes sessions with current summaries."
+  (agent-log-test--with-temp-dir
+    (let* ((jsonl-content "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"hello\"}}\n")
+           (jsonl-path (agent-log-test--write-file "s1.jsonl" jsonl-content))
+           (s1 (list "s1" :file jsonl-path :backend agent-log-test--claude-backend))
+           (sessions (list s1 (list "s2" :file "/b.jsonl")))
+           (index (make-hash-table :test #'equal))
+           (hash (agent-log--session-conversation-hash (cdr s1))))
+      (puthash "s1" (list :summary-oneline "A test"
+                          :summary-conversation-hash hash)
+               index)
+      (should (= (length (agent-log--sessions-needing-summary sessions index)) 1))
+      (should (equal (caar (agent-log--sessions-needing-summary sessions index)) "s2")))))
 
 (ert-deftest agent-log-test-sessions-needing-summary/all-summarized ()
-  "Returns empty when all sessions have summaries."
-  (let ((sessions (list (list "s1") (list "s2")))
-        (index (make-hash-table :test #'equal)))
-    (puthash "s1" (list :summary-oneline "A") index)
-    (puthash "s2" (list :summary-oneline "B") index)
-    (should (null (agent-log--sessions-needing-summary sessions index)))))
+  "Returns empty when all sessions have current summaries."
+  (agent-log-test--with-temp-dir
+    (let* ((jsonl-content "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"hello\"}}\n")
+           (s1-path (agent-log-test--write-file "s1.jsonl" jsonl-content))
+           (s2-path (agent-log-test--write-file "s2.jsonl" jsonl-content))
+           (s1 (list "s1" :file s1-path :backend agent-log-test--claude-backend))
+           (s2 (list "s2" :file s2-path :backend agent-log-test--claude-backend))
+           (sessions (list s1 s2))
+           (index (make-hash-table :test #'equal)))
+      (puthash "s1" (list :summary-oneline "A"
+                          :summary-conversation-hash
+                          (agent-log--session-conversation-hash (cdr s1)))
+               index)
+      (puthash "s2" (list :summary-oneline "B"
+                          :summary-conversation-hash
+                          (agent-log--session-conversation-hash (cdr s2)))
+               index)
+      (should (null (agent-log--sessions-needing-summary sessions index))))))
+
+(ert-deftest agent-log-test-sessions-needing-summary/missing-hash-stale ()
+  "Treats legacy summaries without a conversation hash as stale."
+  (agent-log-test--with-temp-dir
+    (let* ((jsonl-content "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"hello\"}}\n")
+           (jsonl-path (agent-log-test--write-file "s1.jsonl" jsonl-content))
+           (sessions (list (list "s1" :file jsonl-path
+                                 :backend agent-log-test--claude-backend)))
+           (index (make-hash-table :test #'equal)))
+      (puthash "s1" (list :summary-oneline "A") index)
+      (should (= (length (agent-log--sessions-needing-summary sessions index)) 1)))))
+
+(ert-deftest agent-log-test-sessions-needing-summary/changed-hash-stale ()
+  "Treats summaries for older conversation text as stale."
+  (agent-log-test--with-temp-dir
+    (let* ((old-content "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"hello\"}}\n")
+           (new-content (concat old-content
+                                "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"new work\"}]}}\n"))
+           (jsonl-path (agent-log-test--write-file "s1.jsonl" old-content))
+           (session (list "s1" :file jsonl-path
+                          :backend agent-log-test--claude-backend))
+           (old-hash (agent-log--session-conversation-hash (cdr session)))
+           (index (make-hash-table :test #'equal)))
+      (agent-log-test--write-file "s1.jsonl" new-content)
+      (puthash "s1" (list :summary-oneline "A"
+                          :summary-conversation-hash old-hash)
+               index)
+      (should (= (length (agent-log--sessions-needing-summary
+                          (list session) index))
+                 1)))))
+
+;;;;; Claude session titles
+
+(ert-deftest agent-log-test-claude-latest-custom-title ()
+  "Finds the latest custom-title entry in a Claude JSONL file."
+  (agent-log-test--with-temp-dir
+    (let* ((content (concat "{\"type\":\"custom-title\",\"customTitle\":\"Old\",\"sessionId\":\"s1\"}\n"
+                            "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"continued\"}}\n"
+                            "{\"type\":\"custom-title\",\"customTitle\":\"New\",\"sessionId\":\"s1\"}\n"))
+           (jsonl-path (agent-log-test--write-file "s1.jsonl" content)))
+      (should (equal (agent-log-claude--latest-custom-title jsonl-path)
+                     "New")))))
+
+(ert-deftest agent-log-test-claude-should-write-summary-title ()
+  "Updates a title only when it matches the previous summary."
+  (agent-log-test--with-temp-dir
+    (let* ((content "{\"type\":\"custom-title\",\"customTitle\":\"Old summary\",\"sessionId\":\"s1\"}\n")
+           (jsonl-path (agent-log-test--write-file "s1.jsonl" content)))
+      (should (agent-log-claude--should-write-summary-title-p
+               jsonl-path "Old summary"))
+      (should-not (agent-log-claude--should-write-summary-title-p
+                   jsonl-path "Different summary")))))
 
 ;;;;; Outline level
 
