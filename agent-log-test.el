@@ -1491,6 +1491,36 @@ the message content (string or list)."
                                    agent-log-codex--session-start-match-window-ms
                                    1)))))
 
+(ert-deftest agent-log-test-codex-resumed-session-id-from-command ()
+  "Extracts an explicit session ID from a Codex resume command."
+  (let ((sid "019df82b-8607-7231-a491-e57316e4fa02"))
+    (should (equal (agent-log-codex--resumed-session-id-from-command
+                    (list "/usr/bin/env" "sh" "-c" "exec \"$@\""
+                          ".." "codex" "--no-alt-screen" "resume" sid))
+                   sid))))
+
+(ert-deftest agent-log-test-codex-resumed-session-id-from-command/last ()
+  "Returns nil for resume commands that do not name a session ID."
+  (should-not (agent-log-codex--resumed-session-id-from-command
+               '("codex" "--no-alt-screen" "resume" "--last"))))
+
+(ert-deftest agent-log-test-codex-current-buffer-session-file/resume-id ()
+  "Uses an explicit resumed session ID before heuristic matching."
+  (let ((sid "019df82b-8607-7231-a491-e57316e4fa02")
+        (file "/tmp/resumed.jsonl"))
+    (with-temp-buffer
+      (cl-letf (((symbol-function 'agent-log-codex--buffer-resumed-session-id)
+                 (lambda () sid))
+                ((symbol-function 'agent-log--find-session-file)
+                 (lambda (_backend session-id)
+                   (and (equal session-id sid) file)))
+                ((symbol-function 'codex--buffer-directory-for)
+                 (lambda (_buffer)
+                   (error "heuristic lookup should not run"))))
+        (should (equal (agent-log--current-buffer-session-file
+                        agent-log-test--codex-backend)
+                       file))))))
+
 ;;;;;; Entry normalization
 
 (ert-deftest agent-log-test-codex-normalize/session-meta ()

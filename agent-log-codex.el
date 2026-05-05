@@ -66,6 +66,11 @@
       (or ">" " "))
   "Regexp matching system-generated XML tags in Codex user entries.")
 
+(defconst agent-log-codex--uuid-regexp
+  (rx (= 8 hex) "-" (= 4 hex) "-" (= 4 hex) "-"
+      (= 4 hex) "-" (= 12 hex))
+  "Regexp matching a Codex session UUID.")
+
 (defconst agent-log-codex--session-id-regexp
   (rx "-" (group (= 8 hex) "-" (= 4 hex) "-" (= 4 hex) "-"
                (= 4 hex) "-" (= 12 hex)) ".jsonl" eos)
@@ -505,16 +510,36 @@ Codex process."
 
 (cl-defmethod agent-log--current-buffer-session-file ((backend agent-log-codex))
   "Return the JSONL file for the Codex session in the current buffer.
-BACKEND is the Codex backend instance.  Since Codex does not
-publish a live session ID for fresh sessions, prefer a session
-whose recorded CWD matches the buffer's directory and whose
-session timestamp is near the terminal process start time."
-  (when-let* ((dir (codex--buffer-directory-for (current-buffer))))
-    (let* ((process-start-ms (agent-log-codex--buffer-process-start-ms))
-           (match (agent-log-codex--find-session-for-project
-                   dir (agent-log--read-sessions backend)
-                   t process-start-ms)))
-      (plist-get (cdr match) :file))))
+BACKEND is the Codex backend instance.  Resumed sessions expose their
+session ID in the process command, so use that as the primary key.  For
+fresh sessions, fall back to matching a top-level session whose recorded
+CWD matches the buffer's directory and whose session timestamp is near
+the terminal process start time."
+  (or (when-let* ((sid (agent-log-codex--buffer-resumed-session-id)))
+        (agent-log--find-session-file backend sid))
+      (when-let* ((dir (codex--buffer-directory-for (current-buffer))))
+        (let* ((process-start-ms (agent-log-codex--buffer-process-start-ms))
+               (match (agent-log-codex--find-session-for-project
+                       dir (agent-log--read-sessions backend)
+                       t process-start-ms)))
+          (plist-get (cdr match) :file)))))
+
+(defun agent-log-codex--buffer-resumed-session-id ()
+  "Return the explicit resumed Codex session ID for the current buffer."
+  (when-let* ((process (get-buffer-process (current-buffer))))
+    (agent-log-codex--resumed-session-id-from-command
+     (process-command process))))
+
+(defun agent-log-codex--resumed-session-id-from-command (command)
+  "Return the session ID from Codex resume COMMAND, or nil.
+COMMAND is a process command list such as that returned by
+`process-command'."
+  (when-let* ((resume-tail (cdr (member "resume" command)))
+              (session-id (car resume-tail))
+              ((string-match-p
+                (concat "\\`" agent-log-codex--uuid-regexp "\\'")
+                session-id)))
+    session-id))
 
 (defun agent-log-codex--find-session-for-project
     (directory sessions &optional top-level-only target-timestamp-ms)
