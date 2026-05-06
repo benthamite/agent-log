@@ -489,11 +489,25 @@ Tool-use, tool-result, and thinking blocks are ignored."
 
 ;;;;;; Active sessions
 
-(cl-defmethod agent-log--active-session-ids ((_backend agent-log-codex))
+(cl-defmethod agent-log--active-session-ids ((backend agent-log-codex))
   "Return a list of session IDs for live Codex sessions.
-Currently returns nil as there is no integration with a running
-Codex process."
-  nil)
+Active Codex terminal buffers are matched to transcript files using
+the same project and launch-time heuristic as
+`agent-log--current-buffer-session-file'."
+  (when (require 'codex nil t)
+    (let ((sessions (agent-log--read-sessions backend))
+          ids)
+      (dolist (buffer (buffer-list))
+        (when-let* (((codex--buffer-p buffer))
+                    (process (get-buffer-process buffer))
+                    ((process-live-p process)))
+          (with-current-buffer buffer
+            (when-let* ((file (agent-log-codex--buffer-session-file
+                               backend sessions)))
+              (push (agent-log--session-id-from-file
+                     backend file)
+                    ids)))))
+      (delete-dups ids))))
 
 ;;;;;; Resume session
 
@@ -525,13 +539,17 @@ session ID in the process command, so use that as the primary key.  For
 fresh sessions, fall back to matching a top-level session whose recorded
 CWD matches the buffer's directory and whose session timestamp is near
 the terminal process start time."
+  (agent-log-codex--buffer-session-file
+   backend (agent-log--read-sessions backend)))
+
+(defun agent-log-codex--buffer-session-file (backend sessions)
+  "Return the JSONL file for current Codex buffer using BACKEND and SESSIONS."
   (or (when-let* ((sid (agent-log-codex--buffer-resumed-session-id)))
         (agent-log--find-session-file backend sid))
       (when-let* ((dir (codex--buffer-directory-for (current-buffer))))
         (let* ((process-start-ms (agent-log-codex--buffer-process-start-ms))
                (match (agent-log-codex--find-session-for-project
-                       dir (agent-log--read-sessions backend)
-                       t process-start-ms)))
+                       dir sessions t process-start-ms)))
           (plist-get (cdr match) :file)))))
 
 (defun agent-log-codex--buffer-resumed-session-id ()

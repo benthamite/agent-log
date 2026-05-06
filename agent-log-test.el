@@ -1864,6 +1864,35 @@ SUMMARY defaults to ONELINE."
                         agent-log-test--codex-backend)
                        file))))))
 
+(ert-deftest agent-log-test-codex-active-session-ids ()
+  "Returns session IDs for live Codex terminal buffers."
+  (let ((buf1 (generate-new-buffer "codex-1"))
+        (buf2 (generate-new-buffer "codex-2")))
+    (unwind-protect
+        (cl-letf (((symbol-function 'require)
+                   (lambda (feature &rest _)
+                     (eq feature 'codex)))
+                  ((symbol-function 'buffer-list)
+                   (lambda () (list buf1 buf2)))
+                  ((symbol-function 'codex--buffer-p)
+                   (lambda (buffer) (memq buffer (list buf1 buf2))))
+                  ((symbol-function 'get-buffer-process)
+                   (lambda (buffer) (and (eq buffer buf1) 'process)))
+                  ((symbol-function 'process-live-p)
+                   (lambda (_process) t))
+                  ((symbol-function 'agent-log--read-sessions)
+                   (lambda (_backend) 'sessions))
+                  ((symbol-function 'agent-log-codex--buffer-session-file)
+                   (lambda (_backend sessions)
+                     (and (eq sessions 'sessions)
+                          (eq (current-buffer) buf1)
+                          "/tmp/rollout-2026-05-06T00-00-00-019df82b-8607-7231-a491-e57316e4fa02.jsonl"))))
+          (should (equal (agent-log--active-session-ids
+                          agent-log-test--codex-backend)
+                         '("019df82b-8607-7231-a491-e57316e4fa02"))))
+      (kill-buffer buf1)
+      (kill-buffer buf2))))
+
 ;;;;;; Entry normalization
 
 (ert-deftest agent-log-test-codex-normalize/session-meta ()

@@ -470,7 +470,7 @@ When @code{agent-log-auto-summarize-sessions} is non-nil, @code{agent-log-summar
 
 The hook handler (@code{agent-log-claude--session-end-handler}) is defined in @samp{agent-log-claude.el} and is installed via @code{eval-after-load} when either defcustom is set before the backend is loaded.
 
-Sessions with a live agent process are excluded from summarization by session ID@.  Each backend's @code{agent-log--active-session-ids} method provides the IDs of currently running sessions.  If summarization is already running when another session ends, the in-progress batch continues undisturbed.
+Sessions with a live agent process are excluded from summarization by session ID@.  Each backend's @code{agent-log--active-session-ids} method provides the IDs of currently running sessions.  For Codex buffers, the backend uses the same resume-ID and project-plus-launch-time matching logic as @code{agent-log-open-current-session} (@ref{Session browsing}), so active Codex terminal sessions are not summarized while they are still open.  If summarization is already running when another session ends, the in-progress batch continues undisturbed.
 
 @node Session rename
 @section Session rename
