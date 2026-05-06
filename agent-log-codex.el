@@ -479,9 +479,13 @@ Tool-use, tool-result, and thinking blocks are ignored."
 
 (cl-defmethod agent-log--summary-line-candidate-p ((_backend agent-log-codex) line)
   "Return non-nil if LINE may contain Codex summary text."
-  (and (string-match-p "\"type\":\"response_item\"" line)
-       (string-match-p "\"type\":\"message\"" line)
-       (string-match-p "\"role\":\"\\(?:user\\|assistant\\)\"" line)))
+  (and (string-match-p
+        "\"type\"[[:space:]]*:[[:space:]]*\"response_item\"" line)
+       (string-match-p
+        "\"type\"[[:space:]]*:[[:space:]]*\"message\"" line)
+       (string-match-p
+        "\"role\"[[:space:]]*:[[:space:]]*\"\\(?:user\\|assistant\\)\""
+        line)))
 
 ;;;;;; Active sessions
 

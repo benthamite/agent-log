@@ -1766,7 +1766,7 @@ BACKEND is used for filtering and text extraction."
 Only summary-relevant lines are parsed, so large tool snapshots do not
 block summary generation."
   (let ((backend (or backend (agent-log--default-backend)))
-        (parts nil))
+        (entries nil))
     (with-temp-buffer
       (insert-file-contents file)
       (goto-char (point-min))
@@ -1782,20 +1782,17 @@ block summary generation."
               (when-let* ((entry (condition-case nil
                                     (agent-log--parse-json-line line)
                                   (error nil))))
-                (dolist (normalized (agent-log--summary-normalize-entry
-                                     entry backend))
-                  (when-let* ((text (agent-log--conversation-entry-text
-                                     normalized backend)))
-                    (push text parts)))))))
+                (push entry entries)))))
         (forward-line 1)))
-    (string-join (nreverse parts))))
+    (agent-log--conversation-text
+     (agent-log--summary-normalize-entries (nreverse entries) backend)
+     backend)))
 
-(defun agent-log--summary-normalize-entry (entry backend)
-  "Return normalized summary entries for raw ENTRY and BACKEND."
+(defun agent-log--summary-normalize-entries (entries backend)
+  "Return normalized summary ENTRIES for BACKEND."
   (if backend
-      (agent-log--filter-conversation
-       backend (agent-log--normalize-entries backend (list entry)))
-    (list entry)))
+      (agent-log--normalize-entries backend entries)
+    entries))
 
 (defun agent-log--conversation-entry-text (entry backend)
   "Return the summary text for ENTRY using BACKEND."
@@ -1873,10 +1870,14 @@ Sessions with a live agent process are excluded by session ID."
 
 (defun agent-log--summary-hash-current-version-p (hash)
   "Return non-nil if HASH uses the current summary hash version."
+  (agent-log--summary-hash-version-p
+   hash agent-log--summary-conversation-hash-version))
+
+(defun agent-log--summary-hash-version-p (hash version)
+  "Return non-nil if HASH uses summary hash VERSION."
   (and (stringp hash)
        (string-prefix-p
-        (format "v%d:" agent-log--summary-conversation-hash-version)
-        hash)))
+        (format "v%d:" version) hash)))
 
 (defun agent-log--summary-file-state-current-p (session entry)
   "Return non-nil if ENTRY was summarized at SESSION's current file state."
@@ -1886,6 +1887,72 @@ Sessions with a live agent process are excluded by session ID."
          mtime
          (equal size (plist-get entry :summary-jsonl-size))
          (equal mtime (plist-get entry :summary-jsonl-mtime)))))
+
+(defun agent-log--upgrade-summary-index (sessions index)
+  "Upgrade compatible legacy summary entries in INDEX for SESSIONS.
+Return the number of upgraded entries.  Legacy v1 entries are reused
+only when their stored conversation hash still matches the current
+conversation text."
+  (let ((upgraded 0))
+    (dolist (session sessions)
+      (let* ((sid (car session))
+             (entry (gethash sid index)))
+        (when-let* ((props (agent-log--legacy-summary-upgrade-props
+                            session entry)))
+          (agent-log--index-merge index sid props)
+          (setq upgraded (1+ upgraded)))))
+    (when (> upgraded 0)
+      (agent-log--write-index index)
+      (message "agent-log: upgraded %d legacy summary entries" upgraded))
+    upgraded))
+
+(defun agent-log--legacy-summary-upgrade-props (session entry)
+  "Return current summary freshness props for legacy SESSION ENTRY."
+  (when (agent-log--legacy-summary-entry-p entry)
+    (let* ((metadata (cdr session))
+           (state (agent-log--session-jsonl-state metadata))
+           (text (agent-log--legacy-summary-current-text metadata entry)))
+      (when (and state text)
+        (list :summary-conversation-hash
+              (agent-log--conversation-text-hash text)
+              :summary-jsonl-size (car state)
+              :summary-jsonl-mtime (cdr state))))))
+
+(defun agent-log--legacy-summary-current-text (metadata entry)
+  "Return current conversation text for legacy ENTRY, or nil."
+  (or (agent-log--legacy-summary-current-text-fast metadata entry)
+      (agent-log--legacy-summary-current-text-full metadata entry)))
+
+(defun agent-log--legacy-summary-current-text-fast (metadata entry)
+  "Return fast-extracted current text for legacy ENTRY, or nil."
+  (condition-case nil
+      (let* ((backend (plist-get metadata :backend))
+             (file (plist-get metadata :file))
+             (text (agent-log--conversation-text-from-file file backend)))
+        (and (agent-log--legacy-summary-text-current-p entry text) text))
+    (error nil)))
+
+(defun agent-log--legacy-summary-current-text-full (metadata entry)
+  "Return full-parser current text for legacy ENTRY, or nil."
+  (condition-case nil
+      (let* ((backend (plist-get metadata :backend))
+             (file (plist-get metadata :file))
+             (entries (agent-log--parse-and-normalize file backend))
+             (text (agent-log--conversation-text entries backend)))
+        (and (agent-log--legacy-summary-text-current-p entry text) text))
+    (error nil)))
+
+(defun agent-log--legacy-summary-text-current-p (entry text)
+  "Return non-nil if TEXT matches legacy summary ENTRY."
+  (equal (plist-get entry :summary-conversation-hash)
+         (agent-log--conversation-text-hash-with-version text 1)))
+
+(defun agent-log--legacy-summary-entry-p (entry)
+  "Return non-nil if ENTRY has legacy freshness data."
+  (and entry
+       (plist-get entry :summary-oneline)
+       (agent-log--summary-hash-version-p
+        (plist-get entry :summary-conversation-hash) 1)))
 
 (defun agent-log--session-real-summary-current-p (session entry)
   "Return non-nil if SESSION has a current non-sentinel summary in ENTRY."
@@ -1929,8 +1996,13 @@ excluded from search until their logs settle."
 
 (defun agent-log--conversation-text-hash (text)
   "Return a versioned SHA-256 hash for conversation TEXT."
+  (agent-log--conversation-text-hash-with-version
+   text agent-log--summary-conversation-hash-version))
+
+(defun agent-log--conversation-text-hash-with-version (text version)
+  "Return a versioned SHA-256 hash for conversation TEXT and VERSION."
   (format "v%d:%s"
-          agent-log--summary-conversation-hash-version
+          version
           (secure-hash 'sha256 (encode-coding-string text 'utf-8-unix))))
 
 ;;;###autoload
@@ -1947,20 +2019,21 @@ If summary generation is already in progress, stop it instead."
     (setq agent-log--summarize-blocked-reason nil
           agent-log--summarize-consecutive-failures 0)
     (let* ((sessions (agent-log--read-all-sessions))
-           (index (agent-log--read-index))
-           (pending (agent-log--sessions-needing-summary sessions index)))
-      (if (null pending)
-          (message "All %d sessions already have current summaries"
-                   (length sessions))
-        (setq agent-log--summarize-active t
-              agent-log--summarize-stop nil)
-        (cl-incf agent-log--summarize-generation)
-        (message "Generating summaries for %d session(s)... (run again to stop)"
-                 (length pending))
-        (run-with-timer
-         0 nil #'agent-log--summarize-next
-         pending 0 (length pending)
-         agent-log--summarize-generation))))))
+           (index (agent-log--read-index)))
+      (agent-log--upgrade-summary-index sessions index)
+      (let ((pending (agent-log--sessions-needing-summary sessions index)))
+        (if (null pending)
+            (message "All %d sessions already have current summaries"
+                     (length sessions))
+          (setq agent-log--summarize-active t
+                agent-log--summarize-stop nil)
+          (cl-incf agent-log--summarize-generation)
+          (message "Generating summaries for %d session(s)... (run again to stop)"
+                   (length pending))
+          (run-with-timer
+           0 nil #'agent-log--summarize-next
+           pending 0 (length pending)
+           agent-log--summarize-generation)))))))
 
 ;;;###autoload
 (defun agent-log-stop-summarize-sessions ()
@@ -2769,32 +2842,33 @@ clickable links to the matching logs."
   (unless (require 'gptel nil t)
     (user-error "Package `gptel' is required for AI search"))
   (let* ((sessions (agent-log--read-all-sessions))
-         (index (agent-log--read-index))
-         (metadata (agent-log--search-gather-metadata sessions index))
-         (unsummarized (plist-get metadata :unsummarized))
-         (summarized (plist-get metadata :summarized)))
-    (when (zerop summarized)
-      (user-error "%s" (agent-log--search-no-summaries-message metadata)))
-    (when (> unsummarized 0)
-      (unless (y-or-n-p
-               (format "%d session(s) lack current summaries and will be excluded. Continue? "
-                       unsummarized))
-        (user-error "Search aborted")))
-    (setq agent-log--search-sessions-cache sessions
-          agent-log--search-index-cache index)
-    (let* ((scope-prompt (agent-log--search-build-scope-prompt query metadata))
-           (resolved (agent-log--resolve-search-scope-backend-and-model))
-           (gptel-backend (car resolved))
-           (gptel-model (cdr resolved))
-           (gptel-use-tools nil))
-      (message "Analyzing search scope with %s..." gptel-model)
-      (gptel-request scope-prompt
-        :system agent-log--search-scope-system-message
-        :callback
-        (lambda (response info)
-          (agent-log--search-scope-callback
-           response query sessions index summarized
-           (agent-log--search-cost info)))))))
+         (index (agent-log--read-index)))
+    (agent-log--upgrade-summary-index sessions index)
+    (let* ((metadata (agent-log--search-gather-metadata sessions index))
+           (unsummarized (plist-get metadata :unsummarized))
+           (summarized (plist-get metadata :summarized)))
+      (when (zerop summarized)
+        (user-error "%s" (agent-log--search-no-summaries-message metadata)))
+      (when (> unsummarized 0)
+        (unless (y-or-n-p
+                 (format "%d session(s) lack current summaries and will be excluded. Continue? "
+                         unsummarized))
+          (user-error "Search aborted")))
+      (setq agent-log--search-sessions-cache sessions
+            agent-log--search-index-cache index)
+      (let* ((scope-prompt (agent-log--search-build-scope-prompt query metadata))
+             (resolved (agent-log--resolve-search-scope-backend-and-model))
+             (gptel-backend (car resolved))
+             (gptel-model (cdr resolved))
+             (gptel-use-tools nil))
+        (message "Analyzing search scope with %s..." gptel-model)
+        (gptel-request scope-prompt
+          :system agent-log--search-scope-system-message
+          :callback
+          (lambda (response info)
+            (agent-log--search-scope-callback
+             response query sessions index summarized
+             (agent-log--search-cost info))))))))
 
 (defun agent-log--search-no-summaries-message (metadata)
   "Return the user-facing search error for METADATA."

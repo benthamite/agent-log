@@ -64,6 +64,17 @@ SUMMARY defaults to ONELINE."
           :summary-jsonl-size size
           :summary-jsonl-mtime mtime)))
 
+(defun agent-log-test--legacy-summary-entry (metadata oneline &optional summary)
+  "Return a v1 summary index entry for METADATA and ONELINE.
+SUMMARY defaults to ONELINE."
+  (let* ((backend (plist-get metadata :backend))
+         (file (plist-get metadata :file))
+         (text (agent-log--conversation-text-from-file file backend)))
+    (list :summary (or summary oneline)
+          :summary-oneline oneline
+          :summary-conversation-hash
+          (agent-log--conversation-text-hash-with-version text 1))))
+
 ;;;;; JSONL parsing
 
 (ert-deftest agent-log-test-parse-json-line/simple-object ()
@@ -1145,6 +1156,15 @@ SUMMARY defaults to ONELINE."
                         path agent-log-test--claude-backend)
                        "User: hello\n\n"))))))
 
+(ert-deftest agent-log-test-conversation-text-from-file/claude-spaced-json ()
+  "Extracts Claude conversation text from JSON with spaces."
+  (agent-log-test--with-temp-dir
+    (let* ((content "{\"type\": \"user\", \"message\": {\"role\": \"user\", \"content\": \"hello\"}}\n")
+           (path (agent-log-test--write-file "s1.jsonl" content)))
+      (should (equal (agent-log--conversation-text-from-file
+                      path agent-log-test--claude-backend)
+                     "User: hello\n\n")))))
+
 ;;;;; Build summary prompt
 
 (ert-deftest agent-log-test-build-summary-prompt ()
@@ -1246,6 +1266,67 @@ SUMMARY defaults to ONELINE."
            (index (make-hash-table :test #'equal)))
       (agent-log-test--write-file "s1.jsonl" new-content)
       (puthash "s1" old-entry index)
+      (should (= (length (agent-log--sessions-needing-summary
+                          (list session) index))
+                 1)))))
+
+(ert-deftest agent-log-test-upgrade-summary-index/v1-current ()
+  "Upgrades a current v1 summary entry instead of re-summarizing it."
+  (agent-log-test--with-temp-dir
+    (let* ((content "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"hello\"}}\n")
+           (jsonl-path (agent-log-test--write-file "s1.jsonl" content))
+           (session (list "s1" :file jsonl-path
+                          :backend agent-log-test--claude-backend))
+           (index (make-hash-table :test #'equal))
+           (agent-log-rendered-directory agent-log-test--dir))
+      (puthash "s1" (agent-log-test--legacy-summary-entry
+                     (cdr session) "A")
+               index)
+      (should (= (agent-log--upgrade-summary-index (list session) index) 1))
+      (let ((entry (gethash "s1" index)))
+        (should (agent-log--session-summary-current-p session entry))
+        (should (agent-log--summary-hash-current-version-p
+                 (plist-get entry :summary-conversation-hash)))
+        (should (plist-member entry :summary-jsonl-size))
+        (should (plist-member entry :summary-jsonl-mtime)))
+      (should (null (agent-log--sessions-needing-summary
+                     (list session) index))))))
+
+(ert-deftest agent-log-test-upgrade-summary-index/v1-full-parser-fallback ()
+  "Upgrades current v1 summaries when fast extraction text changed."
+  (agent-log-test--with-temp-dir
+    (let* ((content "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"hello\"}}\n")
+           (jsonl-path (agent-log-test--write-file "s1.jsonl" content))
+           (session (list "s1" :file jsonl-path
+                          :backend agent-log-test--claude-backend))
+           (index (make-hash-table :test #'equal))
+           (agent-log-rendered-directory agent-log-test--dir))
+      (puthash "s1" (agent-log-test--legacy-summary-entry
+                     (cdr session) "A")
+               index)
+      (cl-letf (((symbol-function 'agent-log--conversation-text-from-file)
+                 (lambda (&rest _) "")))
+        (should (= (agent-log--upgrade-summary-index (list session) index)
+                   1)))
+      (should (agent-log--session-summary-current-p
+               session (gethash "s1" index))))))
+
+(ert-deftest agent-log-test-upgrade-summary-index/v1-changed-stale ()
+  "Leaves a v1 summary stale when the conversation text changed."
+  (agent-log-test--with-temp-dir
+    (let* ((old-content "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"hello\"}}\n")
+           (new-content (concat old-content
+                                "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"new work\"}]}}\n"))
+           (jsonl-path (agent-log-test--write-file "s1.jsonl" old-content))
+           (session (list "s1" :file jsonl-path
+                          :backend agent-log-test--claude-backend))
+           (index (make-hash-table :test #'equal))
+           (agent-log-rendered-directory agent-log-test--dir))
+      (puthash "s1" (agent-log-test--legacy-summary-entry
+                     (cdr session) "A")
+               index)
+      (agent-log-test--write-file "s1.jsonl" new-content)
+      (should (= (agent-log--upgrade-summary-index (list session) index) 0))
       (should (= (length (agent-log--sessions-needing-summary
                           (list session) index))
                  1)))))
@@ -1703,6 +1784,21 @@ SUMMARY defaults to ONELINE."
       (should (equal (plist-get entry :type) "assistant"))
       (let ((content (plist-get (plist-get entry :message) :content)))
         (should (equal (plist-get (car content) :text) "I'll fix it"))))))
+
+(ert-deftest agent-log-test-codex-conversation-text-from-file/spaced-json ()
+  "Extracts Codex conversation text from JSON with spaces."
+  (agent-log-test--with-temp-dir
+    (let* ((jsonl-content
+            (concat
+             "{\"type\": \"response_item\", "
+             "\"timestamp\": \"2026-04-01T18:00:00Z\", "
+             "\"payload\": {\"type\": \"message\", \"role\": \"user\", "
+             "\"content\": [{\"type\": \"input_text\", "
+             "\"text\": \"Fix the bug\"}]}}\n"))
+           (jsonl-path (agent-log-test--write-file "codex.jsonl" jsonl-content)))
+      (should (equal (agent-log--conversation-text-from-file
+                      jsonl-path agent-log-test--codex-backend)
+                     "User: Fix the bug\n\n")))))
 
 (ert-deftest agent-log-test-codex-normalize/developer-message-skipped ()
   "Skips developer messages during normalization."
