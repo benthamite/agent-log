@@ -1445,6 +1445,62 @@ SUMMARY defaults to ONELINE."
         (should (agent-log--session-summary-current-p
                  session (gethash "s1" (agent-log--read-index))))))))
 
+(ert-deftest agent-log-test-summarize-sessions/start-message-shows-archive-total ()
+  "Reports pending updates separately from the archive size."
+  (let ((sessions (list (list "s1") (list "s2") (list "s3")))
+        (index (make-hash-table :test #'equal))
+        (messages nil)
+        (scheduled nil)
+        (orig-require (symbol-function 'require))
+        (agent-log--summarize-active nil)
+        (agent-log--summarize-archive-total nil))
+    (cl-letf (((symbol-function 'require)
+               (lambda (feature &optional filename noerror)
+                 (if (eq feature 'gptel)
+                     t
+                   (funcall orig-require feature filename noerror))))
+              ((symbol-function 'agent-log--read-all-sessions)
+               (lambda () sessions))
+              ((symbol-function 'agent-log--read-index)
+               (lambda () index))
+              ((symbol-function 'agent-log--upgrade-summary-index)
+               (lambda (&rest _) 0))
+              ((symbol-function 'agent-log--sessions-needing-summary)
+               (lambda (&rest _) (list (car sessions))))
+              ((symbol-function 'run-with-timer)
+               (lambda (&rest args) (setq scheduled args)))
+              ((symbol-function 'message)
+               (lambda (format-string &rest args)
+                 (push (apply #'format-message format-string args)
+                       messages))))
+      (agent-log-summarize-sessions)
+      (should scheduled)
+      (should (= agent-log--summarize-archive-total 3))
+      (should (string-match-p
+               "1 pending summary update.*3 discovered session"
+               (car messages))))))
+
+(ert-deftest agent-log-test-summarize-one/progress-message-shows-archive-total ()
+  "Reports pending progress without implying it is the archive size."
+  (let ((messages nil)
+        (requested nil)
+        (agent-log--summarize-archive-total 2571))
+    (cl-letf (((symbol-function 'agent-log--resolve-summary-backend-and-model)
+               (lambda () (cons nil "test-model")))
+              ((symbol-function 'gptel-request)
+               (lambda (&rest _) (setq requested t)))
+              ((symbol-function 'message)
+               (lambda (format-string &rest args)
+                 (push (apply #'format-message format-string args)
+                       messages))))
+      (agent-log--summarize-one
+       "s1" '(:display "Example session") "User: hello" "hash"
+       '(1 . 2) nil 0 20 7)
+      (should requested)
+      (should (string-match-p
+               "pending update 1/20 (archive: 2571 sessions)"
+               (car messages))))))
+
 (ert-deftest agent-log-test-search/startup-upgrade-is-cheap ()
   "Preserves legacy summaries before search without parsing JSONL."
   (agent-log-test--with-temp-dir

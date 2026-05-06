@@ -465,6 +465,9 @@ Set before each `gptel-request' and consumed by the first callback
 invocation.  Subsequent callbacks for the same request see a mismatch
 and are silently ignored, preventing chain forking from streaming.")
 
+(defvar agent-log--summarize-archive-total nil
+  "Total number of discovered sessions in the current summary run.")
+
 (defvar agent-log--summarize-blocked-reason nil
   "Human-readable reason why summary auto-runs are suspended.
 Set when a run aborts due to an unrecoverable API error such as an
@@ -2020,10 +2023,12 @@ If summary generation is already in progress, stop it instead."
             (message "All %d sessions already have current summaries"
                      (length sessions))
           (setq agent-log--summarize-active t
-                agent-log--summarize-stop nil)
+                agent-log--summarize-stop nil
+                agent-log--summarize-archive-total (length sessions))
           (cl-incf agent-log--summarize-generation)
-          (message "Generating summaries for %d session(s)... (run again to stop)"
-                   (length pending))
+          (message
+           "Generating %d pending summary update(s) out of %d discovered session(s)... (run again to stop)"
+           (length pending) agent-log--summarize-archive-total)
           (run-with-timer
            0 nil #'agent-log--summarize-next
            pending 0 (length pending)
@@ -2041,7 +2046,8 @@ will not spawn further work."
         ;; from the current run becomes stale and is silently ignored.
         (cl-incf agent-log--summarize-generation)
         (setq agent-log--summarize-active nil
-              agent-log--summarize-stop nil)
+              agent-log--summarize-stop nil
+              agent-log--summarize-archive-total nil)
         (message "Summary generation stopped"))
     (message "No summary generation in progress")))
 
@@ -2056,9 +2062,11 @@ nothing."
     (if (or (null remaining) agent-log--summarize-stop)
         (let ((stopped agent-log--summarize-stop))
           (setq agent-log--summarize-active nil
-                agent-log--summarize-stop nil)
-          (message "Summary generation %s: %d/%d session(s) done"
-                   (if stopped "stopped" "complete") done total))
+                agent-log--summarize-stop nil
+                agent-log--summarize-archive-total nil)
+          (message
+           "Summary generation %s: %d/%d pending update(s) done"
+           (if stopped "stopped" "complete") done total))
       (let* ((session (car remaining))
              (sid (car session))
              (meta (cdr session))
@@ -2123,9 +2131,11 @@ REMAINING, DONE, TOTAL, and GEN are chain-continuation state for
          (gptel-use-tools nil)
          (request-id (cl-gensym "summarize-"))
          (display (agent-log--summarize-display-name meta text sid)))
-    (message "Summarizing %d/%d with %s: %s..." (1+ done) total
-             gptel-model
-             (agent-log--truncate-string display 70))
+    (message
+     "Summarizing pending update %d/%d (archive: %d sessions) with %s: %s..."
+     (1+ done) total (or agent-log--summarize-archive-total total)
+     gptel-model
+     (agent-log--truncate-string display 70))
     (setq agent-log--summarize-request-id request-id)
     (gptel-request prompt
       :system agent-log--summary-system-message
@@ -2238,11 +2248,12 @@ DONE and TOTAL are progress counters used in the abort message."
   (cl-incf agent-log--summarize-generation)
   (setq agent-log--summarize-active nil
         agent-log--summarize-stop nil
+        agent-log--summarize-archive-total nil
         agent-log--summarize-consecutive-failures 0)
   (when blocking-p
     (setq agent-log--summarize-blocked-reason err-msg))
   (message
-   "Summary aborted at %d/%d (%s): %s%s"
+   "Summary aborted at pending update %d/%d (%s): %s%s"
    done total sid err-msg
    (if blocking-p
        " — auto-summarize suspended; fix the issue and run M-x agent-log-summarize-sessions to retry"
