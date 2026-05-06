@@ -1292,8 +1292,8 @@ SUMMARY defaults to ONELINE."
       (should (null (agent-log--sessions-needing-summary
                      (list session) index))))))
 
-(ert-deftest agent-log-test-upgrade-summary-index/v1-full-parser-fallback ()
-  "Upgrades current v1 summaries when fast extraction text changed."
+(ert-deftest agent-log-test-upgrade-summary-index/v1-fast-mismatch-stale ()
+  "Leaves v1 summaries stale when fast extraction cannot prove currentness."
   (agent-log-test--with-temp-dir
     (let* ((content "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"hello\"}}\n")
            (jsonl-path (agent-log-test--write-file "s1.jsonl" content))
@@ -1305,11 +1305,14 @@ SUMMARY defaults to ONELINE."
                      (cdr session) "A")
                index)
       (cl-letf (((symbol-function 'agent-log--conversation-text-from-file)
-                 (lambda (&rest _) "")))
+                 (lambda (&rest _) ""))
+                ((symbol-function 'agent-log--parse-and-normalize)
+                 (lambda (&rest _)
+                   (error "legacy upgrade should not use full parser"))))
         (should (= (agent-log--upgrade-summary-index (list session) index)
-                   1)))
-      (should (agent-log--session-summary-current-p
-               session (gethash "s1" index))))))
+                   0)))
+      (should-not (agent-log--session-summary-current-p
+                   session (gethash "s1" index))))))
 
 (ert-deftest agent-log-test-upgrade-summary-index/v1-changed-stale ()
   "Leaves a v1 summary stale when the conversation text changed."
@@ -1330,6 +1333,66 @@ SUMMARY defaults to ONELINE."
       (should (= (length (agent-log--sessions-needing-summary
                           (list session) index))
                  1)))))
+
+(ert-deftest agent-log-test-summarize-next/preserves-v1-summary ()
+  "Preserves matching v1 summaries inside the timer-driven worker."
+  (agent-log-test--with-temp-dir
+    (let* ((content "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"hello\"}}\n")
+           (jsonl-path (agent-log-test--write-file "s1.jsonl" content))
+           (session (list "s1" :file jsonl-path
+                          :backend agent-log-test--claude-backend))
+           (agent-log-rendered-directory agent-log-test--dir)
+           (index (make-hash-table :test #'equal)))
+      (puthash "s1" (agent-log-test--legacy-summary-entry
+                     (cdr session) "A")
+               index)
+      (agent-log--write-index index)
+      (unwind-protect
+          (let ((agent-log--summarize-active t)
+                (agent-log--summarize-generation 7))
+            (cl-letf (((symbol-function 'agent-log--summarize-one)
+                       (lambda (&rest _)
+                         (error "legacy summary should be preserved"))))
+              (agent-log--summarize-next (list session) 0 1 7))
+            (let ((entry (gethash "s1" (agent-log--read-index))))
+              (should (equal (plist-get entry :summary-oneline) "A"))
+              (should (agent-log--session-summary-current-p session entry))))
+        (setq agent-log--summarize-active nil)))))
+
+(ert-deftest agent-log-test-summarize-sessions/no-startup-upgrade ()
+  "Does not run archive-wide legacy upgrades before summary scheduling."
+  (let ((orig-require (symbol-function 'require))
+        (agent-log--summarize-active nil))
+    (cl-letf (((symbol-function 'require)
+               (lambda (feature &optional filename noerror)
+                 (if (eq feature 'gptel)
+                     t
+                   (funcall orig-require feature filename noerror))))
+              ((symbol-function 'agent-log--read-all-sessions)
+               (lambda () nil))
+              ((symbol-function 'agent-log--read-index)
+               (lambda () (make-hash-table :test #'equal)))
+              ((symbol-function 'agent-log--upgrade-summary-index)
+               (lambda (&rest _)
+                 (error "summary startup should not upgrade legacy entries"))))
+      (agent-log-summarize-sessions))))
+
+(ert-deftest agent-log-test-search/no-startup-upgrade ()
+  "Does not run archive-wide legacy upgrades before search metadata checks."
+  (let ((orig-require (symbol-function 'require)))
+    (cl-letf (((symbol-function 'require)
+               (lambda (feature &optional filename noerror)
+                 (if (eq feature 'gptel)
+                     t
+                   (funcall orig-require feature filename noerror))))
+              ((symbol-function 'agent-log--read-all-sessions)
+               (lambda () nil))
+              ((symbol-function 'agent-log--read-index)
+               (lambda () (make-hash-table :test #'equal)))
+              ((symbol-function 'agent-log--upgrade-summary-index)
+               (lambda (&rest _)
+                 (error "search startup should not upgrade legacy entries"))))
+      (should-error (agent-log-search "anything") :type 'user-error))))
 
 ;;;;; Search metadata
 

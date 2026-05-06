@@ -401,7 +401,7 @@ The command ~agent-log-search~ searches your session history using natural langu
 
 The result is displayed in a =*agent-log-search*= buffer in ~agent-log-search-mode~ ([[#h:agent-log-search-mode][~agent-log-search-mode~]]).  Session references in the narrative are rendered as clickable links.  Pressing =RET= or clicking on a link opens the corresponding rendered session log.
 
-Before starting, the command validates and upgrades compatible legacy summaries using the same fingerprint check as ~agent-log-summarize-sessions~ ([[#h:summary-generation][Summary generation]]).  It then checks for sessions without current summaries.  If any exist, it warns the user that those sessions will be excluded and asks for confirmation.  If no sessions have searchable current summaries at all, the command aborts with a message to run ~agent-log-summarize-sessions~ first.  When existing summaries predate freshness tracking and cannot be upgraded, the error says that those legacy summaries need refreshing rather than reporting them as never summarized.
+Before starting, the command checks index metadata without parsing session logs.  If any sessions lack current summaries, it warns the user that those sessions will be excluded and asks for confirmation.  If no sessions have searchable current summaries at all, the command aborts with a message to run ~agent-log-summarize-sessions~ first.  When existing summaries predate freshness tracking, the error says that those legacy summaries need refreshing rather than reporting them as never summarized.
 
 Before stage 2, the estimated token cost is compared against ~agent-log-search-budget~ ([[#h:ai-search-options][AI search options]]).  If the estimate exceeds the threshold, the user is asked to confirm.
 
@@ -624,7 +624,7 @@ The rendered directory mirrors the project structure:
   _index.el
 #+end_example
 
-Each =.md= file contains HTML-comment front matter (session ID, source path, rendered timestamp, JSONL size) followed by the full conversation rendered as Markdown.  The =_index.el= file is a hash table mapping session IDs to metadata (rendered file path, JSONL size, and optionally a summary plus the conversation fingerprint and JSONL file state it describes).  Summary commands use that metadata to distinguish current summaries, legacy summaries that can be upgraded without another LLM request, and stale summaries that need to be regenerated.
+Each =.md= file contains HTML-comment front matter (session ID, source path, rendered timestamp, JSONL size) followed by the full conversation rendered as Markdown.  The =_index.el= file is a hash table mapping session IDs to metadata (rendered file path, JSONL size, and optionally a summary plus the conversation fingerprint and JSONL file state it describes).  Summary commands use that metadata to distinguish current summaries, legacy summaries that can be preserved without another LLM request during per-session processing, and stale summaries that need to be regenerated.
 
 ** Rendering pipeline
 :PROPERTIES:

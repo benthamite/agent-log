@@ -1892,7 +1892,7 @@ Sessions with a live agent process are excluded by session ID."
   "Upgrade compatible legacy summary entries in INDEX for SESSIONS.
 Return the number of upgraded entries.  Legacy v1 entries are reused
 only when their stored conversation hash still matches the current
-conversation text."
+conversation text according to the fast summary extractor."
   (let ((upgraded 0))
     (dolist (session sessions)
       (let* ((sid (car session))
@@ -1911,41 +1911,26 @@ conversation text."
   (when (agent-log--legacy-summary-entry-p entry)
     (let* ((metadata (cdr session))
            (state (agent-log--session-jsonl-state metadata))
-           (text (agent-log--legacy-summary-current-text metadata entry)))
-      (when (and state text)
-        (list :summary-conversation-hash
-              (agent-log--conversation-text-hash text)
-              :summary-jsonl-size (car state)
-              :summary-jsonl-mtime (cdr state))))))
+           (backend (plist-get metadata :backend))
+           (file (plist-get metadata :file)))
+      (when state
+        (condition-case nil
+            (agent-log--legacy-summary-upgrade-props-for-text
+             entry (agent-log--conversation-text-from-file file backend) state)
+          (error nil))))))
 
-(defun agent-log--legacy-summary-current-text (metadata entry)
-  "Return current conversation text for legacy ENTRY, or nil."
-  (or (agent-log--legacy-summary-current-text-fast metadata entry)
-      (agent-log--legacy-summary-current-text-full metadata entry)))
-
-(defun agent-log--legacy-summary-current-text-fast (metadata entry)
-  "Return fast-extracted current text for legacy ENTRY, or nil."
-  (condition-case nil
-      (let* ((backend (plist-get metadata :backend))
-             (file (plist-get metadata :file))
-             (text (agent-log--conversation-text-from-file file backend)))
-        (and (agent-log--legacy-summary-text-current-p entry text) text))
-    (error nil)))
-
-(defun agent-log--legacy-summary-current-text-full (metadata entry)
-  "Return full-parser current text for legacy ENTRY, or nil."
-  (condition-case nil
-      (let* ((backend (plist-get metadata :backend))
-             (file (plist-get metadata :file))
-             (entries (agent-log--parse-and-normalize file backend))
-             (text (agent-log--conversation-text entries backend)))
-        (and (agent-log--legacy-summary-text-current-p entry text) text))
-    (error nil)))
+(defun agent-log--legacy-summary-upgrade-props-for-text (entry text state)
+  "Return freshness props when legacy ENTRY matches TEXT and STATE."
+  (when (and state (agent-log--legacy-summary-text-current-p entry text))
+    (list :summary-conversation-hash (agent-log--conversation-text-hash text)
+          :summary-jsonl-size (car state)
+          :summary-jsonl-mtime (cdr state))))
 
 (defun agent-log--legacy-summary-text-current-p (entry text)
   "Return non-nil if TEXT matches legacy summary ENTRY."
-  (equal (plist-get entry :summary-conversation-hash)
-         (agent-log--conversation-text-hash-with-version text 1)))
+  (and (stringp text)
+       (equal (plist-get entry :summary-conversation-hash)
+              (agent-log--conversation-text-hash-with-version text 1))))
 
 (defun agent-log--legacy-summary-entry-p (entry)
   "Return non-nil if ENTRY has legacy freshness data."
@@ -2019,21 +2004,20 @@ If summary generation is already in progress, stop it instead."
     (setq agent-log--summarize-blocked-reason nil
           agent-log--summarize-consecutive-failures 0)
     (let* ((sessions (agent-log--read-all-sessions))
-           (index (agent-log--read-index)))
-      (agent-log--upgrade-summary-index sessions index)
-      (let ((pending (agent-log--sessions-needing-summary sessions index)))
-        (if (null pending)
-            (message "All %d sessions already have current summaries"
-                     (length sessions))
-          (setq agent-log--summarize-active t
-                agent-log--summarize-stop nil)
-          (cl-incf agent-log--summarize-generation)
-          (message "Generating summaries for %d session(s)... (run again to stop)"
-                   (length pending))
-          (run-with-timer
-           0 nil #'agent-log--summarize-next
-           pending 0 (length pending)
-           agent-log--summarize-generation)))))))
+           (index (agent-log--read-index))
+           (pending (agent-log--sessions-needing-summary sessions index)))
+      (if (null pending)
+          (message "All %d sessions already have current summaries"
+                   (length sessions))
+        (setq agent-log--summarize-active t
+              agent-log--summarize-stop nil)
+        (cl-incf agent-log--summarize-generation)
+        (message "Generating summaries for %d session(s)... (run again to stop)"
+                 (length pending))
+        (run-with-timer
+         0 nil #'agent-log--summarize-next
+         pending 0 (length pending)
+         agent-log--summarize-generation))))))
 
 ;;;###autoload
 (defun agent-log-stop-summarize-sessions ()
@@ -2076,20 +2060,34 @@ nothing."
                    (text (agent-log--limit-summary-text full-text))
                    (conversation-hash
                     (agent-log--conversation-text-hash full-text))
-                   (jsonl-state (agent-log--session-jsonl-state meta)))
-              (if (string-empty-p (string-trim text))
-                  (progn
-                    (agent-log--index-update-props
-                     sid (list :summary agent-log--no-conversation-sentinel
-                               :summary-oneline agent-log--no-conversation-sentinel
-                               :summary-conversation-hash conversation-hash
-                               :summary-jsonl-size (car jsonl-state)
-                               :summary-jsonl-mtime (cdr jsonl-state)))
-                    (agent-log--summarize-next
-                     (cdr remaining) (1+ done) total gen))
+                   (jsonl-state (agent-log--session-jsonl-state meta))
+                   (index (agent-log--read-index))
+                   (entry (gethash sid index))
+                   (legacy-props
+                    (agent-log--legacy-summary-upgrade-props-for-text
+                     entry full-text jsonl-state)))
+              (cond
+               (legacy-props
+                (agent-log--index-merge index sid legacy-props)
+                (agent-log--write-index index)
+                (message "Preserved existing summary %d/%d" (1+ done) total)
+                (run-with-timer 0 nil
+                                #'agent-log--summarize-next
+                                (cdr remaining) (1+ done) total gen))
+               ((string-empty-p (string-trim text))
+                (agent-log--index-update-props
+                 sid (list :summary agent-log--no-conversation-sentinel
+                           :summary-oneline agent-log--no-conversation-sentinel
+                           :summary-conversation-hash conversation-hash
+                           :summary-jsonl-size (car jsonl-state)
+                           :summary-jsonl-mtime (cdr jsonl-state)))
+                (run-with-timer 0 nil
+                                #'agent-log--summarize-next
+                                (cdr remaining) (1+ done) total gen))
+               (t
                 (agent-log--summarize-one
                  sid meta text conversation-hash jsonl-state
-                 remaining done total gen)))
+                 remaining done total gen))))
           (error
            (message "Failed to summarize %s: %s"
                     sid (error-message-string err))
@@ -2842,33 +2840,32 @@ clickable links to the matching logs."
   (unless (require 'gptel nil t)
     (user-error "Package `gptel' is required for AI search"))
   (let* ((sessions (agent-log--read-all-sessions))
-         (index (agent-log--read-index)))
-    (agent-log--upgrade-summary-index sessions index)
-    (let* ((metadata (agent-log--search-gather-metadata sessions index))
-           (unsummarized (plist-get metadata :unsummarized))
-           (summarized (plist-get metadata :summarized)))
-      (when (zerop summarized)
-        (user-error "%s" (agent-log--search-no-summaries-message metadata)))
-      (when (> unsummarized 0)
-        (unless (y-or-n-p
-                 (format "%d session(s) lack current summaries and will be excluded. Continue? "
-                         unsummarized))
-          (user-error "Search aborted")))
-      (setq agent-log--search-sessions-cache sessions
-            agent-log--search-index-cache index)
-      (let* ((scope-prompt (agent-log--search-build-scope-prompt query metadata))
-             (resolved (agent-log--resolve-search-scope-backend-and-model))
-             (gptel-backend (car resolved))
-             (gptel-model (cdr resolved))
-             (gptel-use-tools nil))
-        (message "Analyzing search scope with %s..." gptel-model)
-        (gptel-request scope-prompt
-          :system agent-log--search-scope-system-message
-          :callback
-          (lambda (response info)
-            (agent-log--search-scope-callback
-             response query sessions index summarized
-             (agent-log--search-cost info))))))))
+         (index (agent-log--read-index))
+         (metadata (agent-log--search-gather-metadata sessions index))
+         (unsummarized (plist-get metadata :unsummarized))
+         (summarized (plist-get metadata :summarized)))
+    (when (zerop summarized)
+      (user-error "%s" (agent-log--search-no-summaries-message metadata)))
+    (when (> unsummarized 0)
+      (unless (y-or-n-p
+               (format "%d session(s) lack current summaries and will be excluded. Continue? "
+                       unsummarized))
+        (user-error "Search aborted")))
+    (setq agent-log--search-sessions-cache sessions
+          agent-log--search-index-cache index)
+    (let* ((scope-prompt (agent-log--search-build-scope-prompt query metadata))
+           (resolved (agent-log--resolve-search-scope-backend-and-model))
+           (gptel-backend (car resolved))
+           (gptel-model (cdr resolved))
+           (gptel-use-tools nil))
+      (message "Analyzing search scope with %s..." gptel-model)
+      (gptel-request scope-prompt
+        :system agent-log--search-scope-system-message
+        :callback
+        (lambda (response info)
+          (agent-log--search-scope-callback
+           response query sessions index summarized
+           (agent-log--search-cost info)))))))
 
 (defun agent-log--search-no-summaries-message (metadata)
   "Return the user-facing search error for METADATA."
