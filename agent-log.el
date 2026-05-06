@@ -1836,8 +1836,27 @@ Sessions with a live agent process are excluded by session ID."
 (defun agent-log--session-real-summary-current-p (session entry)
   "Return non-nil if SESSION has a current non-sentinel summary in ENTRY."
   (and (agent-log--session-summary-current-p session entry)
+       (agent-log--session-stored-real-summary-p entry)))
+
+(defun agent-log--session-stored-real-summary-p (entry)
+  "Return non-nil if ENTRY stores a non-sentinel summary."
+  (and entry
+       (plist-get entry :summary-oneline)
        (not (equal (plist-get entry :summary-oneline)
                    agent-log--no-conversation-sentinel))))
+
+(defun agent-log--session-legacy-real-summary-p (entry)
+  "Return non-nil if ENTRY stores a real summary without a freshness hash."
+  (and (agent-log--session-stored-real-summary-p entry)
+       (not (plist-get entry :summary-conversation-hash))))
+
+(defun agent-log--session-searchable-summary-current-p
+    (session entry active-ids)
+  "Return non-nil if SESSION has a search-eligible summary in ENTRY.
+ACTIVE-IDS is the list of currently running session IDs, which are
+excluded from search until their logs settle."
+  (and (not (member (car session) active-ids))
+       (agent-log--session-real-summary-current-p session entry)))
 
 (defun agent-log--session-conversation-hash (metadata)
   "Return the current conversation hash for session METADATA."
@@ -2232,18 +2251,22 @@ inferring the backend from the model when needed."
 (defun agent-log--search-gather-metadata (sessions index)
   "Compute metadata for SESSIONS and INDEX needed by the search pipeline.
 Returns a plist with:
-  :projects     - alist of (SHORT-NAME . COUNT) for current summaries
-  :date-earliest - earliest timestamp (epoch-ms) among summarized sessions
-  :date-latest   - latest timestamp (epoch-ms) among summarized sessions
-  :summarized    - count of sessions with current summaries
-  :unsummarized  - count of sessions without current summaries"
+  :projects     - alist of (SHORT-NAME . COUNT) for searchable summaries
+  :date-earliest - earliest timestamp (epoch-ms) among searchable sessions
+  :date-latest   - latest timestamp (epoch-ms) among searchable sessions
+  :summarized    - count of sessions with searchable current summaries
+  :unsummarized  - count of sessions without current summaries
+  :legacy-summaries - count of real summaries lacking freshness hashes
+  :empty-summaries  - count of current summaries for empty sessions"
   (let ((project-counts (make-hash-table :test #'equal))
         (active-ids (cl-loop for backend in (agent-log--active-backend-instances)
                              append (agent-log--active-session-ids backend)))
         (earliest nil)
         (latest nil)
         (summarized 0)
-        (unsummarized 0))
+        (unsummarized 0)
+        (legacy-summaries 0)
+        (empty-summaries 0))
     (dolist (session sessions)
       (let* ((sid (car session))
              (meta (cdr session))
@@ -2253,13 +2276,14 @@ Returns a plist with:
              (active (member sid active-ids))
              (current-summary
               (and (not active)
-                   (agent-log--session-summary-current-p session entry))))
+                   (agent-log--session-summary-current-p session entry)))
+             (real-summary (agent-log--session-stored-real-summary-p entry))
+             (legacy-summary (agent-log--session-legacy-real-summary-p entry)))
         (let ((oneline (and entry (plist-get entry :summary-oneline))))
           (cond
            ;; Has a real summary: count it and track its metadata.
            ((and current-summary
-                 oneline
-                 (not (equal oneline agent-log--no-conversation-sentinel)))
+                 real-summary)
             (cl-incf summarized)
             (cl-incf (gethash project project-counts 0))
             (when (or (null earliest) (and (numberp ts) (< ts earliest)))
@@ -2270,7 +2294,13 @@ Returns a plist with:
            ((or active
                 (and current-summary
                      (equal oneline agent-log--no-conversation-sentinel)))
-            nil)
+            (when (and current-summary
+                       (equal oneline agent-log--no-conversation-sentinel))
+              (cl-incf empty-summaries)))
+           ;; Legacy summaries must be refreshed before search can trust them.
+           (legacy-summary
+            (cl-incf legacy-summaries)
+            (cl-incf unsummarized))
            ;; No current summary: genuinely unsummarized.
            (t (cl-incf unsummarized))))))
     (let (projects)
@@ -2281,7 +2311,9 @@ Returns a plist with:
             :date-earliest earliest
             :date-latest latest
             :summarized summarized
-            :unsummarized unsummarized))))
+            :unsummarized unsummarized
+            :legacy-summaries legacy-summaries
+            :empty-summaries empty-summaries))))
 
 (defun agent-log--search-build-scope-prompt (query metadata)
   "Build the stage 1 scope-narrowing prompt from QUERY and METADATA."
@@ -2340,10 +2372,12 @@ Returns a plist (:projects LIST-OR-ALL :date-after EPOCH-OR-NIL
 (defun agent-log--search-apply-scope (sessions index scope)
   "Filter SESSIONS using INDEX and SCOPE criteria.
 Returns sessions that match the project filter, fall within the
-date range, and have a current summary in the INDEX."
+date range, and have a searchable current summary in the INDEX."
   (let ((projects (plist-get scope :projects))
         (date-after (plist-get scope :date-after))
-        (date-before (plist-get scope :date-before)))
+        (date-before (plist-get scope :date-before))
+        (active-ids (cl-loop for backend in (agent-log--active-backend-instances)
+                             append (agent-log--active-session-ids backend))))
     (seq-filter
      (lambda (session)
        (let* ((sid (car session))
@@ -2353,7 +2387,8 @@ date range, and have a current summary in the INDEX."
               (project (agent-log--short-project (plist-get meta :project))))
          (and
           ;; Must have a summary.
-          (agent-log--session-real-summary-current-p session entry)
+          (agent-log--session-searchable-summary-current-p
+           session entry active-ids)
           ;; Project filter.
           (or (equal projects "all")
               (member project projects))
@@ -2667,7 +2702,7 @@ clickable links to the matching logs."
          (unsummarized (plist-get metadata :unsummarized))
          (summarized (plist-get metadata :summarized)))
     (when (zerop summarized)
-      (user-error "No sessions have current summaries; run `agent-log-summarize-sessions' first"))
+      (user-error "%s" (agent-log--search-no-summaries-message metadata)))
     (when (> unsummarized 0)
       (unless (y-or-n-p
                (format "%d session(s) lack current summaries and will be excluded. Continue? "
@@ -2688,6 +2723,19 @@ clickable links to the matching logs."
           (agent-log--search-scope-callback
            response query sessions index summarized
            (agent-log--search-cost info)))))))
+
+(defun agent-log--search-no-summaries-message (metadata)
+  "Return the user-facing search error for METADATA."
+  (let ((legacy-summaries (or (plist-get metadata :legacy-summaries) 0))
+        (empty-summaries (or (plist-get metadata :empty-summaries) 0)))
+    (cond
+     ((> legacy-summaries 0)
+      (format "%d existing session summaries predate freshness tracking; run `agent-log-summarize-sessions' to refresh them before search"
+              legacy-summaries))
+     ((> empty-summaries 0)
+      (format "No sessions have searchable summaries; %d current summaries are empty-session markers"
+              empty-summaries))
+     (t "No sessions have current summaries; run `agent-log-summarize-sessions' first"))))
 
 (defun agent-log--search-scope-callback
     (response query sessions index total stage1-cost)

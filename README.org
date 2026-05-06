@@ -401,7 +401,7 @@ The command ~agent-log-search~ searches your session history using natural langu
 
 The result is displayed in a =*agent-log-search*= buffer in ~agent-log-search-mode~ ([[#h:agent-log-search-mode][~agent-log-search-mode~]]).  Session references in the narrative are rendered as clickable links.  Pressing =RET= or clicking on a link opens the corresponding rendered session log.
 
-Before starting, the command checks for sessions without current summaries.  If any exist, it warns the user that those sessions will be excluded and asks for confirmation.  If no sessions have current summaries at all, the command aborts with a message to run ~agent-log-summarize-sessions~ first ([[#h:summary-generation][Summary generation]]).
+Before starting, the command checks for sessions without current summaries.  If any exist, it warns the user that those sessions will be excluded and asks for confirmation.  If no sessions have searchable current summaries at all, the command aborts with a message to run ~agent-log-summarize-sessions~ first ([[#h:summary-generation][Summary generation]]).  When existing summaries predate freshness tracking, the error says that those legacy summaries need refreshing rather than reporting them as never summarized.
 
 Before stage 2, the estimated token cost is compared against ~agent-log-search-budget~ ([[#h:ai-search-options][AI search options]]).  If the estimate exceeds the threshold, the user is asked to confirm.
 

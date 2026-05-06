@@ -1219,6 +1219,97 @@ the message content (string or list)."
                           (list session) index))
                  1)))))
 
+;;;;; Search metadata
+
+(ert-deftest agent-log-test-search-gather-metadata/legacy-summary ()
+  "Counts legacy summaries separately from searchable current summaries."
+  (agent-log-test--with-temp-dir
+    (cl-letf (((symbol-function 'agent-log--active-backend-instances)
+               (lambda () nil)))
+      (let* ((jsonl-content "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"hello\"}}\n")
+             (jsonl-path (agent-log-test--write-file "s1.jsonl" jsonl-content))
+             (session (list "s1" :file jsonl-path
+                            :backend agent-log-test--claude-backend
+                            :timestamp 1700000000000
+                            :project "/tmp/project"))
+             (index (make-hash-table :test #'equal)))
+        (puthash "s1" (list :summary "Old summary"
+                            :summary-oneline "Old summary")
+                 index)
+        (let ((metadata (agent-log--search-gather-metadata
+                         (list session) index)))
+          (should (= (plist-get metadata :summarized) 0))
+          (should (= (plist-get metadata :unsummarized) 1))
+          (should (= (plist-get metadata :legacy-summaries) 1))
+          (should (= (plist-get metadata :empty-summaries) 0)))))))
+
+(ert-deftest agent-log-test-search-gather-metadata/current-empty-summary ()
+  "Counts current empty-session markers without treating them as unsummarized."
+  (agent-log-test--with-temp-dir
+    (cl-letf (((symbol-function 'agent-log--active-backend-instances)
+               (lambda () nil)))
+      (let* ((jsonl-path (agent-log-test--write-file "s1.jsonl" ""))
+             (session (list "s1" :file jsonl-path
+                            :backend agent-log-test--claude-backend
+                            :timestamp 1700000000000
+                            :project "/tmp/project"))
+             (index (make-hash-table :test #'equal)))
+        (puthash "s1" (list :summary agent-log--no-conversation-sentinel
+                            :summary-oneline agent-log--no-conversation-sentinel
+                            :summary-conversation-hash
+                            (agent-log--session-conversation-hash
+                             (cdr session)))
+                 index)
+        (let ((metadata (agent-log--search-gather-metadata
+                         (list session) index)))
+          (should (= (plist-get metadata :summarized) 0))
+          (should (= (plist-get metadata :unsummarized) 0))
+          (should (= (plist-get metadata :legacy-summaries) 0))
+          (should (= (plist-get metadata :empty-summaries) 1)))))))
+
+(ert-deftest agent-log-test-search-apply-scope/excludes-active-sessions ()
+  "Uses the same active-session exclusion as search metadata."
+  (agent-log-test--with-temp-dir
+    (let* ((content "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"hello\"}}\n")
+           (s1-path (agent-log-test--write-file "s1.jsonl" content))
+           (s2-path (agent-log-test--write-file "s2.jsonl" content))
+           (s1 (list "s1" :file s1-path
+                     :backend agent-log-test--claude-backend
+                     :timestamp 1700000000000
+                     :project "/tmp/project"))
+           (s2 (list "s2" :file s2-path
+                     :backend agent-log-test--claude-backend
+                     :timestamp 1700000001000
+                     :project "/tmp/project"))
+           (sessions (list s1 s2))
+           (index (make-hash-table :test #'equal))
+           (scope (list :projects "all" :date-after nil :date-before nil)))
+      (puthash "s1" (list :summary "Active"
+                          :summary-oneline "Active"
+                          :summary-conversation-hash
+                          (agent-log--session-conversation-hash (cdr s1)))
+               index)
+      (puthash "s2" (list :summary "Inactive"
+                          :summary-oneline "Inactive"
+                          :summary-conversation-hash
+                          (agent-log--session-conversation-hash (cdr s2)))
+               index)
+      (cl-letf (((symbol-function 'agent-log--active-backend-instances)
+                 (lambda () (list agent-log-test--claude-backend)))
+                ((symbol-function 'agent-log--active-session-ids)
+                 (lambda (_backend) '("s1"))))
+        (let ((metadata (agent-log--search-gather-metadata sessions index))
+              (filtered (agent-log--search-apply-scope sessions index scope)))
+          (should (= (plist-get metadata :summarized) 1))
+          (should (equal (mapcar #'car filtered) '("s2"))))))))
+
+(ert-deftest agent-log-test-search-no-summaries-message/legacy ()
+  "Explains that legacy summaries need refreshing."
+  (let ((message (agent-log--search-no-summaries-message
+                  (list :legacy-summaries 2 :empty-summaries 0))))
+    (should (string-match-p "predate freshness tracking" message))
+    (should (string-match-p "agent-log-summarize-sessions" message))))
+
 ;;;;; Claude session titles
 
 (ert-deftest agent-log-test-claude-latest-custom-title ()
