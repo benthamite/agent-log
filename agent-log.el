@@ -146,6 +146,10 @@ Returns a plist with :project and :date.")
 (cl-defgeneric agent-log--extract-message-text (backend content)
   "Extract plain text from message CONTENT for BACKEND.")
 
+(cl-defgeneric agent-log--summary-line-candidate-p (backend line)
+  "Return non-nil if LINE may contain summary-relevant text for BACKEND."
+  (:method ((_backend agent-log-backend) _line) t))
+
 (cl-defgeneric agent-log--active-session-ids (backend)
   "Return a list of session IDs for live sessions under BACKEND.")
 
@@ -1701,7 +1705,7 @@ preceding separator."
 Used to distinguish \"already processed, nothing to summarize\" from
 \"not yet summarized\" (nil).")
 
-(defconst agent-log--summary-conversation-hash-version 1
+(defconst agent-log--summary-conversation-hash-version 2
   "Version tag for hashes stored in `:summary-conversation-hash'.")
 
 (defconst agent-log--summary-system-message
@@ -1756,6 +1760,42 @@ BACKEND is used for filtering and text extraction."
       (when-let* ((text (agent-log--conversation-entry-text entry backend)))
         (push text parts)))
     (string-join (nreverse parts))))
+
+(defun agent-log--conversation-text-from-file (file backend)
+  "Extract full summary text from JSONL FILE using BACKEND.
+Only summary-relevant lines are parsed, so large tool snapshots do not
+block summary generation."
+  (let ((backend (or backend (agent-log--default-backend)))
+        (parts nil))
+    (with-temp-buffer
+      (insert-file-contents file)
+      (goto-char (point-min))
+      (while (not (eobp))
+        (let* ((beg (line-beginning-position))
+               (end (line-end-position))
+               (prefix (buffer-substring-no-properties
+                        beg (min end (+ beg 2048)))))
+          (when (and (< beg end)
+                     (or (null backend)
+                         (agent-log--summary-line-candidate-p backend prefix)))
+            (let ((line (buffer-substring-no-properties beg end)))
+              (when-let* ((entry (condition-case nil
+                                    (agent-log--parse-json-line line)
+                                  (error nil))))
+                (dolist (normalized (agent-log--summary-normalize-entry
+                                     entry backend))
+                  (when-let* ((text (agent-log--conversation-entry-text
+                                     normalized backend)))
+                    (push text parts)))))))
+        (forward-line 1)))
+    (string-join (nreverse parts))))
+
+(defun agent-log--summary-normalize-entry (entry backend)
+  "Return normalized summary entries for raw ENTRY and BACKEND."
+  (if backend
+      (agent-log--filter-conversation
+       backend (agent-log--normalize-entries backend (list entry)))
+    (list entry)))
 
 (defun agent-log--conversation-entry-text (entry backend)
   "Return the summary text for ENTRY using BACKEND."
@@ -1827,11 +1867,25 @@ Sessions with a live agent process are excluded by session ID."
   "Return non-nil if SESSION has a current summary in ENTRY."
   (and entry
        (plist-get entry :summary-oneline)
-       (when-let* ((stored-hash (plist-get entry :summary-conversation-hash)))
-         (condition-case nil
-             (equal stored-hash
-                    (agent-log--session-conversation-hash (cdr session)))
-           (error nil)))))
+       (agent-log--summary-hash-current-version-p
+        (plist-get entry :summary-conversation-hash))
+       (agent-log--summary-file-state-current-p session entry)))
+
+(defun agent-log--summary-hash-current-version-p (hash)
+  "Return non-nil if HASH uses the current summary hash version."
+  (and (stringp hash)
+       (string-prefix-p
+        (format "v%d:" agent-log--summary-conversation-hash-version)
+        hash)))
+
+(defun agent-log--summary-file-state-current-p (session entry)
+  "Return non-nil if ENTRY was summarized at SESSION's current file state."
+  (pcase-let ((`(,size . ,mtime) (agent-log--session-jsonl-state
+                                  (cdr session))))
+    (and size
+         mtime
+         (equal size (plist-get entry :summary-jsonl-size))
+         (equal mtime (plist-get entry :summary-jsonl-mtime)))))
 
 (defun agent-log--session-real-summary-current-p (session entry)
   "Return non-nil if SESSION has a current non-sentinel summary in ENTRY."
@@ -1848,7 +1902,8 @@ Sessions with a live agent process are excluded by session ID."
 (defun agent-log--session-legacy-real-summary-p (entry)
   "Return non-nil if ENTRY stores a real summary without a freshness hash."
   (and (agent-log--session-stored-real-summary-p entry)
-       (not (plist-get entry :summary-conversation-hash))))
+       (not (agent-log--summary-hash-current-version-p
+             (plist-get entry :summary-conversation-hash)))))
 
 (defun agent-log--session-searchable-summary-current-p
     (session entry active-ids)
@@ -1861,10 +1916,16 @@ excluded from search until their logs settle."
 (defun agent-log--session-conversation-hash (metadata)
   "Return the current conversation hash for session METADATA."
   (let* ((backend (plist-get metadata :backend))
-         (jsonl-file (plist-get metadata :file))
-         (entries (agent-log--parse-and-normalize jsonl-file backend)))
+         (jsonl-file (plist-get metadata :file)))
     (agent-log--conversation-text-hash
-     (agent-log--conversation-text entries backend))))
+     (agent-log--conversation-text-from-file jsonl-file backend))))
+
+(defun agent-log--session-jsonl-state (metadata)
+  "Return (SIZE . MTIME) for the JSONL file in METADATA."
+  (when-let* ((file (plist-get metadata :file))
+              (attrs (file-attributes file)))
+    (cons (file-attribute-size attrs)
+          (float-time (file-attribute-modification-time attrs)))))
 
 (defun agent-log--conversation-text-hash (text)
   "Return a versioned SHA-256 hash for conversation TEXT."
@@ -1896,7 +1957,8 @@ If summary generation is already in progress, stop it instead."
         (cl-incf agent-log--summarize-generation)
         (message "Generating summaries for %d session(s)... (run again to stop)"
                  (length pending))
-        (agent-log--summarize-next
+        (run-with-timer
+         0 nil #'agent-log--summarize-next
          pending 0 (length pending)
          agent-log--summarize-generation))))))
 
@@ -1936,21 +1998,25 @@ nothing."
              (jsonl-file (plist-get meta :file)))
         (condition-case err
             (let* ((backend (plist-get meta :backend))
-                   (entries (agent-log--parse-and-normalize jsonl-file backend))
-                   (full-text (agent-log--conversation-text entries backend))
+                   (full-text (agent-log--conversation-text-from-file
+                               jsonl-file backend))
                    (text (agent-log--limit-summary-text full-text))
                    (conversation-hash
-                    (agent-log--conversation-text-hash full-text)))
+                    (agent-log--conversation-text-hash full-text))
+                   (jsonl-state (agent-log--session-jsonl-state meta)))
               (if (string-empty-p (string-trim text))
                   (progn
                     (agent-log--index-update-props
                      sid (list :summary agent-log--no-conversation-sentinel
                                :summary-oneline agent-log--no-conversation-sentinel
-                               :summary-conversation-hash conversation-hash))
+                               :summary-conversation-hash conversation-hash
+                               :summary-jsonl-size (car jsonl-state)
+                               :summary-jsonl-mtime (cdr jsonl-state)))
                     (agent-log--summarize-next
                      (cdr remaining) (1+ done) total gen))
                 (agent-log--summarize-one
-                 sid meta text conversation-hash remaining done total gen)))
+                 sid meta text conversation-hash jsonl-state
+                 remaining done total gen)))
           (error
            (message "Failed to summarize %s: %s"
                     sid (error-message-string err))
@@ -1962,12 +2028,13 @@ nothing."
                            (1+ done) total gen)))))))
 
 (defun agent-log--summarize-one
-    (sid meta text conversation-hash remaining done total gen)
+    (sid meta text conversation-hash jsonl-state remaining done total gen)
   "Send a gptel request to summarize session SID.
 META is the session metadata plist.  TEXT is the extracted
 conversation text.  CONVERSATION-HASH fingerprints the full
-conversation.  REMAINING, DONE, TOTAL, and GEN are chain-continuation
-state for `agent-log--summarize-next'."
+conversation.  JSONL-STATE is the source file state summarized.
+REMAINING, DONE, TOTAL, and GEN are chain-continuation state for
+`agent-log--summarize-next'."
   (let* ((prompt (agent-log--build-summary-prompt text))
          (resolved (agent-log--resolve-summary-backend-and-model))
          (gptel-backend (car resolved))
@@ -1984,7 +2051,7 @@ state for `agent-log--summarize-next'."
       :callback
       (lambda (response info)
         (agent-log--summarize-callback
-         response info request-id sid conversation-hash
+         response info request-id sid conversation-hash jsonl-state
          remaining done total gen)))))
 
 (defun agent-log--summarize-display-name (meta text sid)
@@ -1999,29 +2066,32 @@ state for `agent-log--summarize-next'."
       display)))
 
 (defun agent-log--summarize-callback
-    (response info request-id sid conversation-hash remaining done total gen)
+    (response info request-id sid conversation-hash jsonl-state
+              remaining done total gen)
   "Handle the gptel RESPONSE for a summary request.
 INFO is the gptel callback info plist.  REQUEST-ID identifies the
 in-flight request.  SID is the session ID.  CONVERSATION-HASH
-fingerprints the summarized content.  REMAINING, DONE, TOTAL, and GEN
-are chain-continuation state.  Non-string responses are ignored; only
-the final string response or an error consumes the request guard and
+fingerprints the summarized content.  JSONL-STATE is the source file
+state summarized.  REMAINING, DONE, TOTAL, and GEN are
+chain-continuation state.  Non-string responses are ignored; only the
+final string response or an error consumes the request guard and
 advances the chain."
   (when (eq agent-log--summarize-request-id request-id)
     (cond
      ((stringp response)
       (agent-log--summarize-handle-success
-       response sid conversation-hash remaining done total gen))
+       response sid conversation-hash jsonl-state remaining done total gen))
      ((null response)
       (agent-log--summarize-handle-failure
        info sid remaining done total gen)))))
 
 (defun agent-log--summarize-handle-success
-    (response sid conversation-hash remaining done total gen)
+    (response sid conversation-hash jsonl-state remaining done total gen)
   "Record the successful summary RESPONSE for session SID.
 RESPONSE is the LLM's reply.  CONVERSATION-HASH fingerprints the full
-conversation.  REMAINING, DONE, TOTAL, and GEN are chain-continuation
-state passed to `agent-log--summarize-next' for the next session."
+conversation.  JSONL-STATE is the source file state summarized.
+REMAINING, DONE, TOTAL, and GEN are chain-continuation state passed to
+`agent-log--summarize-next' for the next session."
   (setq agent-log--summarize-request-id nil
         agent-log--summarize-consecutive-failures 0)
   (when (and agent-log--summarize-active
@@ -2034,7 +2104,9 @@ state passed to `agent-log--summarize-next' for the next session."
             (agent-log--index-update-props
              sid (list :summary (car parsed)
                        :summary-oneline (cdr parsed)
-                       :summary-conversation-hash conversation-hash))
+                       :summary-conversation-hash conversation-hash
+                       :summary-jsonl-size (car jsonl-state)
+                       :summary-jsonl-mtime (cdr jsonl-state)))
             (when agent-log-auto-rename-sessions
               (when (require 'agent-log-claude nil t)
                 (agent-log-claude--maybe-rename-session

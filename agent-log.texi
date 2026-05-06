@@ -450,7 +450,7 @@ Each summary consists of two parts: a one-line summary (up to 80 characters) use
 
 Progress is displayed in the echo area, showing which session is being summarized and the model in use.  If you invoke @code{agent-log-summarize-sessions} while summarization is already running, it stops the current run instead.  You can also stop explicitly with @code{agent-log-stop-summarize-sessions}.
 
-Summaries are persisted in the index file together with a fingerprint of the conversation text they describe, so they survive across Emacs sessions and are refreshed only when the underlying conversation changes.  If you resume a previously summarized session and continue working, the next summarization run treats the old summary as stale and generates a replacement.  Legacy summaries created before this fingerprint existed are refreshed once.  When you open a session that has a current summary, the paragraph summary is inserted as a blockquote below the session header.
+Summaries are persisted in the index file together with a fingerprint and source file state for the conversation text they describe, so they survive across Emacs sessions and are refreshed only when the underlying conversation changes.  If you resume a previously summarized session and continue working, the next summarization run treats the old summary as stale and generates a replacement.  Legacy summaries created before this freshness metadata existed are refreshed once.  When you open a session that has a current summary, the paragraph summary is inserted as a blockquote below the session header.
 
 @menu
 * Automatic sync and summarization on session end::

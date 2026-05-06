@@ -280,6 +280,10 @@ Tool-use and thinking blocks are ignored."
       (string-join (nreverse texts) "\n")))
    (t "")))
 
+(cl-defmethod agent-log--summary-line-candidate-p ((_backend agent-log-claude) line)
+  "Return non-nil if LINE may contain Claude summary text."
+  (string-match-p "\"type\":\"\\(?:user\\|assistant\\)\"" line))
+
 ;;;;;; Active sessions
 
 (cl-defmethod agent-log--active-session-ids ((_backend agent-log-claude))

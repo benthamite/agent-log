@@ -53,6 +53,17 @@ the message content (string or list)."
   "Build an assistant conversation entry with CONTENT."
   (agent-log-test--make-entry "assistant" "assistant" content timestamp))
 
+(defun agent-log-test--summary-entry (metadata oneline &optional summary)
+  "Return a current summary index entry for METADATA and ONELINE.
+SUMMARY defaults to ONELINE."
+  (pcase-let ((`(,size . ,mtime) (agent-log--session-jsonl-state metadata)))
+    (list :summary (or summary oneline)
+          :summary-oneline oneline
+          :summary-conversation-hash
+          (agent-log--session-conversation-hash metadata)
+          :summary-jsonl-size size
+          :summary-jsonl-mtime mtime)))
+
 ;;;;; JSONL parsing
 
 (ert-deftest agent-log-test-parse-json-line/simple-object ()
@@ -1118,6 +1129,22 @@ the message content (string or list)."
       (should (string-match-p "User: hello" result))
       (should-not (string-match-p "progress" result)))))
 
+(ert-deftest agent-log-test-conversation-text-from-file/skips-claude-noise ()
+  "Skips non-conversation Claude lines before JSON parsing."
+  (agent-log-test--with-temp-dir
+    (let* ((content (concat "{not-json " (make-string 1000 ?x) "}\n"
+                            "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"hello\"}}\n"))
+           (path (agent-log-test--write-file "s1.jsonl" content)))
+      (cl-letf (((symbol-function 'agent-log--parse-json-line)
+                 (lambda (line)
+                   (when (string-prefix-p "{not-json" line)
+                     (error "noise line should not be parsed"))
+                   (json-parse-string line :object-type 'plist
+                                      :array-type 'list))))
+        (should (equal (agent-log--conversation-text-from-file
+                        path agent-log-test--claude-backend)
+                       "User: hello\n\n"))))))
+
 ;;;;; Build summary prompt
 
 (ert-deftest agent-log-test-build-summary-prompt ()
@@ -1161,11 +1188,8 @@ the message content (string or list)."
            (jsonl-path (agent-log-test--write-file "s1.jsonl" jsonl-content))
            (s1 (list "s1" :file jsonl-path :backend agent-log-test--claude-backend))
            (sessions (list s1 (list "s2" :file "/b.jsonl")))
-           (index (make-hash-table :test #'equal))
-           (hash (agent-log--session-conversation-hash (cdr s1))))
-      (puthash "s1" (list :summary-oneline "A test"
-                          :summary-conversation-hash hash)
-               index)
+           (index (make-hash-table :test #'equal)))
+      (puthash "s1" (agent-log-test--summary-entry (cdr s1) "A test") index)
       (should (= (length (agent-log--sessions-needing-summary sessions index)) 1))
       (should (equal (caar (agent-log--sessions-needing-summary sessions index)) "s2")))))
 
@@ -1179,15 +1203,24 @@ the message content (string or list)."
            (s2 (list "s2" :file s2-path :backend agent-log-test--claude-backend))
            (sessions (list s1 s2))
            (index (make-hash-table :test #'equal)))
-      (puthash "s1" (list :summary-oneline "A"
-                          :summary-conversation-hash
-                          (agent-log--session-conversation-hash (cdr s1)))
-               index)
-      (puthash "s2" (list :summary-oneline "B"
-                          :summary-conversation-hash
-                          (agent-log--session-conversation-hash (cdr s2)))
-               index)
+      (puthash "s1" (agent-log-test--summary-entry (cdr s1) "A") index)
+      (puthash "s2" (agent-log-test--summary-entry (cdr s2) "B") index)
       (should (null (agent-log--sessions-needing-summary sessions index))))))
+
+(ert-deftest agent-log-test-sessions-needing-summary/current-check-is-cheap ()
+  "Does not parse session JSONL while checking current summaries."
+  (agent-log-test--with-temp-dir
+    (let* ((jsonl-content "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"hello\"}}\n")
+           (jsonl-path (agent-log-test--write-file "s1.jsonl" jsonl-content))
+           (session (list "s1" :file jsonl-path
+                          :backend agent-log-test--claude-backend))
+           (index (make-hash-table :test #'equal)))
+      (puthash "s1" (agent-log-test--summary-entry (cdr session) "A") index)
+      (cl-letf (((symbol-function 'agent-log--conversation-text-from-file)
+                 (lambda (&rest _)
+                   (error "currentness check should not parse JSONL"))))
+        (should (null (agent-log--sessions-needing-summary
+                       (list session) index)))))))
 
 (ert-deftest agent-log-test-sessions-needing-summary/missing-hash-stale ()
   "Treats legacy summaries without a conversation hash as stale."
@@ -1209,12 +1242,10 @@ the message content (string or list)."
            (jsonl-path (agent-log-test--write-file "s1.jsonl" old-content))
            (session (list "s1" :file jsonl-path
                           :backend agent-log-test--claude-backend))
-           (old-hash (agent-log--session-conversation-hash (cdr session)))
+           (old-entry (agent-log-test--summary-entry (cdr session) "A"))
            (index (make-hash-table :test #'equal)))
       (agent-log-test--write-file "s1.jsonl" new-content)
-      (puthash "s1" (list :summary-oneline "A"
-                          :summary-conversation-hash old-hash)
-               index)
+      (puthash "s1" old-entry index)
       (should (= (length (agent-log--sessions-needing-summary
                           (list session) index))
                  1)))))
@@ -1254,11 +1285,8 @@ the message content (string or list)."
                             :timestamp 1700000000000
                             :project "/tmp/project"))
              (index (make-hash-table :test #'equal)))
-        (puthash "s1" (list :summary agent-log--no-conversation-sentinel
-                            :summary-oneline agent-log--no-conversation-sentinel
-                            :summary-conversation-hash
-                            (agent-log--session-conversation-hash
-                             (cdr session)))
+        (puthash "s1" (agent-log-test--summary-entry
+                       (cdr session) agent-log--no-conversation-sentinel)
                  index)
         (let ((metadata (agent-log--search-gather-metadata
                          (list session) index)))
@@ -1284,16 +1312,8 @@ the message content (string or list)."
            (sessions (list s1 s2))
            (index (make-hash-table :test #'equal))
            (scope (list :projects "all" :date-after nil :date-before nil)))
-      (puthash "s1" (list :summary "Active"
-                          :summary-oneline "Active"
-                          :summary-conversation-hash
-                          (agent-log--session-conversation-hash (cdr s1)))
-               index)
-      (puthash "s2" (list :summary "Inactive"
-                          :summary-oneline "Inactive"
-                          :summary-conversation-hash
-                          (agent-log--session-conversation-hash (cdr s2)))
-               index)
+      (puthash "s1" (agent-log-test--summary-entry (cdr s1) "Active") index)
+      (puthash "s2" (agent-log-test--summary-entry (cdr s2) "Inactive") index)
       (cl-letf (((symbol-function 'agent-log--active-backend-instances)
                  (lambda () (list agent-log-test--claude-backend)))
                 ((symbol-function 'agent-log--active-session-ids)

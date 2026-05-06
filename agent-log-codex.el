@@ -477,6 +477,12 @@ Tool-use, tool-result, and thinking blocks are ignored."
       (string-join (nreverse texts) "\n")))
    (t "")))
 
+(cl-defmethod agent-log--summary-line-candidate-p ((_backend agent-log-codex) line)
+  "Return non-nil if LINE may contain Codex summary text."
+  (and (string-match-p "\"type\":\"response_item\"" line)
+       (string-match-p "\"type\":\"message\"" line)
+       (string-match-p "\"role\":\"\\(?:user\\|assistant\\)\"" line)))
+
 ;;;;;; Active sessions
 
 (cl-defmethod agent-log--active-session-ids ((_backend agent-log-codex))
