@@ -504,7 +504,7 @@ The command @code{agent-log-search} searches your session history using natural 
 
 The result is displayed in a @samp{*agent-log-search*} buffer in @code{agent-log-search-mode} (@ref{@code{agent-log-search-mode}}).  Session references in the narrative are rendered as clickable links.  Pressing @samp{RET} or clicking on a link opens the corresponding rendered session log.
 
-Before starting, the command checks index metadata without parsing session logs.  If any sessions lack current summaries, it warns the user that those sessions will be excluded and asks for confirmation.  If no sessions have searchable current summaries at all, the command aborts with a message to run @code{agent-log-summarize-sessions} first.  When existing summaries predate freshness tracking, the error says that those legacy summaries need refreshing rather than reporting them as never summarized.
+Before starting, the command preserves compatible legacy summaries by stamping missing summary file-state metadata without parsing session logs.  If any sessions still lack current summaries, it warns the user that those sessions will be excluded and asks for confirmation.  If no sessions have searchable current summaries at all, the command aborts with a message to run @code{agent-log-summarize-sessions} first.  When existing summaries predate freshness tracking but cannot be preserved, the error says that those legacy summaries need refreshing rather than reporting them as never summarized.
 
 Before stage 2, the estimated token cost is compared against @code{agent-log-search-budget} (@ref{AI search options}).  If the estimate exceeds the threshold, the user is asked to confirm.
 
@@ -764,7 +764,7 @@ The rendered directory mirrors the project structure:
   _index.el
 @end example
 
-Each @samp{.md} file contains HTML-comment front matter (session ID, source path, rendered timestamp, JSONL size) followed by the full conversation rendered as Markdown.  The @samp{_index.el} file is a hash table mapping session IDs to metadata (rendered file path, JSONL size, and optionally a summary plus the conversation fingerprint and JSONL file state it describes).  Summary commands use that metadata to distinguish current summaries, legacy summaries that can be preserved without another LLM request during per-session processing, and stale summaries that need to be regenerated.
+Each @samp{.md} file contains HTML-comment front matter (session ID, source path, rendered timestamp, JSONL size) followed by the full conversation rendered as Markdown.  The @samp{_index.el} file is a hash table mapping session IDs to metadata (rendered file path, JSONL size, and optionally a summary plus the conversation fingerprint and JSONL file state it describes).  Summary commands use that metadata to distinguish current summaries, legacy summaries that can be preserved without another LLM request, and stale summaries that need to be regenerated.  Legacy summaries that predate summary file-state tracking are preserved by recording the current JSONL size and modification time; later JSONL changes invalidate them normally.
 
 @node Rendering pipeline
 @section Rendering pipeline
