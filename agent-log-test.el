@@ -1253,8 +1253,8 @@ SUMMARY defaults to ONELINE."
       (puthash "s1" (list :summary-oneline "A") index)
       (should (= (length (agent-log--sessions-needing-summary sessions index)) 1)))))
 
-(ert-deftest agent-log-test-sessions-needing-summary/preserved-legacy-current ()
-  "Treats preserved legacy summaries as current until the file changes."
+(ert-deftest agent-log-test-sessions-needing-summary/no-hash-preserved-stale ()
+  "Treats no-hash legacy summaries as stale even if preservation was stamped."
   (agent-log-test--with-temp-dir
     (let* ((jsonl-content "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"hello\"}}\n")
            (jsonl-path (agent-log-test--write-file "s1.jsonl" jsonl-content))
@@ -1268,12 +1268,6 @@ SUMMARY defaults to ONELINE."
                             :summary-jsonl-size size
                             :summary-jsonl-mtime mtime)
                  index))
-      (should (null (agent-log--sessions-needing-summary
-                     (list session) index)))
-      (agent-log-test--write-file
-       "s1.jsonl"
-       (concat jsonl-content
-               "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"new\"}]}}\n"))
       (should (= (length (agent-log--sessions-needing-summary
                           (list session) index))
                  1)))))
@@ -1296,7 +1290,7 @@ SUMMARY defaults to ONELINE."
                  1)))))
 
 (ert-deftest agent-log-test-upgrade-summary-index/v1-current ()
-  "Preserves a v1 summary entry instead of re-summarizing it."
+  "Upgrades a matching v1 summary instead of re-summarizing it."
   (agent-log-test--with-temp-dir
     (let* ((content "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"hello\"}}\n")
            (jsonl-path (agent-log-test--write-file "s1.jsonl" content))
@@ -1310,16 +1304,37 @@ SUMMARY defaults to ONELINE."
       (should (= (agent-log--upgrade-summary-index (list session) index) 1))
       (let ((entry (gethash "s1" index)))
         (should (agent-log--session-summary-current-p session entry))
-        (should (plist-get entry :summary-legacy-preserved))
-        (should (agent-log--summary-hash-version-p
-                 (plist-get entry :summary-conversation-hash) 1))
+        (should-not (plist-get entry :summary-legacy-preserved))
+        (should (agent-log--summary-hash-current-version-p
+                 (plist-get entry :summary-conversation-hash)))
         (should (plist-member entry :summary-jsonl-size))
         (should (plist-member entry :summary-jsonl-mtime)))
       (should (null (agent-log--sessions-needing-summary
                      (list session) index))))))
 
-(ert-deftest agent-log-test-upgrade-summary-index/no-hash-current ()
-  "Preserves legacy summaries without conversation hashes."
+(ert-deftest agent-log-test-upgrade-summary-index/v1-full-parser-fallback ()
+  "Upgrades v1 summaries when fast extraction cannot prove currentness."
+  (agent-log-test--with-temp-dir
+    (let* ((content "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"hello\"}}\n")
+           (jsonl-path (agent-log-test--write-file "s1.jsonl" content))
+           (session (list "s1" :file jsonl-path
+                          :backend agent-log-test--claude-backend))
+           (index (make-hash-table :test #'equal))
+           (agent-log-rendered-directory agent-log-test--dir))
+      (puthash "s1" (agent-log-test--legacy-summary-entry
+                     (cdr session) "A")
+               index)
+      (cl-letf (((symbol-function 'agent-log--conversation-text-from-file)
+                 (lambda (&rest _) "")))
+        (should (= (agent-log--upgrade-summary-index (list session) index)
+                   1)))
+      (let ((entry (gethash "s1" index)))
+        (should (agent-log--session-summary-current-p session entry))
+        (should (agent-log--summary-hash-current-version-p
+                 (plist-get entry :summary-conversation-hash)))))))
+
+(ert-deftest agent-log-test-upgrade-summary-index/no-hash-stale ()
+  "Leaves no-hash legacy summaries stale so they are refreshed once."
   (agent-log-test--with-temp-dir
     (let* ((content "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"hello\"}}\n")
            (jsonl-path (agent-log-test--write-file "s1.jsonl" content))
@@ -1335,14 +1350,17 @@ SUMMARY defaults to ONELINE."
                  (lambda (&rest _)
                    (error "legacy preservation should not use full parser"))))
         (should (= (agent-log--upgrade-summary-index (list session) index)
-                   1)))
+                   0)))
       (let ((entry (gethash "s1" index)))
         (should (equal (plist-get entry :summary-oneline) "A"))
-        (should (plist-get entry :summary-legacy-preserved))
-        (should (agent-log--session-summary-current-p session entry))))))
+        (should-not (plist-get entry :summary-legacy-preserved))
+        (should-not (agent-log--session-summary-current-p session entry))
+        (should (= (length (agent-log--sessions-needing-summary
+                            (list session) index))
+                   1))))))
 
-(ert-deftest agent-log-test-upgrade-summary-index/preserved-change-stale ()
-  "Does not re-stamp preserved summaries after the file changes."
+(ert-deftest agent-log-test-upgrade-summary-index/upgraded-change-stale ()
+  "Does not re-stamp upgraded summaries after the file changes."
   (agent-log-test--with-temp-dir
     (let* ((old-content "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"hello\"}}\n")
            (new-content (concat old-content
@@ -1363,7 +1381,7 @@ SUMMARY defaults to ONELINE."
                  1)))))
 
 (ert-deftest agent-log-test-summarize-next/preserves-v1-summary ()
-  "Preserves matching v1 summaries inside the timer-driven worker."
+  "Upgrades matching v1 summaries inside the timer-driven worker."
   (agent-log-test--with-temp-dir
     (let* ((content "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"hello\"}}\n")
            (jsonl-path (agent-log-test--write-file "s1.jsonl" content))
@@ -1412,8 +1430,8 @@ SUMMARY defaults to ONELINE."
               (should (agent-log--session-summary-current-p session updated))))
         (setq agent-log--summarize-active nil)))))
 
-(ert-deftest agent-log-test-summarize-sessions/startup-upgrade-is-cheap ()
-  "Preserves legacy summaries before scheduling without parsing JSONL."
+(ert-deftest agent-log-test-summarize-sessions/startup-upgrade-preserves-v1 ()
+  "Preserves matching v1 summaries before scheduling LLM work."
   (agent-log-test--with-temp-dir
     (let* ((content "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"hello\"}}\n")
            (jsonl-path (agent-log-test--write-file "s1.jsonl" content))
@@ -1423,6 +1441,35 @@ SUMMARY defaults to ONELINE."
            (index (make-hash-table :test #'equal))
            (orig-require (symbol-function 'require))
            (agent-log--summarize-active nil))
+      (puthash "s1" (agent-log-test--legacy-summary-entry
+                     (cdr session) "A")
+               index)
+      (agent-log--write-index index)
+      (cl-letf (((symbol-function 'require)
+                 (lambda (feature &optional filename noerror)
+                   (if (eq feature 'gptel)
+                       t
+                     (funcall orig-require feature filename noerror))))
+                ((symbol-function 'agent-log--read-all-sessions)
+                 (lambda () (list session)))
+                ((symbol-function 'run-with-timer)
+                 (lambda (&rest _)
+                   (error "summary should not be scheduled"))))
+      (agent-log-summarize-sessions)
+      (should (agent-log--session-summary-current-p
+                 session (gethash "s1" (agent-log--read-index))))))))
+
+(ert-deftest agent-log-test-summarize-sessions/no-hash-startup-stays-pending ()
+  "Does not drop no-hash legacy summaries from the pending queue."
+  (agent-log-test--with-temp-dir
+    (let* ((content "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"hello\"}}\n")
+           (jsonl-path (agent-log-test--write-file "s1.jsonl" content))
+           (session (list "s1" :file jsonl-path
+                          :backend agent-log-test--claude-backend))
+           (agent-log-rendered-directory agent-log-test--dir)
+           (index (make-hash-table :test #'equal))
+           (orig-require (symbol-function 'require))
+           scheduled)
       (puthash "s1" (list :summary "A" :summary-oneline "A") index)
       (agent-log--write-index index)
       (cl-letf (((symbol-function 'require)
@@ -1432,18 +1479,14 @@ SUMMARY defaults to ONELINE."
                      (funcall orig-require feature filename noerror))))
                 ((symbol-function 'agent-log--read-all-sessions)
                  (lambda () (list session)))
-                ((symbol-function 'agent-log--conversation-text-from-file)
-                 (lambda (&rest _)
-                   (error "startup upgrade should not parse JSONL")))
-                ((symbol-function 'agent-log--parse-and-normalize)
-                 (lambda (&rest _)
-                   (error "startup upgrade should not use full parser")))
                 ((symbol-function 'run-with-timer)
-                 (lambda (&rest _)
-                   (error "summary should not be scheduled"))))
+                 (lambda (&rest args)
+                   (setq scheduled args))))
         (agent-log-summarize-sessions)
-        (should (agent-log--session-summary-current-p
-                 session (gethash "s1" (agent-log--read-index))))))))
+        (should scheduled)
+        (should (= (nth 5 scheduled) 1))
+        (should-not (agent-log--session-summary-current-p
+                     session (gethash "s1" (agent-log--read-index))))))))
 
 (ert-deftest agent-log-test-summarize-sessions/start-message-shows-archive-total ()
   "Reports pending updates separately from the archive size."
@@ -1501,8 +1544,8 @@ SUMMARY defaults to ONELINE."
                "pending update 1/20 (archive: 2571 sessions)"
                (car messages))))))
 
-(ert-deftest agent-log-test-search/startup-upgrade-is-cheap ()
-  "Preserves legacy summaries before search without parsing JSONL."
+(ert-deftest agent-log-test-search/startup-upgrade-preserves-v1 ()
+  "Preserves matching v1 summaries before search."
   (agent-log-test--with-temp-dir
     (let* ((content "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"hello\"}}\n")
            (jsonl-path (agent-log-test--write-file "s1.jsonl" content))
@@ -1514,7 +1557,9 @@ SUMMARY defaults to ONELINE."
            (index (make-hash-table :test #'equal))
            (orig-require (symbol-function 'require))
            requested)
-      (puthash "s1" (list :summary "A" :summary-oneline "A") index)
+      (puthash "s1" (agent-log-test--legacy-summary-entry
+                     (cdr session) "A")
+               index)
       (agent-log--write-index index)
       (cl-letf (((symbol-function 'require)
                  (lambda (feature &optional filename noerror)
@@ -1523,12 +1568,6 @@ SUMMARY defaults to ONELINE."
                      (funcall orig-require feature filename noerror))))
                 ((symbol-function 'agent-log--read-all-sessions)
                  (lambda () (list session)))
-                ((symbol-function 'agent-log--conversation-text-from-file)
-                 (lambda (&rest _)
-                   (error "startup upgrade should not parse JSONL")))
-                ((symbol-function 'agent-log--parse-and-normalize)
-                 (lambda (&rest _)
-                   (error "startup upgrade should not use full parser")))
                 ((symbol-function 'agent-log--resolve-search-scope-backend-and-model)
                  (lambda () (cons nil "test-model")))
                 ((symbol-function 'gptel-request)

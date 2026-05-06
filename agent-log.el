@@ -1868,9 +1868,8 @@ Sessions with a live agent process are excluded by session ID."
   (and entry
        (plist-get entry :summary-oneline)
        (agent-log--summary-file-state-current-p session entry)
-       (or (agent-log--summary-hash-current-version-p
-            (plist-get entry :summary-conversation-hash))
-           (plist-get entry :summary-legacy-preserved))))
+       (agent-log--summary-hash-current-version-p
+        (plist-get entry :summary-conversation-hash))))
 
 (defun agent-log--summary-hash-current-version-p (hash)
   "Return non-nil if HASH uses the current summary hash version."
@@ -1894,9 +1893,10 @@ Sessions with a live agent process are excluded by session ID."
 
 (defun agent-log--upgrade-summary-index (sessions index)
   "Upgrade compatible legacy summary entries in INDEX for SESSIONS.
-Return the number of upgraded entries.  Legacy summaries are stamped
-with current file state only when they have no previous summary file
-state, so future JSONL changes still invalidate them."
+Return the number of upgraded entries.
+Only v1 fingerprinted summaries can be upgraded without another LLM
+request; summaries without a conversation hash are intentionally left
+stale so they are refreshed once."
   (let ((upgraded 0))
     (dolist (session sessions)
       (let* ((sid (car session))
@@ -1912,17 +1912,38 @@ state, so future JSONL changes still invalidate them."
 
 (defun agent-log--legacy-summary-upgrade-props (session entry)
   "Return current summary freshness props for legacy SESSION ENTRY."
-  (when (and (agent-log--legacy-summary-entry-p entry)
-             (agent-log--legacy-summary-missing-state-p entry))
-    (when-let* ((state (agent-log--session-jsonl-state (cdr session))))
-      (list :summary-legacy-preserved t
-            :summary-jsonl-size (car state)
-            :summary-jsonl-mtime (cdr state)))))
+  (when (agent-log--legacy-summary-entry-p entry)
+    (let* ((metadata (cdr session))
+           (state (agent-log--session-jsonl-state metadata))
+           (text (agent-log--legacy-summary-current-text metadata entry)))
+      (when (and state text)
+        (agent-log--summary-upgrade-props-for-text entry text state)))))
 
-(defun agent-log--legacy-summary-missing-state-p (entry)
-  "Return non-nil if legacy ENTRY lacks summary file state."
-  (not (and (plist-member entry :summary-jsonl-size)
-            (plist-member entry :summary-jsonl-mtime))))
+(defun agent-log--legacy-summary-current-text (metadata entry)
+  "Return current conversation text for legacy ENTRY, or nil."
+  (or (agent-log--legacy-summary-current-text-fast metadata entry)
+      (agent-log--legacy-summary-current-text-full metadata entry)))
+
+(defun agent-log--legacy-summary-current-text-fast (metadata entry)
+  "Return fast-extracted current text for legacy ENTRY, or nil."
+  (condition-case nil
+      (let* ((backend (plist-get metadata :backend))
+             (file (plist-get metadata :file))
+             (text (agent-log--conversation-text-from-file file backend)))
+        (and (agent-log--legacy-summary-text-current-p entry text)
+             text))
+    (error nil)))
+
+(defun agent-log--legacy-summary-current-text-full (metadata entry)
+  "Return full-parser current text for legacy ENTRY, or nil."
+  (condition-case nil
+      (let* ((backend (plist-get metadata :backend))
+             (file (plist-get metadata :file))
+             (entries (agent-log--parse-and-normalize file backend))
+             (text (agent-log--conversation-text entries backend)))
+        (and (agent-log--legacy-summary-text-current-p entry text)
+             text))
+    (error nil)))
 
 (defun agent-log--summary-upgrade-props-for-text (entry text state)
   "Return freshness props when ENTRY matches current TEXT and STATE."
@@ -1931,10 +1952,12 @@ state, so future JSONL changes still invalidate them."
       (cond
        ((equal (plist-get entry :summary-conversation-hash) current-hash)
         (list :summary-conversation-hash current-hash
+              :summary-legacy-preserved nil
               :summary-jsonl-size (car state)
               :summary-jsonl-mtime (cdr state)))
        ((agent-log--legacy-summary-text-current-p entry text)
         (list :summary-conversation-hash current-hash
+              :summary-legacy-preserved nil
               :summary-jsonl-size (car state)
               :summary-jsonl-mtime (cdr state)))))))
 
@@ -1947,9 +1970,8 @@ state, so future JSONL changes still invalidate them."
 (defun agent-log--legacy-summary-entry-p (entry)
   "Return non-nil if ENTRY has legacy freshness data."
   (and (agent-log--session-stored-real-summary-p entry)
-       (not (agent-log--summary-hash-current-version-p
-             (plist-get entry :summary-conversation-hash)))
-       (not (plist-get entry :summary-legacy-preserved))))
+       (agent-log--summary-hash-version-p
+        (plist-get entry :summary-conversation-hash) 1)))
 
 (defun agent-log--session-real-summary-current-p (session entry)
   "Return non-nil if SESSION has a current non-sentinel summary in ENTRY."
