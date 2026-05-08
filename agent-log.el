@@ -1892,56 +1892,86 @@ Sessions with a live agent process are excluded by session ID."
          (equal mtime (plist-get entry :summary-jsonl-mtime)))))
 
 (defun agent-log--upgrade-summary-index (sessions index)
-  "Upgrade compatible legacy summary entries in INDEX for SESSIONS.
-Return the number of upgraded entries.
-Only v1 fingerprinted summaries can be upgraded without another LLM
-request; summaries without a conversation hash are intentionally left
-stale so they are refreshed once."
-  (let ((upgraded 0))
+  "Refresh compatible fingerprinted summary entries in INDEX for SESSIONS.
+Return the number of refreshed entries.
+This updates current-version summaries whose source file state is
+stale and upgrades compatible legacy v1 fingerprints.  Summaries
+without a conversation hash are intentionally left stale so they are
+refreshed once."
+  (let ((refreshed 0))
     (dolist (session sessions)
       (let* ((sid (car session))
              (entry (gethash sid index)))
-        (when-let* ((props (agent-log--legacy-summary-upgrade-props
+        (when-let* ((props (agent-log--summary-refresh-props
                             session entry)))
           (agent-log--index-merge index sid props)
-          (setq upgraded (1+ upgraded)))))
-    (when (> upgraded 0)
+          (setq refreshed (1+ refreshed)))))
+    (when (> refreshed 0)
       (agent-log--write-index index)
-      (message "agent-log: upgraded %d legacy summary entries" upgraded))
-    upgraded))
+      (message "agent-log: refreshed %d summary index entries" refreshed))
+    refreshed))
 
 (defun agent-log--legacy-summary-upgrade-props (session entry)
   "Return current summary freshness props for legacy SESSION ENTRY."
   (when (agent-log--legacy-summary-entry-p entry)
+    (agent-log--summary-refresh-props session entry)))
+
+(defun agent-log--summary-refresh-props (session entry)
+  "Return freshness props for SESSION ENTRY when its fingerprint matches.
+Only entries with a current-version or legacy v1 conversation hash can
+be refreshed without another LLM request."
+  (when (agent-log--summary-refreshable-entry-p session entry)
     (let* ((metadata (cdr session))
            (state (agent-log--session-jsonl-state metadata))
-           (text (agent-log--legacy-summary-current-text metadata entry)))
+           (text (agent-log--summary-current-text metadata entry)))
       (when (and state text)
         (agent-log--summary-upgrade-props-for-text entry text state)))))
 
+(defun agent-log--summary-refreshable-entry-p (session entry)
+  "Return non-nil if ENTRY may be refreshed for SESSION by fingerprint."
+  (and entry
+       (plist-get entry :summary-oneline)
+       (let ((hash (plist-get entry :summary-conversation-hash)))
+         (or (and (agent-log--summary-hash-current-version-p hash)
+                  (not (agent-log--summary-file-state-current-p
+                        session entry)))
+             (agent-log--legacy-summary-entry-p entry)))))
+
+(defun agent-log--summary-current-text (metadata entry)
+  "Return current conversation text for ENTRY, or nil when it changed."
+  (or (agent-log--summary-current-text-fast metadata entry)
+      (agent-log--summary-current-text-full metadata entry)))
+
 (defun agent-log--legacy-summary-current-text (metadata entry)
   "Return current conversation text for legacy ENTRY, or nil."
-  (or (agent-log--legacy-summary-current-text-fast metadata entry)
-      (agent-log--legacy-summary-current-text-full metadata entry)))
+  (agent-log--summary-current-text metadata entry))
 
 (defun agent-log--legacy-summary-current-text-fast (metadata entry)
   "Return fast-extracted current text for legacy ENTRY, or nil."
+  (agent-log--summary-current-text-fast metadata entry))
+
+(defun agent-log--summary-current-text-fast (metadata entry)
+  "Return fast-extracted current text for ENTRY, or nil."
   (condition-case nil
       (let* ((backend (plist-get metadata :backend))
              (file (plist-get metadata :file))
              (text (agent-log--conversation-text-from-file file backend)))
-        (and (agent-log--legacy-summary-text-current-p entry text)
+        (and (agent-log--summary-text-current-p entry text)
              text))
     (error nil)))
 
 (defun agent-log--legacy-summary-current-text-full (metadata entry)
   "Return full-parser current text for legacy ENTRY, or nil."
+  (agent-log--summary-current-text-full metadata entry))
+
+(defun agent-log--summary-current-text-full (metadata entry)
+  "Return full-parser current text for ENTRY, or nil."
   (condition-case nil
       (let* ((backend (plist-get metadata :backend))
              (file (plist-get metadata :file))
              (entries (agent-log--parse-and-normalize file backend))
              (text (agent-log--conversation-text entries backend)))
-        (and (agent-log--legacy-summary-text-current-p entry text)
+        (and (agent-log--summary-text-current-p entry text)
              text))
     (error nil)))
 
@@ -1963,9 +1993,20 @@ stale so they are refreshed once."
 
 (defun agent-log--legacy-summary-text-current-p (entry text)
   "Return non-nil if TEXT matches legacy summary ENTRY."
+  (and (agent-log--summary-hash-version-p
+        (plist-get entry :summary-conversation-hash) 1)
+       (agent-log--summary-text-current-p entry text)))
+
+(defun agent-log--summary-text-current-p (entry text)
+  "Return non-nil if TEXT matches ENTRY's stored conversation hash."
   (and (stringp text)
-       (equal (plist-get entry :summary-conversation-hash)
-              (agent-log--conversation-text-hash-with-version text 1))))
+       (let ((hash (plist-get entry :summary-conversation-hash)))
+         (cond
+          ((agent-log--summary-hash-current-version-p hash)
+           (equal hash (agent-log--conversation-text-hash text)))
+          ((agent-log--summary-hash-version-p hash 1)
+           (equal hash
+                  (agent-log--conversation-text-hash-with-version text 1)))))))
 
 (defun agent-log--legacy-summary-entry-p (entry)
   "Return non-nil if ENTRY has legacy freshness data."

@@ -1333,6 +1333,60 @@ SUMMARY defaults to ONELINE."
         (should (agent-log--summary-hash-current-version-p
                  (plist-get entry :summary-conversation-hash)))))))
 
+(ert-deftest agent-log-test-upgrade-summary-index/v2-stale-file-state-current ()
+  "Refreshes matching v2 summaries when only file-state metadata is stale."
+  (agent-log-test--with-temp-dir
+    (let* ((content "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"hello\"}}\n")
+           (jsonl-path (agent-log-test--write-file "s1.jsonl" content))
+           (session (list "s1" :file jsonl-path
+                          :backend agent-log-test--claude-backend))
+           (index (make-hash-table :test #'equal))
+           (agent-log-rendered-directory agent-log-test--dir)
+           (entry (agent-log-test--summary-entry (cdr session) "A")))
+      (plist-put entry :summary-jsonl-size -1)
+      (puthash "s1" entry index)
+      (should (= (agent-log--upgrade-summary-index (list session) index) 1))
+      (let ((updated (gethash "s1" index)))
+        (should (equal (plist-get updated :summary-oneline) "A"))
+        (should (agent-log--session-summary-current-p session updated))))))
+
+(ert-deftest agent-log-test-upgrade-summary-index/v2-changed-conversation-stale ()
+  "Does not refresh v2 summaries when the conversation hash changed."
+  (agent-log-test--with-temp-dir
+    (let* ((old-content "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"hello\"}}\n")
+           (new-content (concat old-content
+                                "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"new work\"}]}}\n"))
+           (jsonl-path (agent-log-test--write-file "s1.jsonl" old-content))
+           (session (list "s1" :file jsonl-path
+                          :backend agent-log-test--claude-backend))
+           (index (make-hash-table :test #'equal))
+           (agent-log-rendered-directory agent-log-test--dir)
+           (entry (agent-log-test--summary-entry (cdr session) "A")))
+      (agent-log-test--write-file "s1.jsonl" new-content)
+      (puthash "s1" entry index)
+      (should (= (agent-log--upgrade-summary-index (list session) index) 0))
+      (should (= (length (agent-log--sessions-needing-summary
+                          (list session) index))
+                 1)))))
+
+(ert-deftest agent-log-test-upgrade-summary-index/v2-empty-sentinel-current ()
+  "Refreshes matching empty-session sentinels when file-state metadata is stale."
+  (agent-log-test--with-temp-dir
+    (let* ((jsonl-path (agent-log-test--write-file "s1.jsonl" ""))
+           (session (list "s1" :file jsonl-path
+                          :backend agent-log-test--claude-backend))
+           (index (make-hash-table :test #'equal))
+           (agent-log-rendered-directory agent-log-test--dir)
+           (entry (agent-log-test--summary-entry
+                   (cdr session) agent-log--no-conversation-sentinel)))
+      (plist-put entry :summary-jsonl-size -1)
+      (puthash "s1" entry index)
+      (should (= (agent-log--upgrade-summary-index (list session) index) 1))
+      (let ((updated (gethash "s1" index)))
+        (should (equal (plist-get updated :summary-oneline)
+                       agent-log--no-conversation-sentinel))
+        (should (agent-log--session-summary-current-p session updated))))))
+
 (ert-deftest agent-log-test-upgrade-summary-index/no-hash-stale ()
   "Leaves no-hash legacy summaries stale so they are refreshed once."
   (agent-log-test--with-temp-dir
@@ -1455,8 +1509,37 @@ SUMMARY defaults to ONELINE."
                 ((symbol-function 'run-with-timer)
                  (lambda (&rest _)
                    (error "summary should not be scheduled"))))
-      (agent-log-summarize-sessions)
-      (should (agent-log--session-summary-current-p
+        (agent-log-summarize-sessions)
+        (should (agent-log--session-summary-current-p
+                 session (gethash "s1" (agent-log--read-index))))))))
+
+(ert-deftest agent-log-test-summarize-sessions/startup-refresh-preserves-v2 ()
+  "Preserves matching v2 summaries before scheduling LLM work."
+  (agent-log-test--with-temp-dir
+    (let* ((content "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"hello\"}}\n")
+           (jsonl-path (agent-log-test--write-file "s1.jsonl" content))
+           (session (list "s1" :file jsonl-path
+                          :backend agent-log-test--claude-backend))
+           (agent-log-rendered-directory agent-log-test--dir)
+           (index (make-hash-table :test #'equal))
+           (orig-require (symbol-function 'require))
+           (agent-log--summarize-active nil)
+           (entry (agent-log-test--summary-entry (cdr session) "A")))
+      (plist-put entry :summary-jsonl-size -1)
+      (puthash "s1" entry index)
+      (agent-log--write-index index)
+      (cl-letf (((symbol-function 'require)
+                 (lambda (feature &optional filename noerror)
+                   (if (eq feature 'gptel)
+                       t
+                     (funcall orig-require feature filename noerror))))
+                ((symbol-function 'agent-log--read-all-sessions)
+                 (lambda () (list session)))
+                ((symbol-function 'run-with-timer)
+                 (lambda (&rest _)
+                   (error "summary should not be scheduled"))))
+        (agent-log-summarize-sessions)
+        (should (agent-log--session-summary-current-p
                  session (gethash "s1" (agent-log--read-index))))))))
 
 (ert-deftest agent-log-test-summarize-sessions/no-hash-startup-stays-pending ()
@@ -1560,6 +1643,39 @@ SUMMARY defaults to ONELINE."
       (puthash "s1" (agent-log-test--legacy-summary-entry
                      (cdr session) "A")
                index)
+      (agent-log--write-index index)
+      (cl-letf (((symbol-function 'require)
+                 (lambda (feature &optional filename noerror)
+                   (if (eq feature 'gptel)
+                       t
+                     (funcall orig-require feature filename noerror))))
+                ((symbol-function 'agent-log--read-all-sessions)
+                 (lambda () (list session)))
+                ((symbol-function 'agent-log--resolve-search-scope-backend-and-model)
+                 (lambda () (cons nil "test-model")))
+                ((symbol-function 'gptel-request)
+                 (lambda (&rest _) (setq requested t))))
+        (agent-log-search "anything")
+        (should requested)
+        (should (agent-log--session-summary-current-p
+                 session (gethash "s1" (agent-log--read-index))))))))
+
+(ert-deftest agent-log-test-search/startup-refresh-preserves-v2 ()
+  "Preserves matching v2 summaries before search."
+  (agent-log-test--with-temp-dir
+    (let* ((content "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"hello\"}}\n")
+           (jsonl-path (agent-log-test--write-file "s1.jsonl" content))
+           (session (list "s1" :file jsonl-path
+                          :timestamp 1
+                          :project "/tmp/project"
+                          :backend agent-log-test--claude-backend))
+           (agent-log-rendered-directory agent-log-test--dir)
+           (index (make-hash-table :test #'equal))
+           (orig-require (symbol-function 'require))
+           (entry (agent-log-test--summary-entry (cdr session) "A"))
+           requested)
+      (plist-put entry :summary-jsonl-size -1)
+      (puthash "s1" entry index)
       (agent-log--write-index index)
       (cl-letf (((symbol-function 'require)
                  (lambda (feature &optional filename noerror)
