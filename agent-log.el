@@ -477,6 +477,9 @@ bytes are saved here and prepended to the next raw read.")
 (defvar agent-log--summarize-active nil
   "Non-nil when summary generation is in progress.")
 
+(defvar agent-log--summary-workers (make-hash-table :test #'equal)
+  "Background automatic summary workers keyed by session ID.")
+
 (defvar agent-log--summarize-stop nil
   "When non-nil, stop summary generation after the current request.")
 
@@ -2218,10 +2221,10 @@ not call it as a fallback."
     (agent-log-summarize-sessions)))
 
 (defun agent-log--maybe-summarize-session (session)
-  "Summarize SESSION if automatic summaries can run and it is stale."
-  (when (and (agent-log--auto-summarize-ready-p)
-             (agent-log--session-needs-summary-p session))
-    (agent-log--summarize-session session)))
+  "Summarize SESSION in a background process when configured."
+  (when (and agent-log-auto-summarize-sessions
+             (not agent-log--summarize-blocked-reason))
+    (agent-log--spawn-summary-worker (car session))))
 
 (defun agent-log--auto-summarize-ready-p ()
   "Return non-nil when automatic summary generation may start."
@@ -2254,6 +2257,63 @@ that identify the session which just stopped producing output."
   (run-with-timer
    0 nil #'agent-log--summarize-next
    (list session) 0 1 agent-log--summarize-generation))
+
+(defun agent-log--spawn-summary-worker (session-id)
+  "Start a background summary worker for SESSION-ID."
+  (unless (gethash session-id agent-log--summary-workers)
+    (let ((process
+           (make-process
+            :name (format "agent-log-summary-%s" session-id)
+            :buffer nil
+            :noquery t
+            :connection-type 'pipe
+            :command (agent-log--summary-worker-command session-id)
+            :sentinel (lambda (proc event)
+                        (agent-log--summary-worker-sentinel
+                         session-id proc event)))))
+      (puthash session-id process agent-log--summary-workers)
+      (message "agent-log: summarizing session %s in background" session-id))))
+
+(defun agent-log--summary-worker-command (session-id)
+  "Return the batch Emacs command for summarizing SESSION-ID."
+  (let ((emacs (expand-file-name invocation-name invocation-directory))
+        (init (and user-init-file (file-exists-p user-init-file)
+                   user-init-file)))
+    (append (list emacs "--batch")
+            (when init (list "--load" init))
+            (list "--eval" "(require 'agent-log)"
+                  "--eval"
+                  (format "(agent-log--batch-summarize-session %S)"
+                          session-id)))))
+
+(defun agent-log--summary-worker-sentinel (session-id proc event)
+  "Log completion of summary worker PROC for SESSION-ID with EVENT."
+  (when (memq (process-status proc) '(exit signal))
+    (let ((status (process-exit-status proc)))
+      (when (eq proc (gethash session-id agent-log--summary-workers))
+        (remhash session-id agent-log--summary-workers))
+      (message "agent-log: background summary finished (exit %d, %s)"
+               status (string-trim event)))))
+
+(defun agent-log--batch-summarize-session (session-id)
+  "Summarize SESSION-ID and wait for completion in batch Emacs."
+  (unless (require 'gptel nil t)
+    (user-error "Package `gptel' is required for summary generation"))
+  (let ((agent-log-auto-summarize-sessions t)
+        (agent-log--summarize-active nil)
+        (agent-log--summarize-blocked-reason nil))
+    (if-let* ((session (agent-log--find-session-by-id session-id)))
+        (progn
+          (if (agent-log--session-needs-summary-p session)
+              (progn
+                (agent-log--summarize-session session)
+                (while agent-log--summarize-active
+                  (accept-process-output nil 1)))
+            (message "agent-log: session %s already has a current summary"
+                     session-id))
+          (when agent-log--summarize-blocked-reason
+            (kill-emacs 1)))
+      (user-error "No session found for %s" session-id))))
 
 (defun agent-log--find-session-by-id (session-id)
   "Return the session metadata entry for SESSION-ID, or nil."

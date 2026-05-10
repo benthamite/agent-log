@@ -1608,36 +1608,32 @@ SUMMARY defaults to ONELINE."
                (car messages))))))
 
 (ert-deftest agent-log-test-auto-session-end-actions/targets-single-session ()
-  "Auto session-end actions summarize only the identified session."
+  "Auto session-end actions spawn a worker only for the identified session."
   (let* ((sessions (list (list "s1" :file "/a.jsonl")
                          (list "s2" :file "/b.jsonl")))
-         (index (make-hash-table :test #'equal))
-         (orig-require (symbol-function 'require))
-         scheduled
+         (agent-log--summary-workers (make-hash-table :test #'equal))
+         command
          (agent-log-auto-sync-sessions nil)
          (agent-log-auto-summarize-sessions t)
          (agent-log--summarize-active nil)
          (agent-log--summarize-blocked-reason nil))
-    (cl-letf (((symbol-function 'require)
-               (lambda (feature &optional filename noerror)
-                 (if (eq feature 'gptel)
-                     t
-                   (funcall orig-require feature filename noerror))))
-              ((symbol-function 'agent-log--read-all-sessions)
+    (cl-letf (((symbol-function 'agent-log--read-all-sessions)
                (lambda () sessions))
-              ((symbol-function 'agent-log--read-index)
-               (lambda () index))
-              ((symbol-function 'agent-log--upgrade-summary-index)
-               (lambda (&rest _) 0))
-              ((symbol-function 'agent-log--session-summary-current-p)
-               (lambda (&rest _) nil))
-              ((symbol-function 'run-with-timer)
+              ((symbol-function 'make-process)
                (lambda (&rest args)
-                 (setq scheduled args))))
+                 (setq command (plist-get args :command))
+                 (make-symbol "process"))))
       (agent-log--auto-session-end-actions "s1")
-      (should scheduled)
-      (should (equal (caar (nth 3 scheduled)) "s1"))
-      (should (= (length (nth 3 scheduled)) 1)))))
+      (should command)
+      (should (member "--batch" command))
+      (should (seq-some (lambda (arg)
+                          (string-match-p
+                           "agent-log--batch-summarize-session \"s1\""
+                           arg))
+                        command))
+      (should-not (seq-some (lambda (arg)
+                              (string-match-p "\"s2\"" arg))
+                            command)))))
 
 (ert-deftest agent-log-test-auto-session-end-actions/unresolved-skips-archive ()
   "Unresolved automatic events do not start archive-wide work."
