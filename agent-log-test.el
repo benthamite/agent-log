@@ -1113,7 +1113,8 @@ SUMMARY defaults to ONELINE."
                              :message (list :role "assistant"
                                             :content (list (list :type "text"
                                                                   :text "Another long message")))))))
-    (let ((result (agent-log--extract-conversation-text entries)))
+    (let ((result (agent-log--extract-conversation-text
+                   entries agent-log-test--claude-backend)))
       (should (<= (length result) 30)))))
 
 (ert-deftest agent-log-test-extract-conversation-text/preserves-tail ()
@@ -1126,7 +1127,8 @@ SUMMARY defaults to ONELINE."
                              :message (list :role "assistant"
                                             :content (list (list :type "text"
                                                                   :text "tail marker")))))))
-    (let ((result (agent-log--extract-conversation-text entries)))
+    (let ((result (agent-log--extract-conversation-text
+                   entries agent-log-test--claude-backend)))
       (should (<= (length result) 120))
       (should (string-match-p "User: a" result))
       (should (string-match-p "tail marker" result)))))

@@ -48,8 +48,10 @@
 (declare-function codex--buffer-p "codex" (buffer))
 (declare-function codex--buffer-directory-for "codex" (buffer))
 (defvar agent-log-codex--instance)
-(defvar codex-event-hook)
-(defvar codex-start-hook)
+(defvar codex-event-hook nil
+  "Hook run for Codex lifecycle events.")
+(defvar codex-start-hook nil
+  "Hook run when a Codex session starts.")
 
 (defvar-local agent-log-codex--buffer-session-id nil
   "Codex session ID last reported for the current buffer.")
