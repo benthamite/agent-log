@@ -1639,6 +1639,20 @@ SUMMARY defaults to ONELINE."
       (should (equal (caar (nth 3 scheduled)) "s1"))
       (should (= (length (nth 3 scheduled)) 1)))))
 
+(ert-deftest agent-log-test-auto-session-end-actions/unresolved-skips-archive ()
+  "Unresolved automatic events do not start archive-wide work."
+  (let ((agent-log-auto-sync-sessions t)
+        (agent-log-auto-summarize-sessions t)
+        called)
+    (cl-letf (((symbol-function 'agent-log-sync-sessions)
+               (lambda (&rest _) (setq called 'sync)))
+              ((symbol-function 'agent-log-summarize-sessions)
+               (lambda (&rest _) (setq called 'summary)))
+              ((symbol-function 'message)
+               (lambda (&rest _) nil)))
+      (agent-log--auto-session-end-actions nil)
+      (should-not called))))
+
 (ert-deftest agent-log-test-update-session-end-hook/adds-codex-hook ()
   "Installs the Codex event handler when automatic actions are enabled."
   (let ((codex-event-hook nil)

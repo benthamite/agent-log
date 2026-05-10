@@ -2189,8 +2189,9 @@ If summary generation is already in progress, stop it instead."
 
 (defun agent-log--auto-session-end-actions (&optional session-id)
   "Run configured automatic actions for SESSION-ID.
-When SESSION-ID is nil or cannot be resolved, fall back to the
-archive-wide automatic behavior."
+When SESSION-ID is nil or cannot be resolved, do nothing.  Automatic
+session-end work must not fall back to archive-wide sync or summary
+generation, because that can unexpectedly start long foreground work."
   (if-let* ((session (and session-id
                           (agent-log--find-session-by-id session-id))))
       (if agent-log-auto-sync-sessions
@@ -2199,10 +2200,12 @@ archive-wide automatic behavior."
            (lambda ()
              (agent-log--maybe-summarize-session session)))
         (agent-log--maybe-summarize-session session))
-    (agent-log--auto-all-session-end-actions)))
+    (message "agent-log: could not resolve ended session; skipping automatic summary")))
 
 (defun agent-log--auto-all-session-end-actions ()
-  "Run archive-wide automatic actions."
+  "Run archive-wide automatic actions.
+This is retained for explicit internal callers; session-end hooks must
+not call it as a fallback."
   (if agent-log-auto-sync-sessions
       (agent-log-sync-sessions
        (lambda ()

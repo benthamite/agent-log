@@ -357,9 +357,9 @@ Summaries are persisted in the index file together with a fingerprint and source
 
 Two user options control what happens automatically when a Claude Code or Codex session stops producing output.  Claude Code requires a =Stop= hook configured in Claude Code's settings (see the =claude-code= documentation for hook setup).  Codex requires =codex-mode= with =codex-enable-hooks= enabled so =codex-event-hook= receives =Stop= events.
 
-When ~agent-log-auto-sync-sessions~ is non-nil, the stopped session is rendered automatically.  If the event cannot be resolved to a specific session, ~agent-log-sync-sessions~ falls back to syncing the archive.
+When ~agent-log-auto-sync-sessions~ is non-nil, the stopped session is rendered automatically.  If the event cannot be resolved to a specific session, automatic sync is skipped.
 
-When ~agent-log-auto-summarize-sessions~ is non-nil, the stopped session is summarized automatically.  If auto-sync is also enabled, summarization runs after sync completes.  If the event cannot be resolved to a specific session, ~agent-log-summarize-sessions~ falls back to summarizing every session that lacks a current summary.
+When ~agent-log-auto-summarize-sessions~ is non-nil, the stopped session is summarized automatically.  If auto-sync is also enabled, summarization runs after sync completes.  If the event cannot be resolved to a specific session, automatic summarization is skipped; archive-wide summarization only happens when you explicitly run ~agent-log-summarize-sessions~.
 
 The hook handlers (~agent-log-claude--session-end-handler~ and ~agent-log-codex--session-end-handler~) are defined in the backend files and installed via ~eval-after-load~ when either defcustom is set before the backend is loaded.
 
