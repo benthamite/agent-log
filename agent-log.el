@@ -2394,8 +2394,9 @@ that identify the session which just stopped producing output."
         (remhash session-id agent-log--summary-workers))
       (when (and state-file (file-exists-p state-file))
         (delete-file state-file))
-      (message "agent-log: background summary finished (exit %d, %s)"
-               status (string-trim event)))))
+      (unless (zerop status)
+        (message "agent-log: background summary failed (exit %d, %s)"
+                 status (string-trim event))))))
 
 (defun agent-log--batch-summarize-session (session-id)
   "Summarize SESSION-ID and wait for completion in batch Emacs."
