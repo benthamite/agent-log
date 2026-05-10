@@ -58,7 +58,16 @@
 (defvar gptel--known-backends)
 (declare-function gptel-request "gptel")
 (declare-function gptel-get-backend "gptel")
+(declare-function gptel-backend-name "gptel")
+(declare-function gptel-backend-host "gptel")
+(declare-function gptel-backend-protocol "gptel")
+(declare-function gptel-backend-endpoint "gptel")
+(declare-function gptel-backend-header "gptel")
+(declare-function gptel-backend-key "gptel")
 (declare-function gptel-backend-models "gptel")
+(declare-function gptel-backend-stream "gptel")
+(declare-function gptel-backend-curl-args "gptel")
+(declare-function gptel-backend-request-params "gptel")
 (declare-function gptel-plus-compute-cost "gptel-plus")
 
 ;;;;; Backend framework
@@ -478,7 +487,8 @@ bytes are saved here and prepended to the next raw read.")
   "Non-nil when summary generation is in progress.")
 
 (defvar agent-log--summary-workers (make-hash-table :test #'equal)
-  "Background automatic summary workers keyed by session ID.")
+  "Background automatic summary workers keyed by session ID.
+Each value is a cons cell (PROCESS . STATE-FILE).")
 
 (defvar agent-log--summarize-stop nil
   "When non-nil, stop summary generation after the current request.")
@@ -2261,37 +2271,129 @@ that identify the session which just stopped producing output."
 (defun agent-log--spawn-summary-worker (session-id)
   "Start a background summary worker for SESSION-ID."
   (unless (gethash session-id agent-log--summary-workers)
-    (let ((process
-           (make-process
-            :name (format "agent-log-summary-%s" session-id)
-            :buffer nil
-            :noquery t
-            :connection-type 'pipe
-            :command (agent-log--summary-worker-command session-id)
-            :sentinel (lambda (proc event)
-                        (agent-log--summary-worker-sentinel
-                         session-id proc event)))))
-      (puthash session-id process agent-log--summary-workers)
-      (message "agent-log: summarizing session %s in background" session-id))))
+    (let ((state-file (agent-log--summary-worker-state-file session-id)))
+      (condition-case err
+          (let ((process
+                 (make-process
+                  :name (format "agent-log-summary-%s" session-id)
+                  :buffer nil
+                  :noquery t
+                  :connection-type 'pipe
+                  :command (agent-log--summary-worker-command state-file)
+                  :sentinel (lambda (proc event)
+                              (agent-log--summary-worker-sentinel
+                               session-id proc event)))))
+            (puthash session-id (cons process state-file)
+                     agent-log--summary-workers)
+            (message "agent-log: summarizing session %s in background"
+                     session-id))
+        (error
+         (when (file-exists-p state-file)
+           (delete-file state-file))
+         (signal (car err) (cdr err)))))))
 
-(defun agent-log--summary-worker-command (session-id)
-  "Return the batch Emacs command for summarizing SESSION-ID."
-  (let ((emacs (expand-file-name invocation-name invocation-directory))
-        (init (and user-init-file (file-exists-p user-init-file)
-                   user-init-file)))
-    (append (list emacs "--batch")
-            (when init (list "--load" init))
-            (list "--eval" "(require 'agent-log)"
-                  "--eval"
-                  (format "(agent-log--batch-summarize-session %S)"
-                          session-id)))))
+(defun agent-log--summary-worker-command (state-file)
+  "Return the batch Emacs command loading STATE-FILE."
+  (let ((emacs (expand-file-name invocation-name invocation-directory)))
+    (list emacs "--quick" "--batch" "--load" state-file)))
+
+(defun agent-log--summary-worker-state-file (session-id)
+  "Write and return a private batch state file for SESSION-ID."
+  (let ((file (make-temp-file "agent-log-summary-worker-" nil ".el")))
+    (with-temp-file file
+      (let ((print-length nil)
+            (print-level nil))
+        (prin1
+         `(unwind-protect
+              (progn
+                (setq load-path ',load-path)
+                (require 'gptel)
+                (require 'agent-log)
+                (setq agent-log-directory ,agent-log-directory
+                      agent-log-backends ',agent-log-backends
+                      agent-log-active-backends ',agent-log-active-backends
+                      agent-log-summary-backend ',agent-log-summary-backend
+                      agent-log-summary-model ',agent-log-summary-model
+                      agent-log-summary-max-content-length
+                      ,agent-log-summary-max-content-length
+                      gptel-model ',(and (boundp 'gptel-model) gptel-model))
+                (dolist (spec ',(agent-log--summary-worker-backend-specs))
+                  (agent-log--summary-worker-restore-backend spec))
+                (when-let* ((backend-name
+                             ',(agent-log--summary-worker-default-backend-name)))
+                  (setq gptel-backend (gptel-get-backend backend-name)))
+                (agent-log--batch-summarize-session ,session-id))
+            (when (and load-file-name (file-exists-p load-file-name))
+              (delete-file load-file-name)))
+         (current-buffer))
+        (terpri)))
+    (set-file-modes file #o600)
+    file))
+
+(defun agent-log--summary-worker-default-backend-name ()
+  "Return the current default gptel backend name, or nil."
+  (when (and (boundp 'gptel-backend) gptel-backend)
+    (gptel-backend-name gptel-backend)))
+
+(defun agent-log--summary-worker-backend-specs ()
+  "Return readable gptel backend specs for the summary worker."
+  (when (boundp 'gptel--known-backends)
+    (delq nil
+          (mapcar (lambda (entry)
+                    (agent-log--summary-worker-backend-spec (cdr entry)))
+                  gptel--known-backends))))
+
+(defun agent-log--summary-worker-backend-spec (backend)
+  "Return a readable constructor spec for gptel BACKEND."
+  (when backend
+    (let ((plist
+           (list :protocol (gptel-backend-protocol backend)
+                 :host (gptel-backend-host backend)
+                 :endpoint (gptel-backend-endpoint backend)
+                 :header (gptel-backend-header backend)
+                 :key (gptel-backend-key backend)
+                 :models (gptel-backend-models backend)
+                 :stream (gptel-backend-stream backend)
+                 :curl-args (gptel-backend-curl-args backend)
+                 :request-params (gptel-backend-request-params backend))))
+      (apply #'list (type-of backend) (gptel-backend-name backend)
+             (cl-loop for (key value) on plist by #'cddr
+                      when (and value (readablep value))
+                      collect key and collect value)))))
+
+(defun agent-log--summary-worker-restore-backend (spec)
+  "Restore a gptel backend from constructor SPEC."
+  (pcase-let ((`(,type ,name . ,args) spec))
+    (agent-log--summary-worker-require-backend type)
+    (let ((maker (intern (concat "gptel-make-"
+                                 (substring (symbol-name type) 6)))))
+      (when (fboundp maker)
+        (apply maker name args)))))
+
+(defun agent-log--summary-worker-require-backend (type)
+  "Require the gptel provider module for backend TYPE."
+  (pcase type
+    ('gptel-anthropic (require 'gptel-anthropic nil t))
+    ('gptel-gemini (require 'gptel-gemini nil t))
+    ((or 'gptel-openai 'gptel-openai-responses)
+     (require 'gptel-openai nil t))
+    ((or 'gptel-deepseek 'gptel-perplexity 'gptel-privategpt)
+     (require 'gptel-openai-extras nil t))
+    ('gptel-kagi (require 'gptel-kagi nil t))
+    ('gptel-ollama (require 'gptel-ollama nil t))
+    ('gptel-bedrock (require 'gptel-bedrock nil t))
+    ('gptel--gh (require 'gptel-gh nil t))))
 
 (defun agent-log--summary-worker-sentinel (session-id proc event)
   "Log completion of summary worker PROC for SESSION-ID with EVENT."
   (when (memq (process-status proc) '(exit signal))
-    (let ((status (process-exit-status proc)))
-      (when (eq proc (gethash session-id agent-log--summary-workers))
+    (let* ((worker (gethash session-id agent-log--summary-workers))
+           (state-file (cdr worker))
+           (status (process-exit-status proc)))
+      (when (eq proc (car worker))
         (remhash session-id agent-log--summary-workers))
+      (when (and state-file (file-exists-p state-file))
+        (delete-file state-file))
       (message "agent-log: background summary finished (exit %d, %s)"
                status (string-trim event)))))
 

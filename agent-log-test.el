@@ -1623,17 +1623,26 @@ SUMMARY defaults to ONELINE."
                (lambda (&rest args)
                  (setq command (plist-get args :command))
                  (make-symbol "process"))))
-      (agent-log--auto-session-end-actions "s1")
-      (should command)
-      (should (member "--batch" command))
-      (should (seq-some (lambda (arg)
-                          (string-match-p
-                           "agent-log--batch-summarize-session \"s1\""
-                           arg))
-                        command))
-      (should-not (seq-some (lambda (arg)
-                              (string-match-p "\"s2\"" arg))
-                            command)))))
+      (unwind-protect
+          (progn
+            (agent-log--auto-session-end-actions "s1")
+            (should command)
+            (should (member "--quick" command))
+            (should (member "--batch" command))
+            (let* ((state-file (cadr (member "--load" command)))
+                   (state (and state-file
+                               (file-exists-p state-file)
+                               (with-temp-buffer
+                                 (insert-file-contents state-file)
+                                 (buffer-string)))))
+              (should state)
+              (should (string-match-p
+                       "agent-log--batch-summarize-session \"s1\""
+                       state))
+              (should-not (string-match-p "\"s2\"" state))))
+        (when-let* ((state-file (cadr (member "--load" command))))
+          (when (file-exists-p state-file)
+            (delete-file state-file)))))))
 
 (ert-deftest agent-log-test-auto-session-end-actions/unresolved-skips-archive ()
   "Unresolved automatic events do not start archive-wide work."

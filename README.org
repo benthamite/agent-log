@@ -359,7 +359,7 @@ Two user options control what happens automatically when a Claude Code or Codex 
 
 When ~agent-log-auto-sync-sessions~ is non-nil, the stopped session is rendered automatically.  If the event cannot be resolved to a specific session, automatic sync is skipped.
 
-When ~agent-log-auto-summarize-sessions~ is non-nil, the stopped session is summarized automatically in a background =emacs --batch= subprocess, so the running Emacs stays responsive while the LLM request and index update complete.  If auto-sync is also enabled, the background summarizer is launched after sync completes.  If the event cannot be resolved to a specific session, automatic summarization is skipped; archive-wide summarization only happens when you explicitly run ~agent-log-summarize-sessions~.
+When ~agent-log-auto-summarize-sessions~ is non-nil, the stopped session is summarized automatically in a background =emacs --quick --batch= subprocess, so the running Emacs stays responsive while the LLM request and index update complete.  The worker does not load the user's init file; it loads a private temporary state file containing the relevant =agent-log= and =gptel= runtime configuration, then deletes that file.  If auto-sync is also enabled, the background summarizer is launched after sync completes.  If the event cannot be resolved to a specific session, automatic summarization is skipped; archive-wide summarization only happens when you explicitly run ~agent-log-summarize-sessions~.
 
 The hook handlers (~agent-log-claude--session-end-handler~ and ~agent-log-codex--session-end-handler~) are defined in the backend files and installed via ~eval-after-load~ when either defcustom is set before the backend is loaded.
 
