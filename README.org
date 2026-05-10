@@ -207,7 +207,7 @@ The user option ~agent-log-summary-backend~ specifies the =gptel= backend name t
 
 The user option ~agent-log-summary-model~ specifies the =gptel= model to use, for example ~claude-haiku-4-5-20251001~.  A smaller, faster model is often sufficient for summarization.  When ~nil~ (the default), it uses ~gptel-model~.
 
-The user option ~agent-log-summary-max-content-length~ sets the maximum number of characters of conversation text sent to the LLM for summarization.  The package extracts the plain text of user and assistant messages (ignoring tool calls and thinking blocks) and limits the result to this length.  When a conversation is longer than the limit, agent-log keeps both the beginning and the end so summaries can reflect resumed work appended to an older session.  The default value is ~8000~.  Increase this for longer, more detailed summaries at the cost of higher token usage; decrease it if you want to minimize API costs.
+The user option ~agent-log-summary-max-content-length~ sets the maximum number of characters of conversation text sent to the LLM for summarization.  The package extracts the plain text of user and assistant messages (ignoring tool calls, thinking blocks, and injected system preambles) and stops collecting text once this limit is reached.  The default value is ~8000~.  Increase this for longer, more detailed summaries at the cost of higher token usage and more foreground parsing; decrease it if you want to minimize API costs and UI disruption.
 
 ** AI search options
 :PROPERTIES:

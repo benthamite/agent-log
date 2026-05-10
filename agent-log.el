@@ -1805,37 +1805,87 @@ BACKEND is used for filtering and text extraction."
     (string-join (nreverse parts))))
 
 (defun agent-log--conversation-text-from-file (file backend)
-  "Extract full summary text from JSONL FILE using BACKEND.
-Only summary-relevant lines are parsed, so large tool snapshots do not
-block summary generation."
+  "Extract bounded summary text from JSONL FILE using BACKEND.
+Only summary-relevant lines are parsed, and extraction stops once
+`agent-log-summary-max-content-length' has been reached."
   (let ((backend (or backend (agent-log--default-backend)))
-        (entries nil))
+        (parts nil)
+        (length 0))
+    (agent-log--map-jsonl-lines
+     file
+     (lambda (line)
+       (when-let* ((text-pair
+                    (agent-log--summary-text-from-line line backend)))
+         (push (car text-pair) parts)
+         (cl-incf length (cdr text-pair))))
+     (lambda () (< length agent-log-summary-max-content-length)))
+    (agent-log--limit-summary-text (string-join (nreverse parts)))))
+
+(defun agent-log--summary-text-from-line (line backend)
+  "Return (TEXT . LENGTH) extracted from JSONL LINE and BACKEND."
+  (let ((prefix (substring line 0 (min (length line) 2048))))
+    (when (and (not (string-empty-p line))
+               (or (null backend)
+                   (agent-log--summary-line-candidate-p backend prefix)))
+      (when-let* ((entry (condition-case nil
+                            (agent-log--parse-json-line line)
+                          (error nil))))
+        (agent-log--summary-text-from-entry entry backend)))))
+
+(defun agent-log--map-jsonl-lines (file function &optional continue-p)
+  "Call FUNCTION for each line in JSONL FILE.
+When CONTINUE-P is non-nil, stop before reading another chunk if it
+returns nil."
+  (let ((offset 0)
+        (chunk-size 65536)
+        done)
     (with-temp-buffer
-      (insert-file-contents file)
-      (goto-char (point-min))
-      (while (not (eobp))
-        (let* ((beg (line-beginning-position))
-               (end (line-end-position))
-               (prefix (buffer-substring-no-properties
-                        beg (min end (+ beg 2048)))))
-          (when (and (< beg end)
-                     (or (null backend)
-                         (agent-log--summary-line-candidate-p backend prefix)))
-            (let ((line (buffer-substring-no-properties beg end)))
-              (when-let* ((entry (condition-case nil
-                                    (agent-log--parse-json-line line)
-                                  (error nil))))
-                (push entry entries)))))
-        (forward-line 1)))
-    (agent-log--conversation-text
-     (agent-log--summary-normalize-entries (nreverse entries) backend)
-     backend)))
+      (set-buffer-multibyte nil)
+      (while (and (not done)
+                  (or (null continue-p) (funcall continue-p)))
+        (let* ((inserted (cadr (insert-file-contents-literally
+                                file nil offset (+ offset chunk-size))))
+               (eof (< inserted chunk-size)))
+          (setq offset (+ offset inserted))
+          (goto-char (point-min))
+          (while (and (not done)
+                      (or (null continue-p) (funcall continue-p))
+                      (search-forward "\n" nil t))
+            (let ((line (decode-coding-string
+                         (buffer-substring-no-properties
+                          (point-min) (1- (point)))
+                         'utf-8-unix t)))
+              (delete-region (point-min) (point))
+              (funcall function line)
+              (when (and continue-p (not (funcall continue-p)))
+                (setq done t))))
+          (when eof
+            (unless (or done (= (point-min) (point-max)))
+              (funcall function
+                       (decode-coding-string
+                        (buffer-substring-no-properties
+                         (point-min) (point-max))
+                        'utf-8-unix t)))
+            (setq done t)))))))
 
 (defun agent-log--summary-normalize-entries (entries backend)
   "Return normalized summary ENTRIES for BACKEND."
   (if backend
       (agent-log--normalize-entries backend entries)
     entries))
+
+(defun agent-log--summary-text-from-entry (entry backend)
+  "Return (TEXT . LENGTH) extracted from summary ENTRY and BACKEND."
+  (let ((parts nil)
+        (length 0))
+    (dolist (normalized (agent-log--summary-normalize-entries
+                         (list entry) backend))
+      (when-let* ((text (agent-log--conversation-entry-text
+                         normalized backend)))
+        (push text parts)
+        (cl-incf length (length text))))
+    (when parts
+      (cons (string-join (nreverse parts)) length))))
 
 (defun agent-log--conversation-entry-text (entry backend)
   "Return the summary text for ENTRY using BACKEND."

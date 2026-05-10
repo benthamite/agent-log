@@ -60,13 +60,16 @@
 ;;;;; Constants
 
 (defconst agent-log-codex--system-text-regexp
-  (rx bos (0+ space) "<"
-      (or "environment_context"
-          "permissions"
-          "turn_aborted"
-          "collaboration_mode")
-      (or ">" " "))
-  "Regexp matching system-generated XML tags in Codex user entries.")
+  (rx bos (0+ space)
+      (or (seq "<"
+               (or "environment_context"
+                   "permissions"
+                   "turn_aborted"
+                   "collaboration_mode"
+                   "INSTRUCTIONS")
+               (or ">" " "))
+          "# AGENTS.md instructions"))
+  "Regexp matching system-generated text in Codex user entries.")
 
 (defconst agent-log-codex--uuid-regexp
   (rx (= 8 hex) "-" (= 4 hex) "-" (= 4 hex) "-"
@@ -367,15 +370,15 @@ Both may be strings or lists of content items."
 
 (cl-defmethod agent-log--system-entry-p ((_backend agent-log-codex) entry)
   "Return non-nil if ENTRY is a system-generated message.
-These are user-role entries whose text starts with system XML tags,
-or entries containing only tool results with no user text."
+These are user-role entries whose text starts with known system
+preambles, or entries containing only tool results with no user text."
   (let* ((message (plist-get entry :message))
          (content (plist-get message :content)))
     (cond
-     ;; String content starting with system XML.
+     ;; String content starting with a known system preamble.
      ((stringp content)
       (string-match-p agent-log-codex--system-text-regexp content))
-     ;; List content: system if ALL text items start with system XML.
+     ;; List content: system if all text items start with a known preamble.
      ((listp content)
       (let ((text-items (seq-filter
                          (lambda (item)
@@ -487,7 +490,9 @@ Tool-use, tool-result, and thinking blocks are ignored."
         "\"type\"[[:space:]]*:[[:space:]]*\"message\"" line)
        (string-match-p
         "\"role\"[[:space:]]*:[[:space:]]*\"\\(?:user\\|assistant\\)\""
-        line)))
+        line)
+       (not (string-match-p "# AGENTS\\.md instructions\\|<INSTRUCTIONS"
+                            line))))
 
 ;;;;;; Active sessions
 

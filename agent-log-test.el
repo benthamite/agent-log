@@ -2247,6 +2247,43 @@ SUMMARY defaults to ONELINE."
                       jsonl-path agent-log-test--codex-backend)
                      "User: Fix the bug\n\n")))))
 
+(ert-deftest agent-log-test-codex-conversation-text-from-file/skips-agents ()
+  "Skips injected AGENTS instructions in Codex summary text."
+  (agent-log-test--with-temp-dir
+    (let* ((jsonl-content
+            (concat
+             "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\","
+             "\"role\":\"user\",\"content\":[{\"type\":\"input_text\","
+             "\"text\":\"# AGENTS.md instructions for /tmp\\nignore\"}]}}\n"
+             "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\","
+             "\"role\":\"user\",\"content\":[{\"type\":\"input_text\","
+             "\"text\":\"Fix the bug\"}]}}\n"))
+           (jsonl-path (agent-log-test--write-file "codex.jsonl" jsonl-content)))
+      (should (equal (agent-log--conversation-text-from-file
+                      jsonl-path agent-log-test--codex-backend)
+                     "User: Fix the bug\n\n")))))
+
+(ert-deftest agent-log-test-conversation-text-from-file/stops-at-limit ()
+  "Stops parsing summary lines once enough text has been collected."
+  (agent-log-test--with-temp-dir
+    (let* ((agent-log-summary-max-content-length 30)
+           (jsonl-content
+            (concat
+             "{\"type\":\"user\",\"message\":{\"role\":\"user\","
+             "\"content\":\"This message is already long enough\"}}\n"
+             "{\"type\":\"user\",\"message\":{\"role\":\"user\","
+             "\"content\":\"This line should not be parsed\"}}\n"))
+           (path (agent-log-test--write-file "s1.jsonl" jsonl-content))
+           (calls 0))
+      (cl-letf (((symbol-function 'agent-log--parse-json-line)
+                 (lambda (line)
+                   (cl-incf calls)
+                   (json-parse-string line :object-type 'plist
+                                      :array-type 'list))))
+        (agent-log--conversation-text-from-file
+         path agent-log-test--claude-backend)
+        (should (= calls 1))))))
+
 (ert-deftest agent-log-test-codex-normalize/developer-message-skipped ()
   "Skips developer messages during normalization."
   (let* ((raw (list :type "response_item"
@@ -2451,6 +2488,17 @@ SUMMARY defaults to ONELINE."
   "Skips system user entries to find first genuine text."
   (let* ((entries (list (list :type "user"
                               :message (list :content "<environment_context>...</environment_context>"))
+                        (list :type "user"
+                              :message (list :content
+                                             (list (list :type "text"
+                                                         :text "Real question")))))))
+    (should (equal (agent-log--first-user-text agent-log-test--codex-backend entries)
+                   "Real question"))))
+
+(ert-deftest agent-log-test-codex-first-user-text/skips-agents ()
+  "Skips injected AGENTS instructions to find first genuine text."
+  (let* ((entries (list (list :type "user"
+                              :message (list :content "# AGENTS.md instructions for /tmp"))
                         (list :type "user"
                               :message (list :content
                                              (list (list :type "text"
