@@ -1649,18 +1649,20 @@ SUMMARY defaults to ONELINE."
             (delete-file state-file)))))))
 
 (ert-deftest agent-log-test-auto-session-end-actions/unresolved-skips-archive ()
-  "Unresolved automatic events do not start archive-wide work."
+  "Unresolved automatic events skip quietly without archive-wide work."
   (let ((agent-log-auto-sync-sessions t)
         (agent-log-auto-summarize-sessions t)
-        called)
+        called
+        messages)
     (cl-letf (((symbol-function 'agent-log-sync-sessions)
                (lambda (&rest _) (setq called 'sync)))
               ((symbol-function 'agent-log-summarize-sessions)
                (lambda (&rest _) (setq called 'summary)))
               ((symbol-function 'message)
-               (lambda (&rest _) nil)))
+               (lambda (&rest args) (push args messages))))
       (agent-log--auto-session-end-actions nil)
-      (should-not called))))
+      (should-not called)
+      (should-not messages))))
 
 (ert-deftest agent-log-test-update-session-end-hook/adds-codex-hook ()
   "Installs the Codex event handler when automatic actions are enabled."

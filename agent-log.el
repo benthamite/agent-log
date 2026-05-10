@@ -2212,8 +2212,7 @@ generation, because that can unexpectedly start long foreground work."
            session
            (lambda ()
              (agent-log--maybe-summarize-session session)))
-        (agent-log--maybe-summarize-session session))
-    (message "agent-log: could not resolve ended session; skipping automatic summary")))
+        (agent-log--maybe-summarize-session session))))
 
 (defun agent-log--auto-all-session-end-actions ()
   "Run archive-wide automatic actions.
