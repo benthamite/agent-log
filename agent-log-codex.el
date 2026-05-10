@@ -49,6 +49,13 @@
 (declare-function codex--buffer-directory-for "codex" (buffer))
 (defvar agent-log-codex--instance)
 (defvar codex-event-hook)
+(defvar codex-start-hook)
+
+(defvar-local agent-log-codex--buffer-session-id nil
+  "Codex session ID last reported for the current buffer.")
+
+(defvar-local agent-log-codex--buffer-session-file nil
+  "Codex transcript file last resolved for the current buffer.")
 
 ;;;;; Struct definition
 
@@ -571,13 +578,24 @@ the terminal process start time."
 
 (defun agent-log-codex--buffer-session-file (backend sessions)
   "Return the JSONL file for current Codex buffer using BACKEND and SESSIONS."
-  (or (when-let* ((sid (agent-log-codex--buffer-resumed-session-id)))
+  (or (agent-log-codex--recorded-buffer-session-file backend)
+      (when-let* ((sid (agent-log-codex--buffer-resumed-session-id)))
         (agent-log--find-session-file backend sid))
       (when-let* ((dir (codex--buffer-directory-for (current-buffer))))
         (let* ((process-start-ms (agent-log-codex--buffer-process-start-ms))
                (match (agent-log-codex--find-session-for-project
                        dir sessions t process-start-ms)))
-          (plist-get (cdr match) :file)))))
+          (plist-get (cdr match) :file)))
+      (agent-log-codex--visible-session-file sessions)))
+
+(defun agent-log-codex--recorded-buffer-session-file (backend)
+  "Return the current buffer's recorded transcript file for BACKEND."
+  (or (and agent-log-codex--buffer-session-file
+           (file-exists-p agent-log-codex--buffer-session-file)
+           agent-log-codex--buffer-session-file)
+      (when-let* ((sid agent-log-codex--buffer-session-id)
+                  (file (agent-log--find-session-file backend sid)))
+        (setq-local agent-log-codex--buffer-session-file file))))
 
 (defun agent-log-codex--buffer-resumed-session-id ()
   "Return the explicit resumed Codex session ID for the current buffer."
@@ -659,6 +677,69 @@ timestamp is within `agent-log-codex--session-start-match-window-ms'."
   "Return absolute distance between TIMESTAMP and TARGET-TIMESTAMP-MS."
   (abs (- timestamp target-timestamp-ms)))
 
+(defun agent-log-codex--visible-session-file (sessions)
+  "Return the transcript matching the visible Codex buffer text in SESSIONS."
+  (when-let* ((dir (codex--buffer-directory-for (current-buffer)))
+              (candidates (agent-log-codex--project-top-level-sessions
+                           dir sessions))
+              (snippets (agent-log-codex--visible-session-snippets)))
+    (cl-loop for snippet in snippets
+             thereis
+             (cl-loop for session in candidates
+                      for file = (plist-get (cdr session) :file)
+                      when (agent-log-codex--file-contains-p file snippet)
+                      return file))))
+
+(defun agent-log-codex--project-top-level-sessions (directory sessions)
+  "Return top-level SESSIONS whose project matches DIRECTORY."
+  (let ((targets (agent-log-codex--directory-match-targets directory)))
+    (cl-remove-if-not
+     (lambda (session)
+       (let ((project (plist-get (cdr session) :project)))
+         (and (stringp project)
+              (not (string-empty-p project))
+              (member (directory-file-name (expand-file-name project))
+                      targets)
+              (not (agent-log-codex--subagent-session-p session)))))
+     sessions)))
+
+(defun agent-log-codex--visible-session-snippets ()
+  "Return distinctive transcript snippets visible in the current buffer."
+  (let* ((start (max (point-min) (- (point-max) 12000)))
+         (text (buffer-substring-no-properties start (point-max)))
+         (lines (nreverse (split-string text "\n" t))))
+    (seq-take
+     (cl-remove-if-not
+      #'agent-log-codex--visible-snippet-line-p
+      (mapcar #'agent-log-codex--normalize-visible-snippet lines))
+     8)))
+
+(defun agent-log-codex--visible-snippet-line-p (line)
+  "Return non-nil if LINE is useful for matching a visible transcript."
+  (and (>= (length line) 40)
+       (not (string-prefix-p "›" line))
+       (not (string-match-p "\\`[[:space:]─]+\\'" line))
+       (not (string-match-p "gpt-[0-9].*·" line))))
+
+(defun agent-log-codex--normalize-visible-snippet (line)
+  "Return a searchable transcript snippet from visible terminal LINE."
+  (let ((text (string-trim line)))
+    (setq text (replace-regexp-in-string "\\`[•*-][[:space:]]+" "" text))
+    (setq text (replace-regexp-in-string "\\`[0-9]+[.)][[:space:]]+" "" text))
+    (setq text (replace-regexp-in-string "`" "" text))
+    (string-trim (replace-regexp-in-string "[[:space:]]+" " " text))))
+
+(defun agent-log-codex--file-contains-p (file text)
+  "Return non-nil if FILE contains TEXT."
+  (when (and file (file-readable-p file))
+    (with-temp-buffer
+      (insert-file-contents file)
+      (goto-char (point-min))
+      (while (search-forward "`" nil t)
+        (replace-match "" t t))
+      (goto-char (point-min))
+      (search-forward text nil t))))
+
 (defun agent-log-codex--buffer-process-start-ms ()
   "Return the current buffer's process start time in milliseconds."
   (when-let* ((process (get-buffer-process (current-buffer)))
@@ -697,6 +778,38 @@ Returns a plist with at least :id, :cwd, and :timestamp, or nil."
           (plist-get parsed :payload)))
     (error nil)))
 
+(defun agent-log-codex--session-event-handler (message)
+  "Record Codex session identity from hook MESSAGE.
+Always return nil so other `codex-event-hook' handlers still run."
+  (when-let* ((sid (agent-log-codex--session-id-from-hook-message message))
+              (buffer (get-buffer (plist-get message :buffer-name))))
+    (with-current-buffer buffer
+      (setq-local agent-log-codex--buffer-session-id sid)
+      (setq-local agent-log-codex--buffer-session-file
+                  (when agent-log-codex--instance
+                    (agent-log--find-session-file
+                     agent-log-codex--instance sid)))))
+  nil)
+
+(defun agent-log-codex--session-id-from-hook-message (message)
+  "Return the Codex session ID from hook MESSAGE."
+  (let* ((json-data (plist-get message :json-data))
+         (data (if (stringp json-data)
+                   (agent-log--try-parse-json json-data)
+                 json-data))
+         (sid (or (plist-get data :session_id)
+                  (plist-get data :sessionId))))
+    (and (stringp sid)
+         (string-match-p
+          (concat "\\`" agent-log-codex--uuid-regexp "\\'")
+          sid)
+         sid)))
+
+(defun agent-log-codex--clear-buffer-session ()
+  "Clear recorded Codex session identity in the current buffer."
+  (setq-local agent-log-codex--buffer-session-id nil)
+  (setq-local agent-log-codex--buffer-session-file nil))
+
 ;;;;; Icon
 
 (defconst agent-log-codex--icon-svg
@@ -716,6 +829,9 @@ Source: SVG Repo (CC0).")
    :icon-fallback "CX"))
 
 (agent-log--register-backend 'codex agent-log-codex--instance)
+
+(add-hook 'codex-event-hook #'agent-log-codex--session-event-handler)
+(add-hook 'codex-start-hook #'agent-log-codex--clear-buffer-session)
 
 (provide 'agent-log-codex)
 ;;; agent-log-codex.el ends here

@@ -2156,6 +2156,86 @@ SUMMARY defaults to ONELINE."
                         agent-log-test--codex-backend)
                        file))))))
 
+(ert-deftest agent-log-test-codex-current-buffer-session-file/recorded-id ()
+  "Uses the buffer-local Codex session ID before heuristic matching."
+  (let ((sid "019df82b-8607-7231-a491-e57316e4fa02")
+        (file "/tmp/recorded.jsonl"))
+    (with-temp-buffer
+      (setq-local agent-log-codex--buffer-session-id sid)
+      (cl-letf (((symbol-function 'agent-log--find-session-file)
+                 (lambda (_backend session-id)
+                   (and (equal session-id sid) file)))
+                ((symbol-function 'agent-log-codex--buffer-resumed-session-id)
+                 (lambda ()
+                   (ert-fail "resume lookup should not run"))))
+        (should (equal (agent-log-codex--buffer-session-file
+                        agent-log-test--codex-backend nil)
+                       file))))))
+
+(ert-deftest agent-log-test-codex-current-buffer-session-file/visible-text ()
+  "Matches the visible terminal transcript to the owning JSONL file."
+  (let ((dir "/tmp/project")
+        (line "Main project-note scan is clean for legacy Open action items from meetings")
+        (file-a (make-temp-file "agent-log-codex-a" nil ".jsonl"))
+        (file-b (make-temp-file "agent-log-codex-b" nil ".jsonl")))
+    (unwind-protect
+        (let ((sessions `(("b" :project ,dir :timestamp 200 :source "cli"
+                           :file ,file-b)
+                          ("a" :project ,dir :timestamp 100 :source "cli"
+                           :file ,file-a))))
+          (with-temp-file file-a
+            (insert "{\"type\":\"response_item\",\"payload\":{\"content\":\"other\"}}\n"))
+          (with-temp-file file-b
+            (insert "{\"type\":\"response_item\",\"payload\":{\"content\":\""
+                    line "\"}}\n"))
+          (with-temp-buffer
+            (insert "  - " line "\n\n› Explain this codebase\n")
+            (cl-letf (((symbol-function 'agent-log-codex--buffer-resumed-session-id)
+                       (lambda () nil))
+                      ((symbol-function 'agent-log-codex--buffer-process-start-ms)
+                       (lambda () nil))
+                      ((symbol-function 'codex--buffer-directory-for)
+                       (lambda (_buffer) dir)))
+              (should (equal (agent-log-codex--buffer-session-file
+                              agent-log-test--codex-backend sessions)
+                             file-b)))))
+      (delete-file file-a)
+      (delete-file file-b))))
+
+(ert-deftest agent-log-test-codex-visible-text/normalizes-display-markup ()
+  "Matches terminal snippets despite list markers and Markdown markup."
+  (let ((file (make-temp-file "agent-log-codex-markup" nil ".jsonl")))
+    (unwind-protect
+        (progn
+          (with-temp-file file
+            (insert "{\"type\":\"response_item\",\"payload\":{\"content\":\""
+                    "- Main project-note scan is clean for legacy "
+                    "`Open action items from meetings`, routine `Meeting references`, "
+                    "inline `DONE`, and checkbox task lists.\"}}\n"))
+          (should
+           (agent-log-codex--file-contains-p
+            file
+            (agent-log-codex--normalize-visible-snippet
+             "  - Main project-note scan is clean for legacy Open action items from meetings,"))))
+      (delete-file file))))
+
+(ert-deftest agent-log-test-codex-session-event-handler ()
+  "Records Codex session IDs reported by hook messages."
+  (let ((sid "019df82b-8607-7231-a491-e57316e4fa02")
+        (file "/tmp/session.jsonl"))
+    (with-temp-buffer
+      (rename-buffer " *agent-log-codex-event-test*" t)
+      (cl-letf (((symbol-function 'agent-log--find-session-file)
+                 (lambda (_backend session-id)
+                   (and (equal session-id sid) file))))
+        (should-not
+         (agent-log-codex--session-event-handler
+          (list :type "SessionStart"
+                :buffer-name (buffer-name)
+                :json-data (format "{\"session_id\":\"%s\"}" sid))))
+        (should (equal agent-log-codex--buffer-session-id sid))
+        (should (equal agent-log-codex--buffer-session-file file))))))
+
 (ert-deftest agent-log-test-codex-active-session-ids ()
   "Returns session IDs for live Codex terminal buffers."
   (let ((buf1 (generate-new-buffer "codex-1"))
