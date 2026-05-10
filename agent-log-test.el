@@ -8,6 +8,7 @@
 (require 'ert)
 (require 'agent-log)
 (require 'agent-log-claude)
+(require 'agent-log-codex)
 (require 'agent-log-redact)
 
 ;;;;; Test helpers
@@ -1605,6 +1606,61 @@ SUMMARY defaults to ONELINE."
       (should (string-match-p
                "1 pending summary update.*3 discovered session"
                (car messages))))))
+
+(ert-deftest agent-log-test-auto-session-end-actions/targets-single-session ()
+  "Auto session-end actions summarize only the identified session."
+  (let* ((sessions (list (list "s1" :file "/a.jsonl")
+                         (list "s2" :file "/b.jsonl")))
+         (index (make-hash-table :test #'equal))
+         (orig-require (symbol-function 'require))
+         scheduled
+         (agent-log-auto-sync-sessions nil)
+         (agent-log-auto-summarize-sessions t)
+         (agent-log--summarize-active nil)
+         (agent-log--summarize-blocked-reason nil))
+    (cl-letf (((symbol-function 'require)
+               (lambda (feature &optional filename noerror)
+                 (if (eq feature 'gptel)
+                     t
+                   (funcall orig-require feature filename noerror))))
+              ((symbol-function 'agent-log--read-all-sessions)
+               (lambda () sessions))
+              ((symbol-function 'agent-log--read-index)
+               (lambda () index))
+              ((symbol-function 'agent-log--upgrade-summary-index)
+               (lambda (&rest _) 0))
+              ((symbol-function 'agent-log--session-summary-current-p)
+               (lambda (&rest _) nil))
+              ((symbol-function 'run-with-timer)
+               (lambda (&rest args)
+                 (setq scheduled args))))
+      (agent-log--auto-session-end-actions "s1")
+      (should scheduled)
+      (should (equal (caar (nth 3 scheduled)) "s1"))
+      (should (= (length (nth 3 scheduled)) 1)))))
+
+(ert-deftest agent-log-test-update-session-end-hook/adds-codex-hook ()
+  "Installs the Codex event handler when automatic actions are enabled."
+  (let ((codex-event-hook nil)
+        (claude-code-event-hook nil)
+        (agent-log-auto-sync-sessions nil)
+        (agent-log-auto-summarize-sessions t))
+    (agent-log--update-session-end-hook)
+    (should (memq #'agent-log-codex--session-end-handler codex-event-hook))))
+
+(ert-deftest agent-log-test-codex-session-id-from-event ()
+  "Resolves a Codex Stop event buffer to its session ID."
+  (let ((file "/tmp/rollout-2026-05-10-12345678-1234-1234-1234-123456789abc.jsonl"))
+    (with-temp-buffer
+      (rename-buffer " *agent-log-codex-test*" t)
+      (cl-letf (((symbol-function 'agent-log-codex--buffer-session-file)
+                 (lambda (&rest _) file))
+                ((symbol-function 'agent-log--read-sessions)
+                 (lambda (&rest _) nil)))
+        (should (equal
+                 (agent-log-codex--session-id-from-event
+                  (list :type "Stop" :buffer-name (buffer-name)))
+                 "12345678-1234-1234-1234-123456789abc"))))))
 
 (ert-deftest agent-log-test-summarize-one/progress-message-shows-archive-total ()
   "Reports pending progress without implying it is the archive size."

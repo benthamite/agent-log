@@ -253,6 +253,11 @@ Returns nil if KEY is not in `agent-log-backends'."
 (declare-function agent-log-claude--maybe-rename-session "agent-log-claude")
 (defvar claude-code-event-hook)
 
+;;;;;; Forward declarations for agent-log-codex.el
+
+(declare-function agent-log-codex--session-end-handler "agent-log-codex")
+(defvar codex-event-hook)
+
 (defcustom agent-log-directory "~/.claude"
   "Root directory of Claude Code configuration.
 This variable is used by the Claude Code backend.  In future
@@ -331,31 +336,53 @@ When nil, defaults to `gptel-model'."
 
 (defun agent-log--update-session-end-hook (&rest _)
   "Install or remove the session-end hook based on current settings."
+  (agent-log--update-claude-session-end-hook)
+  (agent-log--update-codex-session-end-hook))
+
+(defun agent-log--update-claude-session-end-hook ()
+  "Install or remove the Claude Code session-end hook."
   (if (featurep 'agent-log-claude)
       (if (agent-log--session-end-hook-needed-p)
-          (add-hook 'claude-code-event-hook #'agent-log-claude--session-end-handler)
-        (remove-hook 'claude-code-event-hook #'agent-log-claude--session-end-handler))
+          (add-hook 'claude-code-event-hook
+                    #'agent-log-claude--session-end-handler)
+        (remove-hook 'claude-code-event-hook
+                     #'agent-log-claude--session-end-handler))
     (when (agent-log--session-end-hook-needed-p)
       (eval-after-load 'agent-log-claude
         '(when (agent-log--session-end-hook-needed-p)
            (add-hook 'claude-code-event-hook
                      #'agent-log-claude--session-end-handler))))))
 
+(defun agent-log--update-codex-session-end-hook ()
+  "Install or remove the Codex session-end hook."
+  (if (featurep 'agent-log-codex)
+      (if (agent-log--session-end-hook-needed-p)
+          (add-hook 'codex-event-hook
+                    #'agent-log-codex--session-end-handler)
+        (remove-hook 'codex-event-hook
+                     #'agent-log-codex--session-end-handler))
+    (when (agent-log--session-end-hook-needed-p)
+      (eval-after-load 'agent-log-codex
+        '(when (agent-log--session-end-hook-needed-p)
+           (add-hook 'codex-event-hook
+                     #'agent-log-codex--session-end-handler))))))
+
 (defcustom agent-log-auto-sync-sessions nil
-  "Whether to sync sessions when a Claude Code session ends.
-When non-nil, `agent-log-sync-sessions' runs automatically after a
-session terminates.  Requires the `claude-code' package and a
-\"Stop\" hook configured in Claude Code settings."
+  "Whether to sync sessions when an agent session stops.
+When non-nil, the stopped session is rendered automatically when
+Claude Code or Codex reports a Stop event.  If the event cannot be
+resolved to a session, `agent-log-sync-sessions' runs instead."
   :type 'boolean
   :set (lambda (sym val)
          (set-default sym val)
          (agent-log--update-session-end-hook)))
 
 (defcustom agent-log-auto-summarize-sessions nil
-  "Whether to summarize sessions when a Claude Code session ends.
-When non-nil, `agent-log-summarize-sessions' runs automatically
-after a session terminates.  Requires the `claude-code' package
-and a \"Stop\" hook configured in Claude Code settings."
+  "Whether to summarize sessions when an agent session stops.
+When non-nil, the stopped session is summarized automatically when
+Claude Code or Codex reports a Stop event.  If the event cannot be
+resolved to a session, `agent-log-summarize-sessions' runs
+instead."
   :type 'boolean
   :set (lambda (sym val)
          (set-default sym val)
@@ -615,6 +642,19 @@ call it with no arguments after the last session is rendered."
           (when callback (funcall callback)))
       (message "Syncing %d session(s)..." (length pending))
       (agent-log--sync-next pending 0 (length pending) callback))))
+
+(defun agent-log--sync-session (session &optional callback)
+  "Render SESSION if it is unrendered or stale.
+When CALLBACK is non-nil, call it with no arguments after the
+session has been checked."
+  (let* ((index (agent-log--read-index))
+         (pending (agent-log--pending-sessions (list session) index)))
+    (if (null pending)
+        (progn
+          (message "Session %s up to date" (car session))
+          (when callback (funcall callback)))
+      (message "Syncing session %s..." (car session))
+      (agent-log--sync-next pending 0 1 callback))))
 
 (defun agent-log--pending-sessions (sessions index)
   "Return sessions from SESSIONS that need rendering per INDEX."
@@ -2096,6 +2136,77 @@ If summary generation is already in progress, stop it instead."
            0 nil #'agent-log--summarize-next
            pending 0 (length pending)
            agent-log--summarize-generation)))))))
+
+(defun agent-log--auto-session-end-actions (&optional session-id)
+  "Run configured automatic actions for SESSION-ID.
+When SESSION-ID is nil or cannot be resolved, fall back to the
+archive-wide automatic behavior."
+  (if-let* ((session (and session-id
+                          (agent-log--find-session-by-id session-id))))
+      (if agent-log-auto-sync-sessions
+          (agent-log--sync-session
+           session
+           (lambda ()
+             (agent-log--maybe-summarize-session session)))
+        (agent-log--maybe-summarize-session session))
+    (agent-log--auto-all-session-end-actions)))
+
+(defun agent-log--auto-all-session-end-actions ()
+  "Run archive-wide automatic actions."
+  (if agent-log-auto-sync-sessions
+      (agent-log-sync-sessions
+       (lambda ()
+         (agent-log--maybe-summarize-sessions)))
+    (agent-log--maybe-summarize-sessions)))
+
+(defun agent-log--maybe-summarize-sessions ()
+  "Run `agent-log-summarize-sessions' if automatic summaries can run."
+  (when (agent-log--auto-summarize-ready-p)
+    (agent-log-summarize-sessions)))
+
+(defun agent-log--maybe-summarize-session (session)
+  "Summarize SESSION if automatic summaries can run and it is stale."
+  (when (and (agent-log--auto-summarize-ready-p)
+             (agent-log--session-needs-summary-p session))
+    (agent-log--summarize-session session)))
+
+(defun agent-log--auto-summarize-ready-p ()
+  "Return non-nil when automatic summary generation may start."
+  (and agent-log-auto-summarize-sessions
+       (not agent-log--summarize-blocked-reason)
+       (require 'gptel nil t)
+       (not agent-log--summarize-active)))
+
+(defun agent-log--session-needs-summary-p (session)
+  "Return non-nil if SESSION lacks a current summary.
+Unlike `agent-log--sessions-needing-summary', this predicate does
+not exclude live sessions.  It is used by agent lifecycle hooks
+that identify the session which just stopped producing output."
+  (let* ((sessions (list session))
+         (index (agent-log--read-index)))
+    (agent-log--upgrade-summary-index sessions index)
+    (not (agent-log--session-summary-current-p
+          session (gethash (car session) (agent-log--read-index))))))
+
+(defun agent-log--summarize-session (session)
+  "Generate an AI summary for SESSION."
+  (setq agent-log--summarize-blocked-reason nil
+        agent-log--summarize-consecutive-failures 0
+        agent-log--summarize-active t
+        agent-log--summarize-stop nil
+        agent-log--summarize-archive-total 1)
+  (cl-incf agent-log--summarize-generation)
+  (message "Generating summary for session %s... (run again to stop)"
+           (car session))
+  (run-with-timer
+   0 nil #'agent-log--summarize-next
+   (list session) 0 1 agent-log--summarize-generation))
+
+(defun agent-log--find-session-by-id (session-id)
+  "Return the session metadata entry for SESSION-ID, or nil."
+  (seq-find (lambda (session)
+              (equal (car session) session-id))
+            (agent-log--read-all-sessions)))
 
 ;;;###autoload
 (defun agent-log-stop-summarize-sessions ()

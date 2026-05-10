@@ -355,15 +355,15 @@ Summaries are persisted in the index file together with a fingerprint and source
 #+vindex: agent-log-auto-sync-sessions
 #+vindex: agent-log-auto-summarize-sessions
 
-Two user options control what happens automatically when a Claude Code session terminates.  Both require the =claude-code= package and a =Stop= hook configured in Claude Code's settings (see the =claude-code= documentation for hook setup).
+Two user options control what happens automatically when a Claude Code or Codex session stops producing output.  Claude Code requires a =Stop= hook configured in Claude Code's settings (see the =claude-code= documentation for hook setup).  Codex requires =codex-mode= with =codex-enable-hooks= enabled so =codex-event-hook= receives =Stop= events.
 
-When ~agent-log-auto-sync-sessions~ is non-nil, ~agent-log-sync-sessions~ runs automatically each time a session ends.
+When ~agent-log-auto-sync-sessions~ is non-nil, the stopped session is rendered automatically.  If the event cannot be resolved to a specific session, ~agent-log-sync-sessions~ falls back to syncing the archive.
 
-When ~agent-log-auto-summarize-sessions~ is non-nil, ~agent-log-summarize-sessions~ runs automatically each time a session ends.  If auto-sync is also enabled, summarization runs after sync completes.
+When ~agent-log-auto-summarize-sessions~ is non-nil, the stopped session is summarized automatically.  If auto-sync is also enabled, summarization runs after sync completes.  If the event cannot be resolved to a specific session, ~agent-log-summarize-sessions~ falls back to summarizing every session that lacks a current summary.
 
-The hook handler (~agent-log-claude--session-end-handler~) is defined in =agent-log-claude.el= and is installed via ~eval-after-load~ when either defcustom is set before the backend is loaded.
+The hook handlers (~agent-log-claude--session-end-handler~ and ~agent-log-codex--session-end-handler~) are defined in the backend files and installed via ~eval-after-load~ when either defcustom is set before the backend is loaded.
 
-Sessions with a live agent process are excluded from summarization by session ID.  Each backend's ~agent-log--active-session-ids~ method provides the IDs of currently running sessions.  For Codex buffers, the backend uses the same resume-ID and project-plus-launch-time matching logic as ~agent-log-open-current-session~ ([[#h:session-browsing][Session browsing]]), so active Codex terminal sessions are not summarized while they are still open.  If summarization is already running when another session ends, the in-progress batch continues undisturbed.
+Archive-wide manual summarization excludes sessions with a live agent process by session ID.  Each backend's ~agent-log--active-session-ids~ method provides the IDs of currently running sessions.  For Codex buffers, the backend uses the same resume-ID and project-plus-launch-time matching logic as ~agent-log-open-current-session~ ([[#h:session-browsing][Session browsing]]).  Targeted automatic summarization may summarize the stopped session even while its terminal buffer remains live, because the lifecycle event identifies that specific session.  If summarization is already running when another session stops, the in-progress batch continues undisturbed.
 
 ** Session rename
 :PROPERTIES:

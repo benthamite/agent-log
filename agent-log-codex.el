@@ -47,6 +47,8 @@
 (declare-function codex--start-subcommand "codex" (subcommand &optional args extra-args))
 (declare-function codex--buffer-p "codex" (buffer))
 (declare-function codex--buffer-directory-for "codex" (buffer))
+(defvar agent-log-codex--instance)
+(defvar codex-event-hook)
 
 ;;;;; Struct definition
 
@@ -508,6 +510,26 @@ the same project and launch-time heuristic as
                      backend file)
                     ids)))))
       (delete-dups ids))))
+
+(defun agent-log-codex--session-end-handler (message)
+  "Handle a Codex event MESSAGE, triggering actions on Stop."
+  (when (equal (plist-get message :type) "Stop")
+    (run-with-timer
+     1 nil
+     (lambda ()
+       (agent-log--auto-session-end-actions
+        (agent-log-codex--session-id-from-event message))))
+    nil))
+
+(defun agent-log-codex--session-id-from-event (message)
+  "Return the Codex session ID associated with event MESSAGE."
+  (when-let* ((buffer-name (plist-get message :buffer-name))
+              (buffer (get-buffer buffer-name)))
+    (with-current-buffer buffer
+      (when-let* ((backend agent-log-codex--instance)
+                  (file (agent-log-codex--buffer-session-file
+                         backend (agent-log--read-sessions backend))))
+        (agent-log--session-id-from-file backend file)))))
 
 ;;;;;; Resume session
 
