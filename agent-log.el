@@ -2206,7 +2206,7 @@ When SESSION-ID is nil or cannot be resolved, do nothing.  Automatic
 session-end work must not fall back to archive-wide sync or summary
 generation, because that can unexpectedly start long foreground work."
   (if-let* ((session (and session-id
-                          (agent-log--find-session-by-id session-id))))
+                          (agent-log--session-from-id-fast session-id))))
       (if agent-log-auto-sync-sessions
           (agent-log--sync-session
            session
@@ -2422,6 +2422,18 @@ that identify the session which just stopped producing output."
   (seq-find (lambda (session)
               (equal (car session) session-id))
             (agent-log--read-all-sessions)))
+
+(defun agent-log--session-from-id-fast (session-id)
+  "Return minimal session metadata for SESSION-ID without archive scans."
+  (when-let* ((file (agent-log--find-session-file-any session-id)))
+    (let ((backend (agent-log--backend-for-file file)))
+      (list session-id
+            :display ""
+            :timestamp nil
+            :project ""
+            :file-dir (file-name-directory file)
+            :file file
+            :backend backend))))
 
 ;;;###autoload
 (defun agent-log-stop-summarize-sessions ()
