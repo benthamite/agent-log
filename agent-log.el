@@ -1714,8 +1714,8 @@ Used to distinguish \"already processed, nothing to summarize\" from
 (defconst agent-log--summary-system-message
   "You are a concise summarizer. Given a conversation between a user and an AI \
 coding assistant, produce a JSON object with exactly two fields:
-- \"oneline\": A single-line summary (max 80 characters) capturing the main task \
-or topic.
+- \"oneline\": A single-line summary of around 80 characters capturing the main task \
+or topic. Use the imperative mode, as is standard in commit messages.
 - \"summary\": A paragraph of 3-5 sentences describing what was discussed, what \
 was accomplished, and key outcomes.
 Respond with ONLY the JSON object, no markdown formatting, no code fences, \
