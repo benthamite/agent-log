@@ -1275,8 +1275,11 @@ SUMMARY defaults to ONELINE."
                           (list session) index))
                  1)))))
 
-(ert-deftest agent-log-test-sessions-needing-summary/changed-hash-stale ()
-  "Treats summaries for older conversation text as stale."
+(ert-deftest agent-log-test-sessions-needing-summary/stale-file-state-usable ()
+  "Keeps hash-versioned summaries out of archive-wide pending work.
+The archive queue is intentionally cheap: a size/mtime mismatch may be
+a metadata-only rewrite, such as `move-session-log', and should not
+inflate the pending summary count."
   (agent-log-test--with-temp-dir
     (let* ((old-content "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"hello\"}}\n")
            (new-content (concat old-content
@@ -1288,9 +1291,8 @@ SUMMARY defaults to ONELINE."
            (index (make-hash-table :test #'equal)))
       (agent-log-test--write-file "s1.jsonl" new-content)
       (puthash "s1" old-entry index)
-      (should (= (length (agent-log--sessions-needing-summary
-                          (list session) index))
-                 1)))))
+      (should (null (agent-log--sessions-needing-summary
+                     (list session) index))))))
 
 (ert-deftest agent-log-test-upgrade-summary-index/v1-current ()
   "Upgrades a matching v1 summary instead of re-summarizing it."
@@ -1354,7 +1356,10 @@ SUMMARY defaults to ONELINE."
         (should (agent-log--session-summary-current-p session updated))))))
 
 (ert-deftest agent-log-test-upgrade-summary-index/v2-changed-conversation-stale ()
-  "Does not refresh v2 summaries when the conversation hash changed."
+  "Does not refresh v2 summaries when the conversation hash changed.
+The strict per-session predicate still sees the entry as stale, but the
+archive-wide queue keeps hash-versioned summaries usable without
+rereading every transcript."
   (agent-log-test--with-temp-dir
     (let* ((old-content "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"hello\"}}\n")
            (new-content (concat old-content
@@ -1368,9 +1373,11 @@ SUMMARY defaults to ONELINE."
       (agent-log-test--write-file "s1.jsonl" new-content)
       (puthash "s1" entry index)
       (should (= (agent-log--upgrade-summary-index (list session) index) 0))
-      (should (= (length (agent-log--sessions-needing-summary
-                          (list session) index))
-                 1)))))
+      (should-not (agent-log--session-summary-current-p
+                   session (gethash "s1" index)))
+      (should (agent-log--session-summary-usable-p (gethash "s1" index)))
+      (should (null (agent-log--sessions-needing-summary
+                     (list session) index))))))
 
 (ert-deftest agent-log-test-upgrade-summary-index/v2-empty-sentinel-current ()
   "Refreshes matching empty-session sentinels when file-state metadata is stale."
@@ -1417,7 +1424,10 @@ SUMMARY defaults to ONELINE."
                    1))))))
 
 (ert-deftest agent-log-test-upgrade-summary-index/upgraded-change-stale ()
-  "Does not re-stamp upgraded summaries after the file changes."
+  "Does not re-stamp upgraded summaries after the file changes.
+The strict per-session predicate still sees the entry as stale, but the
+archive-wide queue keeps hash-versioned summaries usable without
+rereading every transcript."
   (agent-log-test--with-temp-dir
     (let* ((old-content "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"hello\"}}\n")
            (new-content (concat old-content
@@ -1433,9 +1443,11 @@ SUMMARY defaults to ONELINE."
       (should (= (agent-log--upgrade-summary-index (list session) index) 1))
       (agent-log-test--write-file "s1.jsonl" new-content)
       (should (= (agent-log--upgrade-summary-index (list session) index) 0))
-      (should (= (length (agent-log--sessions-needing-summary
-                          (list session) index))
-                 1)))))
+      (should-not (agent-log--session-summary-current-p
+                   session (gethash "s1" index)))
+      (should (agent-log--session-summary-usable-p (gethash "s1" index)))
+      (should (null (agent-log--sessions-needing-summary
+                     (list session) index))))))
 
 (ert-deftest agent-log-test-summarize-next/preserves-v1-summary ()
   "Upgrades matching v1 summaries inside the timer-driven worker."
@@ -1521,7 +1533,7 @@ SUMMARY defaults to ONELINE."
         (should (= (nth 5 scheduled) 1))))))
 
 (ert-deftest agent-log-test-summarize-sessions/startup-does-not-refresh-v2 ()
-  "Does not rehash v2 summaries synchronously before scheduling work."
+  "Does not rehash or schedule usable stale-file-state v2 summaries."
   (agent-log-test--with-temp-dir
     (let* ((content "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"hello\"}}\n")
            (jsonl-path (agent-log-test--write-file "s1.jsonl" content))
@@ -1550,8 +1562,11 @@ SUMMARY defaults to ONELINE."
                  (lambda (&rest args)
                    (setq scheduled args))))
         (agent-log-summarize-sessions)
-        (should scheduled)
-        (should (= (nth 5 scheduled) 1))))))
+        (should-not scheduled)
+        (should (agent-log--session-summary-usable-p
+                 (gethash "s1" (agent-log--read-index))))
+        (should-not (agent-log--session-summary-current-p
+                     session (gethash "s1" (agent-log--read-index))))))))
 
 (ert-deftest agent-log-test-summarize-sessions/no-hash-startup-stays-pending ()
   "Does not drop no-hash legacy summaries from the pending queue."
@@ -1770,7 +1785,7 @@ session."
                      session (gethash "s1" (agent-log--read-index))))))))
 
 (ert-deftest agent-log-test-search/startup-does-not-refresh-v2 ()
-  "Does not rehash stale v2 summaries synchronously before search."
+  "Search uses stale-file-state v2 summaries without synchronous rehashing."
   (agent-log-test--with-temp-dir
     (let* ((content "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"hello\"}}\n")
            (jsonl-path (agent-log-test--write-file "s1.jsonl" content))
@@ -1781,6 +1796,7 @@ session."
            (agent-log-rendered-directory agent-log-test--dir)
            (index (make-hash-table :test #'equal))
            (orig-require (symbol-function 'require))
+           (requested nil)
            (entry (agent-log-test--summary-entry (cdr session) "A")))
       (plist-put entry :summary-jsonl-size -1)
       (puthash "s1" entry index)
@@ -1796,11 +1812,13 @@ session."
                  (lambda () (cons nil "test-model")))
                 ((symbol-function 'gptel-request)
                  (lambda (&rest _)
-                   (error "search should not request when no current summaries exist"))))
-        (should-error (agent-log-search "anything")
-                      :type 'user-error)
+                   (setq requested t))))
+        (agent-log-search "anything")
+        (should requested)
         (should-not (agent-log--session-summary-current-p
-                     session (gethash "s1" (agent-log--read-index))))))))
+                     session (gethash "s1" (agent-log--read-index))))
+        (should (agent-log--session-summary-usable-p
+                 (gethash "s1" (agent-log--read-index))))))))
 
 ;;;;; Search metadata
 
@@ -1846,6 +1864,28 @@ session."
           (should (= (plist-get metadata :unsummarized) 0))
           (should (= (plist-get metadata :legacy-summaries) 0))
           (should (= (plist-get metadata :empty-summaries) 1)))))))
+
+(ert-deftest agent-log-test-search-gather-metadata/stale-file-state-usable ()
+  "Counts hash-versioned summaries as usable despite stale file metadata."
+  (agent-log-test--with-temp-dir
+    (cl-letf (((symbol-function 'agent-log--active-backend-instances)
+               (lambda () nil)))
+      (let* ((jsonl-content "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"hello\"}}\n")
+             (jsonl-path (agent-log-test--write-file "s1.jsonl" jsonl-content))
+             (session (list "s1" :file jsonl-path
+                            :backend agent-log-test--claude-backend
+                            :timestamp 1700000000000
+                            :project "/tmp/project"))
+             (index (make-hash-table :test #'equal))
+             (entry (agent-log-test--summary-entry (cdr session) "A")))
+        (plist-put entry :summary-jsonl-size -1)
+        (puthash "s1" entry index)
+        (let ((metadata (agent-log--search-gather-metadata
+                         (list session) index)))
+          (should (= (plist-get metadata :summarized) 1))
+          (should (= (plist-get metadata :unsummarized) 0))
+          (should (= (plist-get metadata :legacy-summaries) 0))
+          (should (= (plist-get metadata :empty-summaries) 0)))))))
 
 (ert-deftest agent-log-test-search-apply-scope/excludes-active-sessions ()
   "Uses the same active-session exclusion as search metadata."

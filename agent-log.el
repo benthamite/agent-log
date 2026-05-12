@@ -1960,8 +1960,19 @@ Sessions with a live agent process are excluded by session ID."
        (let* ((sid (car session))
               (entry (gethash sid index)))
          (and (not (member sid active-ids))
-              (not (agent-log--session-summary-current-p session entry)))))
+              (not (agent-log--session-summary-usable-p entry)))))
      sessions)))
+
+(defun agent-log--session-summary-usable-p (entry)
+  "Return non-nil if ENTRY has a usable stored summary.
+This is intentionally cheaper and looser than
+`agent-log--session-summary-current-p': archive-wide summarization and
+search should not reread large transcripts merely because metadata-only
+rewrites changed JSONL size or mtime."
+  (and entry
+       (plist-get entry :summary-oneline)
+       (agent-log--summary-hash-current-version-p
+        (plist-get entry :summary-conversation-hash))))
 
 (defun agent-log--session-summary-current-p (session entry)
   "Return non-nil if SESSION has a current summary in ENTRY."
@@ -2119,6 +2130,11 @@ be refreshed without another LLM request."
   (and (agent-log--session-summary-current-p session entry)
        (agent-log--session-stored-real-summary-p entry)))
 
+(defun agent-log--session-real-summary-usable-p (entry)
+  "Return non-nil if ENTRY has a usable non-sentinel summary."
+  (and (agent-log--session-summary-usable-p entry)
+       (agent-log--session-stored-real-summary-p entry)))
+
 (defun agent-log--session-stored-real-summary-p (entry)
   "Return non-nil if ENTRY stores a non-sentinel summary."
   (and entry
@@ -2138,7 +2154,7 @@ be refreshed without another LLM request."
 ACTIVE-IDS is the list of currently running session IDs, which are
 excluded from search until their logs settle."
   (and (not (member (car session) active-ids))
-       (agent-log--session-real-summary-current-p session entry)))
+       (agent-log--session-real-summary-usable-p entry)))
 
 (defun agent-log--session-conversation-hash (metadata)
   "Return the current conversation hash for session METADATA."
@@ -2815,10 +2831,10 @@ Returns a plist with:
   :projects     - alist of (SHORT-NAME . COUNT) for searchable summaries
   :date-earliest - earliest timestamp (epoch-ms) among searchable sessions
   :date-latest   - latest timestamp (epoch-ms) among searchable sessions
-  :summarized    - count of sessions with searchable current summaries
-  :unsummarized  - count of sessions without current summaries
+  :summarized    - count of sessions with searchable usable summaries
+  :unsummarized  - count of sessions without usable summaries
   :legacy-summaries - count of real summaries lacking freshness hashes
-  :empty-summaries  - count of current summaries for empty sessions"
+  :empty-summaries  - count of usable summaries for empty sessions"
   (let ((project-counts (make-hash-table :test #'equal))
         (active-ids (cl-loop for backend in (agent-log--active-backend-instances)
                              append (agent-log--active-session-ids backend)))
@@ -2837,7 +2853,7 @@ Returns a plist with:
              (active (member sid active-ids))
              (current-summary
               (and (not active)
-                   (agent-log--session-summary-current-p session entry)))
+                   (agent-log--session-summary-usable-p entry)))
              (real-summary (agent-log--session-stored-real-summary-p entry))
              (legacy-summary (agent-log--session-legacy-real-summary-p entry)))
         (let ((oneline (and entry (plist-get entry :summary-oneline))))
