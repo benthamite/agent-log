@@ -59,6 +59,8 @@
 (defvar-local agent-log-codex--buffer-session-file nil
   "Codex transcript file last resolved for the current buffer.")
 
+(declare-function agent-log--session-end-hook-needed-p "agent-log")
+
 ;;;;; Struct definition
 
 (cl-defstruct (agent-log-codex (:constructor agent-log--make-codex)
@@ -812,6 +814,29 @@ Always return nil so other `codex-event-hook' handlers still run."
   (setq-local agent-log-codex--buffer-session-id nil)
   (setq-local agent-log-codex--buffer-session-file nil))
 
+(defun agent-log-codex--install-hooks (&optional session-end)
+  "Install Agent Log hooks for Codex.
+When SESSION-END is non-nil, also install the Stop-event handler
+that runs automatic sync and summary actions.  The session identity
+handler and start cleanup hook are installed unconditionally because
+they are needed to resolve the current Codex buffer to its transcript."
+  (add-hook 'codex-event-hook #'agent-log-codex--session-event-handler)
+  (if session-end
+      (add-hook 'codex-event-hook #'agent-log-codex--session-end-handler)
+    (remove-hook 'codex-event-hook #'agent-log-codex--session-end-handler))
+  (add-hook 'codex-start-hook #'agent-log-codex--clear-buffer-session))
+
+(defun agent-log-codex--ensure-hooks (&rest _)
+  "Reinstall Agent Log's Codex hooks if another package reset them."
+  (agent-log-codex--install-hooks
+   (agent-log--session-end-hook-needed-p)))
+
+(defun agent-log-codex--install-dispatch-advice ()
+  "Ensure Agent Log hooks are present before Codex dispatches an event."
+  (when (fboundp 'codex-handle-hook)
+    (advice-add 'codex-handle-hook
+                :before #'agent-log-codex--ensure-hooks)))
+
 ;;;;; Icon
 
 (defconst agent-log-codex--icon-svg
@@ -832,8 +857,11 @@ Source: SVG Repo (CC0).")
 
 (agent-log--register-backend 'codex agent-log-codex--instance)
 
-(add-hook 'codex-event-hook #'agent-log-codex--session-event-handler)
-(add-hook 'codex-start-hook #'agent-log-codex--clear-buffer-session)
+(agent-log-codex--install-hooks
+ (agent-log--session-end-hook-needed-p))
+(agent-log-codex--install-dispatch-advice)
+(with-eval-after-load 'codex
+  (agent-log-codex--install-dispatch-advice))
 
 (provide 'agent-log-codex)
 ;;; agent-log-codex.el ends here

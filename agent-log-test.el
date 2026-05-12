@@ -1487,8 +1487,8 @@ SUMMARY defaults to ONELINE."
               (should (agent-log--session-summary-current-p session updated))))
         (setq agent-log--summarize-active nil)))))
 
-(ert-deftest agent-log-test-summarize-sessions/startup-upgrade-preserves-v1 ()
-  "Preserves matching v1 summaries before scheduling LLM work."
+(ert-deftest agent-log-test-summarize-sessions/startup-does-not-upgrade-v1 ()
+  "Does not refresh stale summaries synchronously before scheduling work."
   (agent-log-test--with-temp-dir
     (let* ((content "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"hello\"}}\n")
            (jsonl-path (agent-log-test--write-file "s1.jsonl" content))
@@ -1497,7 +1497,8 @@ SUMMARY defaults to ONELINE."
            (agent-log-rendered-directory agent-log-test--dir)
            (index (make-hash-table :test #'equal))
            (orig-require (symbol-function 'require))
-           (agent-log--summarize-active nil))
+           (agent-log--summarize-active nil)
+           scheduled)
       (puthash "s1" (agent-log-test--legacy-summary-entry
                      (cdr session) "A")
                index)
@@ -1509,15 +1510,18 @@ SUMMARY defaults to ONELINE."
                      (funcall orig-require feature filename noerror))))
                 ((symbol-function 'agent-log--read-all-sessions)
                  (lambda () (list session)))
-                ((symbol-function 'run-with-timer)
+                ((symbol-function 'agent-log--upgrade-summary-index)
                  (lambda (&rest _)
-                   (error "summary should not be scheduled"))))
+                   (error "startup should not parse session transcripts")))
+                ((symbol-function 'run-with-timer)
+                 (lambda (&rest args)
+                   (setq scheduled args))))
         (agent-log-summarize-sessions)
-        (should (agent-log--session-summary-current-p
-                 session (gethash "s1" (agent-log--read-index))))))))
+        (should scheduled)
+        (should (= (nth 5 scheduled) 1))))))
 
-(ert-deftest agent-log-test-summarize-sessions/startup-refresh-preserves-v2 ()
-  "Preserves matching v2 summaries before scheduling LLM work."
+(ert-deftest agent-log-test-summarize-sessions/startup-does-not-refresh-v2 ()
+  "Does not rehash v2 summaries synchronously before scheduling work."
   (agent-log-test--with-temp-dir
     (let* ((content "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"hello\"}}\n")
            (jsonl-path (agent-log-test--write-file "s1.jsonl" content))
@@ -1527,7 +1531,8 @@ SUMMARY defaults to ONELINE."
            (index (make-hash-table :test #'equal))
            (orig-require (symbol-function 'require))
            (agent-log--summarize-active nil)
-           (entry (agent-log-test--summary-entry (cdr session) "A")))
+           (entry (agent-log-test--summary-entry (cdr session) "A"))
+           scheduled)
       (plist-put entry :summary-jsonl-size -1)
       (puthash "s1" entry index)
       (agent-log--write-index index)
@@ -1538,12 +1543,15 @@ SUMMARY defaults to ONELINE."
                      (funcall orig-require feature filename noerror))))
                 ((symbol-function 'agent-log--read-all-sessions)
                  (lambda () (list session)))
-                ((symbol-function 'run-with-timer)
+                ((symbol-function 'agent-log--upgrade-summary-index)
                  (lambda (&rest _)
-                   (error "summary should not be scheduled"))))
+                   (error "startup should not parse session transcripts")))
+                ((symbol-function 'run-with-timer)
+                 (lambda (&rest args)
+                   (setq scheduled args))))
         (agent-log-summarize-sessions)
-        (should (agent-log--session-summary-current-p
-                 session (gethash "s1" (agent-log--read-index))))))))
+        (should scheduled)
+        (should (= (nth 5 scheduled) 1))))))
 
 (ert-deftest agent-log-test-summarize-sessions/no-hash-startup-stays-pending ()
   "Does not drop no-hash legacy summaries from the pending queue."
@@ -1675,6 +1683,24 @@ SUMMARY defaults to ONELINE."
     (agent-log--update-session-end-hook)
     (should (memq #'agent-log-codex--session-end-handler codex-event-hook))))
 
+(ert-deftest agent-log-test-update-session-end-hook/adds-codex-identity-hook ()
+  "Auto session-end setup must also record Codex session IDs.
+If another package has reset `codex-event-hook', installing only the
+Stop handler leaves automatic summaries unable to resolve the stopped
+session."
+  (let ((codex-event-hook '(agent-codex--handle-notification))
+        (codex-start-hook nil)
+        (claude-code-event-hook nil)
+        (agent-log-auto-sync-sessions nil)
+        (agent-log-auto-summarize-sessions t))
+    (agent-log--update-session-end-hook)
+    (should (memq #'agent-log-codex--session-event-handler
+                  codex-event-hook))
+    (should (memq #'agent-log-codex--session-end-handler
+                  codex-event-hook))
+    (should (memq #'agent-log-codex--clear-buffer-session
+                  codex-start-hook))))
+
 (ert-deftest agent-log-test-codex-session-id-from-event ()
   "Resolves a Codex Stop event buffer to its session ID."
   (let ((file "/tmp/rollout-2026-05-10-12345678-1234-1234-1234-123456789abc.jsonl"))
@@ -1710,8 +1736,8 @@ SUMMARY defaults to ONELINE."
                "pending update 1/20 (archive: 2571 sessions)"
                (car messages))))))
 
-(ert-deftest agent-log-test-search/startup-upgrade-preserves-v1 ()
-  "Preserves matching v1 summaries before search."
+(ert-deftest agent-log-test-search/startup-does-not-upgrade-v1 ()
+  "Does not refresh legacy summaries synchronously before search."
   (agent-log-test--with-temp-dir
     (let* ((content "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"hello\"}}\n")
            (jsonl-path (agent-log-test--write-file "s1.jsonl" content))
@@ -1721,8 +1747,7 @@ SUMMARY defaults to ONELINE."
                           :backend agent-log-test--claude-backend))
            (agent-log-rendered-directory agent-log-test--dir)
            (index (make-hash-table :test #'equal))
-           (orig-require (symbol-function 'require))
-           requested)
+           (orig-require (symbol-function 'require)))
       (puthash "s1" (agent-log-test--legacy-summary-entry
                      (cdr session) "A")
                index)
@@ -1737,14 +1762,15 @@ SUMMARY defaults to ONELINE."
                 ((symbol-function 'agent-log--resolve-search-scope-backend-and-model)
                  (lambda () (cons nil "test-model")))
                 ((symbol-function 'gptel-request)
-                 (lambda (&rest _) (setq requested t))))
-        (agent-log-search "anything")
-        (should requested)
-        (should (agent-log--session-summary-current-p
-                 session (gethash "s1" (agent-log--read-index))))))))
+                 (lambda (&rest _)
+                   (error "search should not request when no current summaries exist"))))
+        (should-error (agent-log-search "anything")
+                      :type 'user-error)
+        (should-not (agent-log--session-summary-current-p
+                     session (gethash "s1" (agent-log--read-index))))))))
 
-(ert-deftest agent-log-test-search/startup-refresh-preserves-v2 ()
-  "Preserves matching v2 summaries before search."
+(ert-deftest agent-log-test-search/startup-does-not-refresh-v2 ()
+  "Does not rehash stale v2 summaries synchronously before search."
   (agent-log-test--with-temp-dir
     (let* ((content "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"hello\"}}\n")
            (jsonl-path (agent-log-test--write-file "s1.jsonl" content))
@@ -1755,8 +1781,7 @@ SUMMARY defaults to ONELINE."
            (agent-log-rendered-directory agent-log-test--dir)
            (index (make-hash-table :test #'equal))
            (orig-require (symbol-function 'require))
-           (entry (agent-log-test--summary-entry (cdr session) "A"))
-           requested)
+           (entry (agent-log-test--summary-entry (cdr session) "A")))
       (plist-put entry :summary-jsonl-size -1)
       (puthash "s1" entry index)
       (agent-log--write-index index)
@@ -1770,11 +1795,12 @@ SUMMARY defaults to ONELINE."
                 ((symbol-function 'agent-log--resolve-search-scope-backend-and-model)
                  (lambda () (cons nil "test-model")))
                 ((symbol-function 'gptel-request)
-                 (lambda (&rest _) (setq requested t))))
-        (agent-log-search "anything")
-        (should requested)
-        (should (agent-log--session-summary-current-p
-                 session (gethash "s1" (agent-log--read-index))))))))
+                 (lambda (&rest _)
+                   (error "search should not request when no current summaries exist"))))
+        (should-error (agent-log-search "anything")
+                      :type 'user-error)
+        (should-not (agent-log--session-summary-current-p
+                     session (gethash "s1" (agent-log--read-index))))))))
 
 ;;;;; Search metadata
 
@@ -1855,6 +1881,26 @@ SUMMARY defaults to ONELINE."
                   (list :legacy-summaries 2 :empty-summaries 0))))
     (should (string-match-p "predate freshness tracking" message))
     (should (string-match-p "agent-log-summarize-sessions" message))))
+
+(ert-deftest agent-log-test-search/does-not-upgrade-before-metadata ()
+  "AI search does not refresh summary fingerprints on the UI path."
+  (let ((sessions nil)
+        (index (make-hash-table :test #'equal))
+        (orig-require (symbol-function 'require)))
+    (cl-letf (((symbol-function 'require)
+               (lambda (feature &optional filename noerror)
+                 (if (eq feature 'gptel)
+                     t
+                   (funcall orig-require feature filename noerror))))
+              ((symbol-function 'agent-log--read-all-sessions)
+               (lambda () sessions))
+              ((symbol-function 'agent-log--read-index)
+               (lambda () index))
+              ((symbol-function 'agent-log--upgrade-summary-index)
+               (lambda (&rest _)
+                 (error "search should not parse session transcripts"))))
+      (should-error (agent-log-search "hello")
+                    :type 'user-error))))
 
 ;;;;; Claude session titles
 

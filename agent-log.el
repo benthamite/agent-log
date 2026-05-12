@@ -265,6 +265,7 @@ Returns nil if KEY is not in `agent-log-backends'."
 ;;;;;; Forward declarations for agent-log-codex.el
 
 (declare-function agent-log-codex--session-end-handler "agent-log-codex")
+(declare-function agent-log-codex--install-hooks "agent-log-codex")
 (defvar codex-event-hook)
 
 (defcustom agent-log-directory "~/.claude"
@@ -365,16 +366,12 @@ When nil, defaults to `gptel-model'."
 (defun agent-log--update-codex-session-end-hook ()
   "Install or remove the Codex session-end hook."
   (if (featurep 'agent-log-codex)
-      (if (agent-log--session-end-hook-needed-p)
-          (add-hook 'codex-event-hook
-                    #'agent-log-codex--session-end-handler)
-        (remove-hook 'codex-event-hook
-                     #'agent-log-codex--session-end-handler))
+      (agent-log-codex--install-hooks
+       (agent-log--session-end-hook-needed-p))
     (when (agent-log--session-end-hook-needed-p)
       (eval-after-load 'agent-log-codex
         '(when (agent-log--session-end-hook-needed-p)
-           (add-hook 'codex-event-hook
-                     #'agent-log-codex--session-end-handler))))))
+           (agent-log-codex--install-hooks t))))))
 
 (defcustom agent-log-auto-sync-sessions nil
   "Whether to sync sessions when an agent session stops.
@@ -2183,7 +2180,6 @@ If summary generation is already in progress, stop it instead."
           agent-log--summarize-consecutive-failures 0)
     (let* ((sessions (agent-log--read-all-sessions))
            (index (agent-log--read-index)))
-      (agent-log--upgrade-summary-index sessions index)
       (let ((pending (agent-log--sessions-needing-summary sessions index)))
         (if (null pending)
             (message "All %d sessions already have current summaries"
@@ -3263,7 +3259,6 @@ clickable links to the matching logs."
     (user-error "Package `gptel' is required for AI search"))
   (let* ((sessions (agent-log--read-all-sessions))
          (index (agent-log--read-index)))
-    (agent-log--upgrade-summary-index sessions index)
     (let* ((metadata (agent-log--search-gather-metadata sessions index))
            (unsummarized (plist-get metadata :unsummarized))
            (summarized (plist-get metadata :summarized)))
