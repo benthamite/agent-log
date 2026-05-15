@@ -299,11 +299,16 @@ extraction.  Returns nil if either is unavailable."
                    (claude-code--buffer-p buf)
                    (when-let* ((proc (get-buffer-process buf)))
                      (process-live-p proc)))
-          (when-let* ((data (buffer-local-value
-                             'claude-code-extras--status-data buf))
+          (when-let* ((data (agent-log-claude--buffer-status-data buf))
                       (sid (plist-get data :session_id)))
             (push sid ids))))
       (delete-dups ids))))
+
+(defun agent-log-claude--buffer-status-data (buffer)
+  "Return Claude Code extras status data for BUFFER, if bound."
+  (with-current-buffer buffer
+    (when (boundp 'claude-code-extras--status-data)
+      claude-code-extras--status-data)))
 
 ;;;;;; Resume session
 

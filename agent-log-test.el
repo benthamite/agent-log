@@ -2353,6 +2353,39 @@ session."
       (kill-buffer buf1)
       (kill-buffer buf2))))
 
+(ert-deftest agent-log-test-claude-active-session-ids/unbound-status ()
+  "Skips live Claude buffers without bound extras status data."
+  (let ((buf1 (generate-new-buffer "claude-1"))
+        (buf2 (generate-new-buffer "claude-2"))
+        (status-bound (boundp 'claude-code-extras--status-data))
+        (status-value (when (boundp 'claude-code-extras--status-data)
+                        claude-code-extras--status-data)))
+    (unwind-protect
+        (progn
+          (makunbound 'claude-code-extras--status-data)
+          (with-current-buffer buf1
+            (setq-local claude-code-extras--status-data
+                        '(:session_id "claude-session")))
+          (cl-letf (((symbol-function 'require)
+                     (lambda (feature &rest _)
+                       (eq feature 'claude-code)))
+                    ((symbol-function 'buffer-list)
+                     (lambda () (list buf1 buf2)))
+                    ((symbol-function 'claude-code--buffer-p)
+                     (lambda (buffer) (memq buffer (list buf1 buf2))))
+                    ((symbol-function 'get-buffer-process)
+                     (lambda (_buffer) 'process))
+                    ((symbol-function 'process-live-p)
+                     (lambda (_process) t)))
+            (should (equal (agent-log--active-session-ids
+                            agent-log-test--claude-backend)
+                           '("claude-session")))))
+      (if status-bound
+          (setq claude-code-extras--status-data status-value)
+        (makunbound 'claude-code-extras--status-data))
+      (kill-buffer buf1)
+      (kill-buffer buf2))))
+
 ;;;;;; Entry normalization
 
 (ert-deftest agent-log-test-codex-normalize/session-meta ()
