@@ -373,11 +373,28 @@ When nil, defaults to `gptel-model'."
         '(when (agent-log--session-end-hook-needed-p)
            (agent-log-codex--install-hooks t))))))
 
+(defvar agent-log--auto-summary-sweep-timer nil
+  "Timer used to periodically sweep for unsummarized sessions.")
+
+(defun agent-log--update-auto-summary-sweep-timer (&rest _)
+  "Install or cancel the automatic summary backlog sweep timer."
+  (when (timerp agent-log--auto-summary-sweep-timer)
+    (cancel-timer agent-log--auto-summary-sweep-timer))
+  (setq agent-log--auto-summary-sweep-timer nil)
+  (when (and (bound-and-true-p agent-log-auto-summarize-sessions)
+             (boundp 'agent-log-auto-summarize-sweep-interval)
+             (numberp agent-log-auto-summarize-sweep-interval)
+             (> agent-log-auto-summarize-sweep-interval 0))
+    (setq agent-log--auto-summary-sweep-timer
+          (run-at-time agent-log-auto-summarize-sweep-interval
+                       agent-log-auto-summarize-sweep-interval
+                       #'agent-log--auto-summary-sweep))))
+
 (defcustom agent-log-auto-sync-sessions nil
   "Whether to sync sessions when an agent session stops.
 When non-nil, the stopped session is rendered automatically when
 Claude Code or Codex reports a Stop event.  If the event cannot be
-resolved to a session, `agent-log-sync-sessions' runs instead."
+resolved to a session, automatic sync is skipped."
   :type 'boolean
   :set (lambda (sym val)
          (set-default sym val)
@@ -386,13 +403,33 @@ resolved to a session, `agent-log-sync-sessions' runs instead."
 (defcustom agent-log-auto-summarize-sessions nil
   "Whether to summarize sessions when an agent session stops.
 When non-nil, the stopped session is summarized automatically when
-Claude Code or Codex reports a Stop event.  If the event cannot be
-resolved to a session, `agent-log-summarize-sessions' runs
-instead."
+Claude Code or Codex reports a Stop event.  A periodic background
+batch sweep also picks up sessions that were created outside the
+Emacs event hooks."
   :type 'boolean
   :set (lambda (sym val)
          (set-default sym val)
-         (agent-log--update-session-end-hook)))
+         (agent-log--update-session-end-hook)
+         (agent-log--update-auto-summary-sweep-timer)))
+
+(defcustom agent-log-auto-summarize-sweep-interval 900
+  "Seconds between automatic background sweeps for unsummarized sessions.
+When `agent-log-auto-summarize-sessions' is non-nil, the sweep
+starts a separate batch Emacs process that scans the archive and
+summarizes a bounded number of pending sessions.  Set this option
+to nil to disable backlog sweeps while keeping session-end
+summaries enabled."
+  :type '(choice (const :tag "Disable periodic backlog sweeps" nil)
+                 (integer :tag "Seconds"))
+  :set (lambda (sym val)
+         (set-default sym val)
+         (agent-log--update-auto-summary-sweep-timer)))
+
+(defcustom agent-log-auto-summarize-sweep-limit 20
+  "Maximum number of pending sessions summarized by each backlog sweep."
+  :type 'integer)
+
+(agent-log--update-auto-summary-sweep-timer)
 
 (defcustom agent-log-auto-rename-sessions nil
   "When non-nil, rename sessions automatically after summarization.
@@ -2247,6 +2284,12 @@ not call it as a fallback."
              (not agent-log--summarize-blocked-reason))
     (agent-log--spawn-summary-worker (car session))))
 
+(defun agent-log--auto-summary-sweep ()
+  "Start a background worker that summarizes a bounded pending backlog."
+  (when (agent-log--auto-summarize-ready-p)
+    (agent-log--spawn-summary-sweep-worker
+     agent-log-auto-summarize-sweep-limit)))
+
 (defun agent-log--auto-summarize-ready-p ()
   "Return non-nil when automatic summary generation may start."
   (and agent-log-auto-summarize-sessions
@@ -2303,6 +2346,30 @@ that identify the session which just stopped producing output."
            (delete-file state-file))
          (signal (car err) (cdr err)))))))
 
+(defun agent-log--spawn-summary-sweep-worker (limit)
+  "Start a background summary backlog worker for up to LIMIT sessions."
+  (let ((key :sweep))
+    (unless (gethash key agent-log--summary-workers)
+      (let ((state-file (agent-log--summary-sweep-worker-state-file limit)))
+        (condition-case err
+            (let ((process
+                   (make-process
+                    :name "agent-log-summary-sweep"
+                    :buffer nil
+                    :noquery t
+                    :connection-type 'pipe
+                    :command (agent-log--summary-worker-command state-file)
+                    :sentinel (lambda (proc event)
+                                (agent-log--summary-worker-sentinel
+                                 key proc event)))))
+              (puthash key (cons process state-file)
+                       agent-log--summary-workers)
+              (message "agent-log: summarizing pending sessions in background"))
+          (error
+           (when (file-exists-p state-file)
+             (delete-file state-file))
+           (signal (car err) (cdr err))))))))
+
 (defun agent-log--summary-worker-command (state-file)
   "Return the batch Emacs command loading STATE-FILE."
   (let ((emacs (expand-file-name invocation-name invocation-directory)))
@@ -2310,6 +2377,16 @@ that identify the session which just stopped producing output."
 
 (defun agent-log--summary-worker-state-file (session-id)
   "Write and return a private batch state file for SESSION-ID."
+  (agent-log--summary-worker-state-file-for-form
+   `(agent-log--batch-summarize-session ,session-id)))
+
+(defun agent-log--summary-sweep-worker-state-file (limit)
+  "Write and return a private batch state file for a pending sweep."
+  (agent-log--summary-worker-state-file-for-form
+   `(agent-log--batch-summarize-pending ,limit)))
+
+(defun agent-log--summary-worker-state-file-for-form (form)
+  "Write and return a private batch state file that evaluates FORM."
   (let ((file (make-temp-file "agent-log-summary-worker-" nil ".el")))
     (with-temp-file file
       (let ((print-length nil)
@@ -2333,7 +2410,7 @@ that identify the session which just stopped producing output."
                 (when-let* ((backend-name
                              ',(agent-log--summary-worker-default-backend-name)))
                   (setq gptel-backend (gptel-get-backend backend-name)))
-                (agent-log--batch-summarize-session ,session-id))
+                ,form)
             (when (and load-file-name (file-exists-p load-file-name))
               (delete-file load-file-name)))
          (current-buffer))
@@ -2428,6 +2505,35 @@ that identify the session which just stopped producing output."
           (when agent-log--summarize-blocked-reason
             (kill-emacs 1)))
       (user-error "No session found for %s" session-id))))
+
+(defun agent-log--batch-summarize-pending (limit)
+  "Summarize up to LIMIT pending sessions and wait for completion."
+  (unless (require 'gptel nil t)
+    (user-error "Package `gptel' is required for summary generation"))
+  (let ((agent-log-auto-summarize-sessions t)
+        (agent-log--summarize-active nil)
+        (agent-log--summarize-blocked-reason nil))
+    (let* ((sessions (agent-log--read-all-sessions))
+           (index (agent-log--read-index))
+           (pending (agent-log--sessions-needing-summary sessions index))
+           (limit (max 1 (or limit 1)))
+           (batch (seq-take pending limit)))
+      (if (null batch)
+          (message "agent-log: no pending summaries")
+        (setq agent-log--summarize-active t
+              agent-log--summarize-stop nil
+              agent-log--summarize-archive-total (length sessions))
+        (cl-incf agent-log--summarize-generation)
+        (message
+         "agent-log: summarizing %d/%d pending summary update(s) in background"
+         (length batch) (length pending))
+        (run-with-timer 0 nil #'agent-log--summarize-next
+                        batch 0 (length batch)
+                        agent-log--summarize-generation)
+        (while agent-log--summarize-active
+          (accept-process-output nil 1))
+        (when agent-log--summarize-blocked-reason
+          (kill-emacs 1))))))
 
 (defun agent-log--find-session-by-id (session-id)
   "Return the session metadata entry for SESSION-ID, or nil."

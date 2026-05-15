@@ -1689,6 +1689,83 @@ rereading every transcript."
       (should-not called)
       (should-not messages))))
 
+(ert-deftest agent-log-test-auto-summary-sweep/spawns-background-worker ()
+  "Automatic backlog sweeps start a batch worker, not a live archive scan."
+  (let* ((agent-log--summary-workers (make-hash-table :test #'equal))
+         (agent-log-auto-summarize-sessions t)
+         (agent-log-auto-summarize-sweep-limit 7)
+         (agent-log--summarize-active nil)
+         (agent-log--summarize-blocked-reason nil)
+         (orig-require (symbol-function 'require))
+         command)
+    (cl-letf (((symbol-function 'require)
+               (lambda (feature &optional filename noerror)
+                 (if (eq feature 'gptel)
+                     t
+                   (funcall orig-require feature filename noerror))))
+              ((symbol-function 'agent-log--read-all-sessions)
+               (lambda ()
+                 (ert-fail "automatic sweep scanned archive in live Emacs")))
+              ((symbol-function 'make-process)
+               (lambda (&rest args)
+                 (setq command (plist-get args :command))
+                 (make-symbol "process"))))
+      (unwind-protect
+          (progn
+            (agent-log--auto-summary-sweep)
+            (should command)
+            (should (member "--quick" command))
+            (should (member "--batch" command))
+            (let* ((state-file (cadr (member "--load" command)))
+                   (state (and state-file
+                               (file-exists-p state-file)
+                               (with-temp-buffer
+                                 (insert-file-contents state-file)
+                                 (buffer-string)))))
+              (should state)
+              (should (string-match-p
+                       "agent-log--batch-summarize-pending 7"
+                       state))))
+        (when-let* ((state-file (cadr (member "--load" command))))
+          (when (file-exists-p state-file)
+            (delete-file state-file)))))))
+
+(ert-deftest agent-log-test-auto-summary-sweep/skips-duplicate-worker ()
+  "Automatic backlog sweeps do not start overlapping sweep workers."
+  (let ((agent-log--summary-workers (make-hash-table :test #'equal)))
+    (puthash :sweep (cons 'process "/tmp/state.el")
+             agent-log--summary-workers)
+    (cl-letf (((symbol-function 'make-process)
+               (lambda (&rest _)
+                 (ert-fail "duplicate sweep worker started"))))
+      (agent-log--spawn-summary-sweep-worker 5))))
+
+(ert-deftest agent-log-test-batch-summarize-pending/limits-work ()
+  "Batch backlog workers summarize only a bounded pending batch."
+  (let* ((sessions (list (list "s1") (list "s2") (list "s3")))
+         (index (make-hash-table :test #'equal))
+         (orig-require (symbol-function 'require))
+         captured)
+    (cl-letf (((symbol-function 'require)
+               (lambda (feature &optional filename noerror)
+                 (if (eq feature 'gptel)
+                     t
+                   (funcall orig-require feature filename noerror))))
+              ((symbol-function 'agent-log--read-all-sessions)
+               (lambda () sessions))
+              ((symbol-function 'agent-log--read-index)
+               (lambda () index))
+              ((symbol-function 'agent-log--sessions-needing-summary)
+               (lambda (&rest _) sessions))
+              ((symbol-function 'run-with-timer)
+               (lambda (_secs _repeat fn &rest args)
+                 (setq captured (cons fn args))
+                 (setq agent-log--summarize-active nil))))
+      (agent-log--batch-summarize-pending 2)
+      (should (eq (car captured) #'agent-log--summarize-next))
+      (should (= (length (cadr captured)) 2))
+      (should (= (nth 3 captured) 2)))))
+
 (ert-deftest agent-log-test-update-session-end-hook/adds-codex-hook ()
   "Installs the Codex event handler when automatic actions are enabled."
   (let ((codex-event-hook nil)
