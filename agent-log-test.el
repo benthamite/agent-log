@@ -486,6 +486,40 @@ SUMMARY defaults to ONELINE."
     (should (not (string-match-p "[/.]" result)))
     (should (string-match-p "-home-user-my-project" result))))
 
+(ert-deftest agent-log-test-claude-find-encoded-project/spaces ()
+  "Finds an existing project from Claude's encoded directory name."
+  (agent-log-test--with-temp-dir
+    (let* ((project-dir (expand-file-name "My Drive/repos/ta65"
+                                          agent-log-test--dir))
+           (encoded (agent-log-claude--encode-project-path project-dir)))
+      (make-directory project-dir t)
+      (should (equal (agent-log-claude--find-encoded-project-below
+                      agent-log-test--dir encoded 6)
+                     (file-name-as-directory project-dir))))))
+
+(ert-deftest agent-log-test-claude-session-project-directory/source-fallback ()
+  "Uses the source JSONL projects directory when history has a stale path."
+  (agent-log-test--with-temp-dir
+    (let* ((project-dir (expand-file-name "My Drive/repos/ta65"
+                                          agent-log-test--dir))
+           (encoded (agent-log-claude--encode-project-path project-dir))
+           (jsonl-path (agent-log-test--write-file
+                        (format ".claude/projects/%s/s1.jsonl" encoded)
+                        ""))
+           (history-path (agent-log-test--write-file
+                          ".claude/history.jsonl"
+                          "{\"sessionId\":\"s1\",\"project\":\"/missing\"}\n"))
+           (agent-log-directory (file-name-directory history-path))
+           (agent-log--source-file jsonl-path)
+           (agent-log--session-project nil))
+      (make-directory project-dir t)
+      (cl-letf (((symbol-function 'agent-log-claude--find-existing-encoded-project)
+                 (lambda (actual-encoded)
+                   (and (equal actual-encoded encoded)
+                        project-dir))))
+        (should (equal (agent-log-claude--session-project-directory "s1")
+                       (file-name-as-directory project-dir)))))))
+
 ;;;;; Index management
 
 (ert-deftest agent-log-test-read-index/missing-file ()
@@ -2069,6 +2103,86 @@ session."
   (with-temp-buffer
     (insert "No front matter here\n")
     (should (null (agent-log--extract-session-id-from-buffer)))))
+
+(ert-deftest agent-log-test-extract-source-file-from-buffer ()
+  "Extracts source JSONL path from front matter."
+  (with-temp-buffer
+    (insert "<!-- session: abc-def-123 -->\n")
+    (insert "<!-- source: /tmp/test.jsonl -->\n")
+    (should (equal (agent-log--extract-source-file-from-buffer)
+                   "/tmp/test.jsonl"))))
+
+(ert-deftest agent-log-test-resume-session/hydrates-direct-rendered-buffer ()
+  "Resumes direct-opened rendered logs using front matter."
+  (agent-log-test--with-temp-dir
+    (let* ((project-dir (expand-file-name "project" agent-log-test--dir))
+           (jsonl-path (agent-log-test--write-file
+                        "session.jsonl"
+                        (format "{\"type\":\"progress\",\"cwd\":%S}\n"
+                                project-dir)))
+           (backend (agent-log--make-claude
+                     :name "Claude Code"
+                     :key 'claude-code
+                     :directory agent-log-test--dir))
+           called)
+      (make-directory project-dir t)
+      (with-temp-buffer
+        (insert "<!-- session: abc-def-123 -->\n")
+        (insert (format "<!-- source: %s -->\n" jsonl-path))
+        (cl-letf (((symbol-function 'agent-log--active-backend-instances)
+                   (lambda () (list backend)))
+                  ((symbol-function 'agent-log--resume-session)
+                   (lambda (actual-backend session-id)
+                     (setq called (list actual-backend session-id
+                                        agent-log--session-project)))))
+          (agent-log-resume-session))
+        (should (equal called (list backend "abc-def-123" project-dir)))
+        (should (eq agent-log--backend backend))
+        (should (equal agent-log--source-file jsonl-path))))))
+
+(ert-deftest agent-log-test-resume-session/claude-source-fallback-directory ()
+  "Starts Claude in the source-derived project when history is stale."
+  (agent-log-test--with-temp-dir
+    (let* ((project-dir (expand-file-name "My Drive/repos/ta65"
+                                          agent-log-test--dir))
+           (encoded (agent-log-claude--encode-project-path project-dir))
+           (claude-dir (expand-file-name ".claude" agent-log-test--dir))
+           (jsonl-path (agent-log-test--write-file
+                        (format ".claude/projects/%s/s1.jsonl" encoded)
+                        ""))
+           (history-path (agent-log-test--write-file
+                          ".claude/history.jsonl"
+                          "{\"sessionId\":\"s1\",\"project\":\"/missing\"}\n"))
+           (backend (agent-log--make-claude
+                     :name "Claude Code"
+                     :key 'claude-code
+                     :directory claude-dir))
+           (agent-log-directory (file-name-directory history-path))
+           (orig-require (symbol-function 'require))
+           called)
+      (make-directory project-dir t)
+      (with-temp-buffer
+        (insert "<!-- session: s1 -->\n")
+        (insert (format "<!-- source: %s -->\n" jsonl-path))
+        (cl-letf (((symbol-function 'agent-log--active-backend-instances)
+                   (lambda () (list backend)))
+                  ((symbol-function 'agent-log-claude--find-existing-encoded-project)
+                   (lambda (actual-encoded)
+                     (and (equal actual-encoded encoded) project-dir)))
+                  ((symbol-function 'require)
+                   (lambda (feature &optional filename noerror)
+                     (if (eq feature 'claude-code)
+                         t
+                       (funcall orig-require feature filename noerror))))
+                  ((symbol-function 'claude-code--start)
+                   (lambda (&rest args)
+                     (setq called (list args (claude-code--directory)))))
+                  ((symbol-function 'claude-code--directory)
+                   (lambda () default-directory)))
+          (agent-log-resume-session))
+        (should (equal called
+                       (list (list nil (list "--resume" "s1"))
+                             (file-name-as-directory project-dir))))))))
 
 ;;;;; Ensure rendered (integration)
 

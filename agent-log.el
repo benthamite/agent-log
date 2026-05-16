@@ -3447,14 +3447,24 @@ dollar cost of the scope request."
 
 (defun agent-log--extract-session-id-from-buffer ()
   "Extract session ID from the front-matter comment of the current buffer."
+  (agent-log--extract-front-matter-field "session"))
+
+(defun agent-log--extract-source-file-from-buffer ()
+  "Extract source JSONL file from the front-matter comment."
+  (agent-log--extract-front-matter-field "source"))
+
+(defun agent-log--extract-front-matter-field (field)
+  "Extract FIELD from a rendered front-matter HTML comment."
   (save-excursion
     (goto-char (point-min))
-    (when (re-search-forward "<!-- session: \\([^ ]+\\) -->" nil t)
-      (match-string 1))))
+    (when (re-search-forward
+           (format "<!-- %s: \\(.+?\\) -->" (regexp-quote field)) nil t)
+      (match-string-no-properties 1))))
 
 (defun agent-log-resume-session ()
   "Resume the session for the current buffer in the coding agent."
   (interactive)
+  (agent-log--hydrate-current-rendered-buffer)
   (let ((session-id (or agent-log--session-id
                         (agent-log--extract-session-id-from-buffer))))
     (unless session-id
@@ -3462,6 +3472,36 @@ dollar cost of the scope request."
     (unless agent-log--backend
       (user-error "No backend associated with this buffer"))
     (agent-log--resume-session agent-log--backend session-id)))
+
+(defun agent-log--hydrate-current-rendered-buffer ()
+  "Populate rendered-log buffer locals from front matter when possible."
+  (when-let* ((source (or agent-log--source-file
+                          (agent-log--extract-source-file-from-buffer)))
+              ((file-exists-p source))
+              (backend (or agent-log--backend
+                           (agent-log--backend-for-file source))))
+    (setq-local agent-log--source-file source)
+    (setq-local agent-log--backend backend)
+    (unless agent-log--session-id
+      (setq-local agent-log--session-id
+                  (agent-log--extract-session-id-from-buffer)))
+    (unless (and agent-log--session-project
+                 (not (string-empty-p agent-log--session-project))
+                 (file-directory-p agent-log--session-project))
+      (setq-local agent-log--session-project
+                  (agent-log--project-from-source-file source backend)))))
+
+(defun agent-log--project-from-source-file (source backend)
+  "Return the project directory recorded in SOURCE for BACKEND."
+  (let (agent-log--session-date
+        agent-log--session-project)
+    (agent-log--extract-session-metadata
+     backend
+     (agent-log--parse-and-normalize source backend))
+    (when (and agent-log--session-project
+               (not (string-empty-p agent-log--session-project))
+               (file-directory-p agent-log--session-project))
+      agent-log--session-project)))
 
 ;;;;; Transient menu
 

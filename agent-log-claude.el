@@ -335,11 +335,53 @@ returned by `claude-code--directory'."
                             (not (string-empty-p agent-log--session-project))
                             (file-directory-p agent-log--session-project)
                             agent-log--session-project)
+                       (agent-log-claude--source-file-project-directory)
                        (when-let* ((project (agent-log-claude--lookup-session-project session-id)))
                          (and (not (string-empty-p project))
                               (file-directory-p project)
                               project)))))
     (file-name-as-directory dir)))
+
+(defun agent-log-claude--source-file-project-directory ()
+  "Return the existing project directory implied by `agent-log--source-file'."
+  (when-let* ((file agent-log--source-file)
+              ((file-exists-p file))
+              (encoded (file-name-nondirectory
+                        (directory-file-name
+                         (file-name-directory file)))))
+    (agent-log-claude--find-existing-encoded-project encoded)))
+
+(defun agent-log-claude--find-existing-encoded-project (encoded)
+  "Return an existing directory whose Claude encoding is ENCODED."
+  (cl-loop for root in (delete-dups
+                        (list "/" (expand-file-name "~")))
+           thereis
+           (agent-log-claude--find-encoded-project-below root encoded 12)))
+
+(defun agent-log-claude--find-encoded-project-below (directory encoded depth)
+  "Find an existing project matching ENCODED below DIRECTORY within DEPTH."
+  (when (and (>= depth 0) (file-directory-p directory))
+    (let ((dir (file-name-as-directory directory)))
+      (cond
+       ((equal (agent-log-claude--encode-project-path dir) encoded)
+        dir)
+       ((zerop depth) nil)
+       (t
+        (cl-loop for child in (agent-log-claude--directory-children dir encoded)
+                 thereis
+                 (agent-log-claude--find-encoded-project-below
+                  child encoded (1- depth))))))))
+
+(defun agent-log-claude--directory-children (directory encoded)
+  "Return child directories of DIRECTORY whose encodings may match ENCODED."
+  (cl-loop for child in (ignore-errors
+                          (directory-files directory t directory-files-no-dot-files-regexp))
+           for child-encoded = (agent-log-claude--encode-project-path child)
+           when (and (file-directory-p child)
+                     (not (file-symlink-p child))
+                     (or (equal child-encoded encoded)
+                         (string-prefix-p (concat child-encoded "-") encoded)))
+           collect child))
 
 (defun agent-log-claude--lookup-session-project (session-id)
   "Look up the project directory for SESSION-ID in history.jsonl."
