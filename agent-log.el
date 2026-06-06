@@ -1072,31 +1072,54 @@ Projects are sorted by most recent session timestamp."
 
 (defun agent-log--unique-project-names (paths)
   "Return an alist of (PATH . DISPLAY-NAME) with unique display names for PATHS.
-Short names are used when unique; parent/name when collisions occur."
-  (let ((counts (make-hash-table :test #'equal)))
-    (dolist (path paths)
-      (cl-incf (gethash (agent-log--short-project path) counts 0)))
-    (mapcar (lambda (path)
-              (let ((short (agent-log--short-project path)))
-                (cons path
-                      (if (> (gethash short counts) 1)
-                          (agent-log--long-project-name path)
-                        short))))
-            paths)))
+Each display name is the shortest trailing path suffix that no other
+path shares at the same depth: the bare leaf name when it is unique,
+growing one ancestor directory at a time only as far as needed to
+disambiguate collisions.  This guarantees distinct paths never map to
+the same display name."
+  (let ((comps (mapcar (lambda (p)
+                         (cons p (agent-log--path-components p)))
+                       paths)))
+    (mapcar
+     (lambda (entry)
+       (cons (car entry)
+             (agent-log--minimal-unique-suffix entry comps)))
+     comps)))
 
-(defun agent-log--long-project-name (path)
-  "Return a parent/name string from PATH for disambiguation."
-  (if (or (null path) (string-empty-p path))
-      "unknown"
-    (let* ((dir (directory-file-name path))
-           (name (file-name-nondirectory dir))
-           (parent-dir (file-name-directory dir))
-           (parent (when parent-dir
-                     (file-name-nondirectory
-                      (directory-file-name parent-dir)))))
-      (if (and parent (not (string-empty-p parent)))
-          (format "%s/%s" parent name)
-        name))))
+(defun agent-log--minimal-unique-suffix (entry comps)
+  "Return the shortest path suffix of ENTRY unique among COMPS.
+ENTRY is a (PATH . COMPONENTS) cons and COMPS is the list of all such
+conses.  Falls back to ENTRY's absolute path when it is fully nested
+under another path."
+  (let* ((path (car entry))
+         (components (cdr entry))
+         (len (length components)))
+    (if (zerop len)
+        "unknown"
+      (let ((depth 1) result)
+        (while (and (<= depth len) (not result))
+          (let ((suffix (agent-log--path-suffix components depth)))
+            (if (agent-log--suffix-shared-p suffix depth entry comps)
+                (setq depth (1+ depth))
+              (setq result suffix))))
+        (or result (directory-file-name path))))))
+
+(defun agent-log--suffix-shared-p (suffix depth entry comps)
+  "Return non-nil if any cons in COMPS other than ENTRY shares SUFFIX.
+SUFFIX is the DEPTH-component suffix of ENTRY, and a match counts only
+when the other cons yields the same suffix at the same DEPTH."
+  (cl-some (lambda (other)
+             (and (not (eq other entry))
+                  (equal suffix (agent-log--path-suffix (cdr other) depth))))
+           comps))
+
+(defun agent-log--path-components (path)
+  "Split PATH into its list of non-empty directory components."
+  (split-string (directory-file-name (or path "")) "/" t))
+
+(defun agent-log--path-suffix (components depth)
+  "Join the last DEPTH elements of COMPONENTS with \"/\"."
+  (mapconcat #'identity (last components depth) "/"))
 
 (defun agent-log--format-epoch-ms (ms)
   "Format millisecond epoch timestamp MS as a date-time string."

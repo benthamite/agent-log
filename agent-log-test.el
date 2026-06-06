@@ -478,6 +478,45 @@ SUMMARY defaults to ONELINE."
   "Returns simple name as-is."
   (should (equal (agent-log--short-project "my-project") "my-project")))
 
+(ert-deftest agent-log-test-unique-project-names/all-unique ()
+  "Uses bare leaf names when every leaf is unique."
+  (should (equal (agent-log--unique-project-names
+                  '("/home/user/foo" "/home/user/bar"))
+                 '(("/home/user/foo" . "foo")
+                   ("/home/user/bar" . "bar")))))
+
+(ert-deftest agent-log-test-unique-project-names/one-collision ()
+  "Adds one ancestor when leaf names collide."
+  (should (equal (agent-log--unique-project-names
+                  '("/a/sources/codex" "/a/dotfiles/codex"))
+                 '(("/a/sources/codex" . "sources/codex")
+                   ("/a/dotfiles/codex" . "dotfiles/codex")))))
+
+(ert-deftest agent-log-test-unique-project-names/deep-collision ()
+  "Grows past a shared ancestor until each suffix is unique."
+  (should (equal (agent-log--unique-project-names
+                  '("/p/8.1.0-dev/elpaca/sources/codex"
+                    "/p/8.3.0-dev/elpaca/sources/codex"))
+                 '(("/p/8.1.0-dev/elpaca/sources/codex"
+                    . "8.1.0-dev/elpaca/sources/codex")
+                   ("/p/8.3.0-dev/elpaca/sources/codex"
+                    . "8.3.0-dev/elpaca/sources/codex")))))
+
+(ert-deftest agent-log-test-unique-project-names/no-duplicate-labels ()
+  "Never emits the same display name for two distinct paths."
+  (let* ((paths '("/private/tmp/codex-app-server-e2e"
+                  "/private/tmp/codex-app-server-e2e-2"
+                  "/p/8.1.0-dev/elpaca/sources/codex"
+                  "/u/My Drive/dotfiles/codex"
+                  "/p/8.3.0-dev/elpaca/sources/codex"))
+         (names (mapcar #'cdr (agent-log--unique-project-names paths))))
+    (should (= (length names) (length (delete-dups (copy-sequence names)))))))
+
+(ert-deftest agent-log-test-unique-project-names/preserves-spaces ()
+  "Keeps directory components that contain spaces intact."
+  (should (equal (agent-log--unique-project-names '("/u/My Drive/dotfiles/codex"))
+                 '(("/u/My Drive/dotfiles/codex" . "codex")))))
+
 ;;;;; Encode project path
 
 (ert-deftest agent-log-test-encode-project-path/slashes-and-dots ()

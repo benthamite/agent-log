@@ -377,6 +377,8 @@ Each candidate is prefixed with a backend-specific icon so you can tell at a gla
 
 When @code{agent-log-group-by-project} is non-@code{nil} (the default), the command first prompts for a project, then for a session within that project (@ref{Session browser options}).  Sessions are sorted most-recent-first.  If AI summaries have been generated for any sessions (@ref{Summary generation}), the summary replaces the quoted first message in the candidate display.
 
+Each project is labelled by the shortest trailing portion of its working directory that uniquely identifies it.  A project whose final directory component is unique is shown by that component alone (for example, @samp{my-project}); when several projects share a final component, each label grows one parent directory at a time until it is distinct (for example, @samp{8.1.0-dev/elpaca/sources/codex} versus @samp{8.3.0-dev/elpaca/sources/codex}).  This keeps labels short while guaranteeing that two distinct project directories never collapse to the same entry.
+
 Selecting a session lazily renders it to a @samp{.md} file if needed, then opens the rendered buffer in @code{agent-log-mode} (@ref{@code{agent-log-mode}}).
 
 The command @code{agent-log-open-latest} opens the most recent session directly, without prompting.  This is convenient when you want to review the last conversation you had with a coding agent.
