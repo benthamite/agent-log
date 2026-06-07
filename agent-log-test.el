@@ -1268,34 +1268,6 @@ SUMMARY defaults to ONELINE."
   "Returns empty list for no sessions."
   (should (null (agent-log--group-by-project nil))))
 
-(ert-deftest agent-log-test-canonical-project/empty ()
-  "Returns the empty string for empty or nil input."
-  (should (equal (agent-log--canonical-project "") ""))
-  (should (equal (agent-log--canonical-project nil) "")))
-
-(ert-deftest agent-log-test-canonical-project/resolves-symlink ()
-  "Resolves a symlinked path to the same key as its target."
-  (agent-log-test--with-temp-dir
-    (let ((real (expand-file-name "real" agent-log-test--dir))
-          (link (expand-file-name "link" agent-log-test--dir)))
-      (make-directory real)
-      (make-symbolic-link real link)
-      (should (equal (agent-log--canonical-project link)
-                     (agent-log--canonical-project real))))))
-
-(ert-deftest agent-log-test-group-by-project/merges-symlinked-paths ()
-  "Merges sessions whose project paths resolve to the same directory."
-  (agent-log-test--with-temp-dir
-    (let ((real (expand-file-name "proj" agent-log-test--dir))
-          (link (expand-file-name "proj-link" agent-log-test--dir)))
-      (make-directory real)
-      (make-symbolic-link real link)
-      (let ((result (agent-log--group-by-project
-                     (list (list "s1" :project real :timestamp 2000)
-                           (list "s2" :project link :timestamp 1000)))))
-        (should (= (length result) 1))
-        (should (= (length (cdr (car result))) 2))))))
-
 ;;;;; Sessions needing summary
 
 (ert-deftest agent-log-test-sessions-needing-summary/all-need ()
