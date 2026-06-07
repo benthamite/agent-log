@@ -3447,5 +3447,48 @@ session resume; the entire `type:base64' block must be preserved."
                        data)))
     (should (equal (agent-log-redact--scrub-jsonl-line line) line))))
 
+;;;; Summary display
+
+(defun agent-log-test--count-summary-lines ()
+  "Return the number of rendered summary blocks in the current buffer."
+  (save-excursion
+    (goto-char (point-min))
+    (let ((count 0))
+      (while (re-search-forward "^> \\*\\*Summary\\*\\*:" nil t)
+        (cl-incf count))
+      count)))
+
+(ert-deftest agent-log-test-maybe-insert-summary/no-duplicate-with-embedded ()
+  "Does not duplicate a summary already embedded in the rendered file.
+Rendered files now embed the summary block, so the display-time
+insertion must not add a second copy."
+  (let ((index (make-hash-table :test #'equal)))
+    (puthash "s1" (list :summary "Test summary text.") index)
+    (cl-letf (((symbol-function 'agent-log--read-index)
+               (lambda () index)))
+      (with-temp-buffer
+        (insert "# Session: proj — 2026-06-07\n\n")
+        (insert "> **Summary**: Test summary text.\n\n")
+        (insert "## User\n\nhello\n")
+        (agent-log--maybe-insert-summary "s1")
+        (should (= (agent-log-test--count-summary-lines) 1))))))
+
+(ert-deftest agent-log-test-maybe-insert-summary/inserts-when-absent ()
+  "Inserts the summary when the rendered file lacks one.
+Older rendered files without an embedded summary must still gain one at
+display time."
+  (let ((index (make-hash-table :test #'equal)))
+    (puthash "s1" (list :summary "Test summary text.") index)
+    (cl-letf (((symbol-function 'agent-log--read-index)
+               (lambda () index)))
+      (with-temp-buffer
+        (insert "# Session: proj — 2026-06-07\n\n")
+        (insert "## User\n\nhello\n")
+        (agent-log--maybe-insert-summary "s1")
+        (should (= (agent-log-test--count-summary-lines) 1))
+        (goto-char (point-min))
+        (should (re-search-forward
+                 "^> \\*\\*Summary\\*\\*: Test summary text\\." nil t))))))
+
 (provide 'agent-log-test)
 ;;; agent-log-test.el ends here

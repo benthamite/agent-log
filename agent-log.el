@@ -3298,18 +3298,19 @@ a `message' entry, or nil.  Returns a string or nil."
      (t (format "%s" raw)))))
 
 (defun agent-log--maybe-insert-summary (session-id)
-  "Insert the AI summary for SESSION-ID into the current buffer, if available."
+  "Insert the AI summary for SESSION-ID into the current buffer, if available.
+Rendered files now embed the summary block, so skip insertion when one
+is already present after the header to avoid duplicating it."
   (let* ((index (agent-log--read-index))
          (entry (gethash session-id index))
          (summary (when entry (plist-get entry :summary))))
     (when summary
       (let ((inhibit-read-only t))
         (save-excursion
-          ;; Remove any existing summary first
           (agent-log--remove-inserted-summary)
-          ;; Insert after the # Session: header
           (goto-char (point-min))
-          (when (re-search-forward "^# Session:.*\n\n" nil t)
+          (when (and (re-search-forward "^# Session:.*\n\n" nil t)
+                     (not (looking-at "> \\*\\*Summary\\*\\*:")))
             (let ((start (point)))
               (insert (format "> **Summary**: %s\n\n" summary))
               (put-text-property start (point)
