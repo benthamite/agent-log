@@ -260,6 +260,8 @@ Each candidate is prefixed with a backend-specific icon so you can tell at a gla
 
 When ~agent-log-group-by-project~ is non-~nil~ (the default), the command first prompts for a project, then for a session within that project ([[#h:session-browser-options][Session browser options]]).  Sessions are sorted most-recent-first.  If AI summaries have been generated for any sessions ([[#h:summary-generation][Summary generation]]), the summary replaces the quoted first message in the candidate display.
 
+Sessions are grouped by the *canonical* working directory: paths are resolved through symbolic links and =~= expansion before grouping, so different spellings of the same directory (for example =/tmp/foo= and =/private/tmp/foo=, where =/tmp= is a symlink to =/private/tmp= on macOS) collapse into a single project rather than appearing twice.
+
 Each project is labelled by the shortest trailing portion of its working directory that uniquely identifies it.  A project whose final directory component is unique is shown by that component alone (for example, =my-project=); when several projects share a final component, each label grows one parent directory at a time until it is distinct (for example, =8.1.0-dev/elpaca/sources/codex= versus =8.3.0-dev/elpaca/sources/codex=).  This keeps labels short while guaranteeing that two distinct project directories never collapse to the same entry.
 
 Selecting a session lazily renders it to a =.md= file if needed, then opens the rendered buffer in ~agent-log-mode~ ([[#h:agent-log-mode][~agent-log-mode~]]).

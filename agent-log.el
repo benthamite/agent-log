@@ -994,12 +994,14 @@ METADATA is a plist with :file, :timestamp, :project, :display."
 
 (defun agent-log--group-by-project (sessions)
   "Group SESSIONS into an alist of (project-name . sessions).
-Groups by the full :project path so sessions that share a
-project stay together even across file directories.
+Groups by the canonical :project path so sessions that share a
+project stay together even across file directories and across path
+spellings that resolve to the same directory.
 Projects are sorted by most recent session timestamp."
   (let ((groups (make-hash-table :test #'equal)))
     (dolist (session sessions)
-      (let* ((project (or (plist-get (cdr session) :project) ""))
+      (let* ((project (agent-log--canonical-project
+                       (or (plist-get (cdr session) :project) "")))
              (existing (gethash project groups)))
         (puthash project (append existing (list session)) groups)))
     (let* ((full-paths (hash-table-keys groups))
@@ -1016,6 +1018,17 @@ Projects are sorted by most recent session timestamp."
                      (agent-log--timestamp>
                       (plist-get (cdadr a) :timestamp)
                       (plist-get (cdadr b) :timestamp)))))))
+
+(defun agent-log--canonical-project (path)
+  "Return a canonical grouping key for PATH.
+Resolves symlinks and \"~\" so that different spellings of the same
+directory (such as \"/tmp/foo\" and \"/private/tmp/foo\" on macOS,
+where \"/tmp\" is a symlink) group together.  Returns the empty
+string for empty PATH and the unresolved PATH when resolution fails."
+  (if (or (null path) (string-empty-p path))
+      ""
+    (or (ignore-errors (directory-file-name (file-truename path)))
+        path)))
 
 (defun agent-log--build-candidates (sessions)
   "Build an alist of (display-string . (session-id . metadata)) from SESSIONS."
