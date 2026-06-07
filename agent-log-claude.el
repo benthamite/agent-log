@@ -205,6 +205,17 @@ known system XML tag."
         (plist-get text-item :text)))
      (t nil))))
 
+(cl-defmethod agent-log--metadata-fallback-from-file
+  ((backend agent-log-claude) file)
+  "Return Claude history metadata for FILE."
+  (when-let* ((session-id (agent-log--session-id-from-file backend file))
+              (entry (agent-log-claude--lookup-history-entry session-id)))
+    (list :project (or (plist-get entry :project) "")
+          :timestamp (plist-get entry :timestamp)
+          :display (or (plist-get entry :display) "")
+          :backend backend
+          :file file)))
+
 ;;;;;; Tool input summaries
 
 (cl-defmethod agent-log--summarize-tool-input-by-name ((_backend agent-log-claude) name input)
@@ -385,12 +396,17 @@ returned by `claude-code--directory'."
 
 (defun agent-log-claude--lookup-session-project (session-id)
   "Look up the project directory for SESSION-ID in history.jsonl."
+  (when-let* ((entry (agent-log-claude--lookup-history-entry session-id)))
+    (plist-get entry :project)))
+
+(defun agent-log-claude--lookup-history-entry (session-id)
+  "Look up SESSION-ID in Claude history.jsonl."
   (let ((history-file (expand-file-name "history.jsonl" agent-log-directory)))
     (when (file-exists-p history-file)
       (catch 'found
         (dolist (entry (agent-log--parse-jsonl-file history-file))
           (when (equal (plist-get entry :sessionId) session-id)
-            (throw 'found (plist-get entry :project))))))))
+            (throw 'found entry)))))))
 
 (defun agent-log-claude--encode-project-path (directory)
   "Encode DIRECTORY as Claude Code does for its projects subdirectory.

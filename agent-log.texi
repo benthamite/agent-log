@@ -788,7 +788,7 @@ The rendering pipeline operates in three stages: parse, normalize, filter.  Firs
 
 Filtered entries are rendered as Markdown with @samp{##} headings for conversation turns and @samp{####} headings for tool calls and thinking blocks.  User turns show any text content followed by tool results.  Assistant turns show thinking blocks, text content, and tool-use summaries.
 
-The session header (the @samp{# Session: ...} line at the top of each rendered file) derives its project name from the @code{progress} entry in the JSONL, which contains the working directory.  Not all sessions have a @code{progress} entry; when one is absent, the package falls back to the project path recorded in @samp{history.jsonl}.  The session date prefers the first conversation turn timestamp, falling back to the progress or session metadata timestamp when a log has been created but no user message has been recorded yet.
+The session header (the @samp{# Session: ...} line at the top of each rendered file) derives its project name from the @code{progress} entry in the JSONL, which contains the working directory.  Not all sessions have a @code{progress} entry; when one is absent, the package falls back to the metadata recorded in @samp{history.jsonl} for that session — the project path, the timestamp, and the first-message display text — looked up by session ID@.  The session date prefers the first conversation turn timestamp, falling back to the progress or session metadata timestamp when a log has been created but no user message has been recorded yet.
 
 @node Live update mechanism
 @section Live update mechanism
