@@ -1721,6 +1721,32 @@ rereading every transcript."
       (should (null (agent-log--sessions-needing-summary
                      (list session) index))))))
 
+(ert-deftest agent-log-test-session-needs-summary/resumed-tail-beyond-limit ()
+  "Detects resumed work appended beyond the summary prompt limit."
+  (agent-log-test--with-temp-dir
+    (let* ((agent-log-summary-max-content-length 80)
+           (old-content
+            (concat
+             "{\"type\":\"user\",\"message\":{\"role\":\"user\","
+             "\"content\":\""
+             (make-string 200 ?a)
+             "\"}}\n"))
+           (new-content
+            (concat
+             old-content
+             "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\","
+             "\"content\":[{\"type\":\"text\",\"text\":\"resumed tail work\"}]}}\n"))
+           (jsonl-path (agent-log-test--write-file "s1.jsonl" old-content))
+           (session (list "s1" :file jsonl-path
+                          :backend agent-log-test--claude-backend))
+           (index (make-hash-table :test #'equal))
+           (agent-log-rendered-directory agent-log-test--dir)
+           (entry (agent-log-test--summary-entry (cdr session) "A")))
+      (agent-log-test--write-file "s1.jsonl" new-content)
+      (puthash "s1" entry index)
+      (agent-log--write-index index)
+      (should (agent-log--session-needs-summary-p session)))))
+
 (ert-deftest agent-log-test-upgrade-summary-index/v2-empty-sentinel-current ()
   "Refreshes matching empty-session sentinels when file-state metadata is stale."
   (agent-log-test--with-temp-dir

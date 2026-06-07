@@ -2179,6 +2179,19 @@ BACKEND is used for filtering and text extraction."
   "Extract bounded summary text from JSONL FILE using BACKEND.
 Only summary-relevant lines are parsed, and extraction stops once
 `agent-log-summary-max-content-length' has been reached."
+  (agent-log--conversation-text-from-file-1 file backend t))
+
+(defun agent-log--conversation-text-from-file-full (file backend)
+  "Extract all summary-relevant conversation text from JSONL FILE.
+Unlike `agent-log--conversation-text-from-file', this does not stop at
+`agent-log-summary-max-content-length'.  Use this for freshness
+fingerprints so resumed work appended to a long session is detected."
+  (agent-log--conversation-text-from-file-1 file backend nil))
+
+(defun agent-log--conversation-text-from-file-1 (file backend bounded)
+  "Extract summary-relevant conversation text from JSONL FILE.
+When BOUNDED is non-nil, stop after collecting enough text for the
+summary prompt."
   (let ((backend (or backend (agent-log--default-backend)))
         (parts nil)
         (length 0))
@@ -2189,8 +2202,12 @@ Only summary-relevant lines are parsed, and extraction stops once
                     (agent-log--summary-text-from-line line backend)))
          (push (car text-pair) parts)
          (cl-incf length (cdr text-pair))))
-     (lambda () (< length agent-log-summary-max-content-length)))
-    (agent-log--limit-summary-text (string-join (nreverse parts)))))
+     (and bounded
+          (lambda () (< length agent-log-summary-max-content-length))))
+    (let ((text (string-join (nreverse parts))))
+      (if bounded
+          (agent-log--limit-summary-text text)
+        text))))
 
 (defun agent-log--summary-text-from-line (line backend)
   "Return (TEXT . LENGTH) extracted from JSONL LINE and BACKEND."
@@ -2427,7 +2444,8 @@ be refreshed without another LLM request."
   (condition-case nil
       (let* ((backend (plist-get metadata :backend))
              (file (plist-get metadata :file))
-             (text (agent-log--conversation-text-from-file file backend)))
+             (text (agent-log--conversation-text-from-file-full
+                    file backend)))
         (and (agent-log--summary-text-current-p entry text)
              text))
     (error nil)))
@@ -2522,7 +2540,7 @@ excluded from search until their logs settle."
   (let* ((backend (plist-get metadata :backend))
          (jsonl-file (plist-get metadata :file)))
     (agent-log--conversation-text-hash
-     (agent-log--conversation-text-from-file jsonl-file backend))))
+     (agent-log--conversation-text-from-file-full jsonl-file backend))))
 
 (defun agent-log--session-jsonl-state (metadata)
   "Return (SIZE . MTIME) for the JSONL file in METADATA."
@@ -3045,15 +3063,18 @@ nothing."
             (let* ((backend (plist-get meta :backend))
                    (full-text (agent-log--conversation-text-from-file
                                jsonl-file backend))
+                   (fingerprint-text
+                    (agent-log--conversation-text-from-file-full
+                     jsonl-file backend))
                    (text (agent-log--limit-summary-text full-text))
                    (conversation-hash
-                    (agent-log--conversation-text-hash full-text))
+                    (agent-log--conversation-text-hash fingerprint-text))
                    (jsonl-state (agent-log--session-jsonl-state meta))
                    (index (agent-log--read-index))
                    (entry (gethash sid index))
                    (upgrade-props
                     (agent-log--summary-upgrade-props-for-text
-                     entry full-text jsonl-state)))
+                     entry fingerprint-text jsonl-state)))
               (cond
                (upgrade-props
                 (agent-log--index-merge index sid upgrade-props)
