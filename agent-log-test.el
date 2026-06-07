@@ -2715,6 +2715,30 @@ session."
       (should (assq 'display-sort-function (cdr meta)))
       (should (assq 'cycle-sort-function (cdr meta))))))
 
+;;;;; Completion candidates
+
+(ert-deftest agent-log-test-build-candidates/includes-session-size ()
+  "Includes a human-readable session file size column."
+  (agent-log-test--with-temp-dir
+    (let* ((jsonl-path (agent-log-test--write-file
+                        "session.jsonl"
+                        (make-string 2048 ?x)))
+           (sessions (list (list "s1"
+                                  :file jsonl-path
+                                  :timestamp nil
+                                  :project "/tmp/project"
+                                  :display "Hello"))))
+      (cl-letf (((symbol-function 'agent-log--read-index)
+                 (lambda () (make-hash-table :test #'equal)))
+                ((symbol-function 'image-type-available-p)
+                 (lambda (_type) nil))
+                ((symbol-function 'frame-width)
+                 (lambda (&optional _frame) 100)))
+        (should (string-match-p
+                 (rx "unknown" (+ space) "project" (+ space) "2k"
+                     (+ space) "\"Hello\"")
+                 (caar (agent-log--build-candidates sessions))))))))
+
 ;;;;; Codex backend
 
 (require 'agent-log-codex)

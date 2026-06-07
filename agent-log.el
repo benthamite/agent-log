@@ -1327,14 +1327,15 @@ Projects are sorted by most recent session timestamp."
   "Build an alist of (display-string . (session-id . metadata)) from SESSIONS."
   (let* ((index (agent-log--read-index))
          (proj-width (agent-log--max-project-width sessions))
+         (size-width (agent-log--max-session-size-width sessions))
          ;; Icon column: SVG renders as 1 char, text fallback is typically 2.
          (icon-width (if (image-type-available-p 'svg) 1 2))
-         ;; icon + gap + date (16) + 2 gaps (2+2) + project = fixed cols
-         (fixed-cols (+ icon-width 1 16 2 proj-width 2))
+         ;; icon + gap + date + project + size + inter-column gaps
+         (fixed-cols (+ icon-width 1 16 2 proj-width 2 size-width 2))
          ;; Ensure the summary column is wide enough to be useful even
          ;; in narrow frames; below ~20 chars summaries become unreadable.
          (summary-width (max 20 (- (frame-width) fixed-cols 1)))
-         (fmt (format "%%s  %%-%ds  %%s" proj-width)))
+         (fmt (format "%%s  %%-%ds  %%%ds  %%s" proj-width size-width)))
     (mapcar
      (lambda (session)
        (let* ((session-id (car session))
@@ -1344,16 +1345,17 @@ Projects are sorted by most recent session timestamp."
               (ts (plist-get meta :timestamp))
               (date (agent-log--format-epoch-ms ts))
               (project (agent-log--short-project (plist-get meta :project)))
+              (size (agent-log--session-size-label meta))
               (index-entry (gethash session-id index))
               (oneline (when index-entry
                          (plist-get index-entry :summary-oneline)))
               (body (if oneline
-                        (format fmt date project
+                        (format fmt date project size
                                 (agent-log--truncate-string
                                  oneline summary-width))
                       (let ((display (agent-log--normalize-whitespace
                                        (plist-get meta :display))))
-                        (format fmt date project
+                        (format fmt date project size
                                 (concat "\"" (agent-log--truncate-string
                                               display (- summary-width 2))
                                         "\"")))))
@@ -1369,6 +1371,21 @@ Projects are sorted by most recent session timestamp."
                        (plist-get (cdr session) :project)))
              (w (string-width project)))
         (when (> w max-w) (setq max-w w))))))
+
+(defun agent-log--max-session-size-width (sessions)
+  "Return the maximum display width of session size labels in SESSIONS."
+  (let ((max-w 0))
+    (dolist (session sessions max-w)
+      (let ((w (string-width (agent-log--session-size-label (cdr session)))))
+        (when (> w max-w) (setq max-w w))))))
+
+(defun agent-log--session-size-label (metadata)
+  "Return a human-readable source file size label for METADATA."
+  (if-let* ((file (plist-get metadata :file))
+            (attrs (file-attributes file))
+            (size (file-attribute-size attrs)))
+      (file-size-human-readable size)
+    "?"))
 
 (defun agent-log--short-project (path)
   "Extract a short project name from PATH."

@@ -130,7 +130,7 @@ The core capabilities of @samp{agent-log.el} are:
 
 @itemize
 @item
-@strong{Session browsing}.  A @code{completing-read} interface lists all sessions, grouped by project or as a flat list, sorted by recency.  Each candidate shows a backend-specific icon (SVG in GUI frames, a short text label in terminal frames), the date, project name, and either an AI-generated summary or the first user message (@ref{Session browsing}).
+@strong{Session browsing}.  A @code{completing-read} interface lists all sessions, grouped by project or as a flat list, sorted by recency.  Each candidate shows a backend-specific icon (SVG in GUI frames, a short text label in terminal frames), the date, project name, JSONL file size, and either an AI-generated summary or the first user message (@ref{Session browsing}).
 @item
 @strong{Lazy rendering}.  Sessions are rendered to @samp{.md} files on first access.  The package tracks JSONL file sizes in an index to avoid re-rendering files that have not changed (@ref{Sync and rendering}).
 @item
@@ -373,10 +373,10 @@ In @code{dollars} mode, cost estimation requires the @samp{gptel-plus} package. 
 The command @code{agent-log-browse-sessions} is the primary entry point for exploring your session history.  It reads @samp{history.jsonl}, resolves each session to its JSONL file on disk, and presents the results in a @code{completing-read} prompt.  Each candidate is formatted as:
 
 @example
-[icon] 2026-02-22 14:06  my-project  "Fix the authentication bug in..."
+[icon] 2026-02-22 14:06  my-project  42k  "Fix the authentication bug in..."
 @end example
 
-Each candidate is prefixed with a backend-specific icon so you can tell at a glance which agent a session belongs to.  In GUI frames the icon is an inline SVG image; in terminal frames it falls back to a short text label (e.g. @samp{CC} for Claude Code, @samp{CX} for Codex).
+Each candidate is prefixed with a backend-specific icon so you can tell at a glance which agent a session belongs to.  In GUI frames the icon is an inline SVG image; in terminal frames it falls back to a short text label (e.g. @samp{CC} for Claude Code, @samp{CX} for Codex).  The size column shows the human-readable size of the source JSONL file.
 
 When @code{agent-log-group-by-project} is non-@code{nil} (the default), the command first prompts for a project, then for a session within that project (@ref{Session browser options}).  Sessions are sorted most-recent-first.  If AI summaries have been generated for any sessions (@ref{Summary generation}), the summary replaces the quoted first message in the candidate display.
 
