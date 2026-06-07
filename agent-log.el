@@ -149,6 +149,11 @@ Returns a plist with :project and :date.")
 (cl-defgeneric agent-log--first-user-text (backend entries)
   "Return the text of the first user message in ENTRIES for BACKEND.")
 
+(cl-defgeneric agent-log--metadata-fallback-from-file (backend file)
+  "Return fallback render metadata for FILE under BACKEND."
+  (:method ((_backend null) _file) nil)
+  (:method ((_backend agent-log-backend) _file) nil))
+
 (cl-defgeneric agent-log--summarize-tool-input-by-name (backend name input)
   "Return a one-line summary for tool NAME with INPUT plist for BACKEND.")
 
@@ -236,8 +241,21 @@ Returns nil if KEY is not in `agent-log-backends'."
                 agent-log-active-backends)))
     (delq nil (mapcar #'agent-log--get-backend keys))))
 
+(defcustom agent-log-ignored-project-regexps
+  '("\\`/tmp\\(/\\|\\'\\)" "\\`/private/tmp\\(/\\|\\'\\)")
+  "Regexps matching project paths to exclude from session listings.
+A session whose working directory matches any of these regexps is
+omitted from `agent-log-browse-sessions', `agent-log-open-latest',
+and AI search.  The default excludes throwaway sessions run under the
+system temporary directory (for example, scratch directories used when
+testing a coding agent).  Such sessions remain on disk and can still be
+opened explicitly with `agent-log-open-file' or `agent-log-open-session'."
+  :type '(repeat regexp))
+
 (defun agent-log--read-all-sessions ()
-  "Return merged sessions from all active backends, sorted most-recent-first."
+  "Return merged sessions from all active backends, sorted most-recent-first.
+Sessions whose project path matches `agent-log-ignored-project-regexps'
+are excluded."
   (let ((all '()))
     (dolist (backend (agent-log--active-backend-instances))
       (condition-case err
@@ -245,10 +263,18 @@ Returns nil if KEY is not in `agent-log-backends'."
         (error (message "agent-log: failed to read sessions from %s: %s"
                         (agent-log-backend-name backend)
                         (error-message-string err)))))
+    (setq all (seq-remove #'agent-log--session-ignored-p all))
     (sort all (lambda (a b)
                 (agent-log--timestamp>
                  (plist-get (cdr a) :timestamp)
                  (plist-get (cdr b) :timestamp))))))
+
+(defun agent-log--session-ignored-p (session)
+  "Return non-nil when SESSION's project matches an ignored regexp.
+The project path is tested against `agent-log-ignored-project-regexps'."
+  (let ((project (or (plist-get (cdr session) :project) "")))
+    (seq-some (lambda (regexp) (string-match-p regexp project))
+              agent-log-ignored-project-regexps)))
 
 (defun agent-log--find-session-file-any (session-id)
   "Try all active backends to find SESSION-ID, return file path or nil."
@@ -553,6 +579,23 @@ without re-triggering.  Cleared by an interactive call to
   "Count of consecutive failed summary requests in the current run.
 Reset to 0 on success and at the start of each new run.")
 
+(defvar agent-log--rendered-summary-active nil
+  "Non-nil when rendered-only summary recovery is in progress.")
+
+(defvar agent-log--rendered-summary-stop nil
+  "When non-nil, stop rendered-only summary recovery after this request.")
+
+(defvar agent-log--rendered-summary-generation 0
+  "Generation counter for rendered-only summary recovery runs.")
+
+(defvar agent-log--rendered-summary-request-id nil
+  "Nonce for the active rendered-only summary recovery request.")
+
+(defconst agent-log--no-conversation-sentinel "(no conversation)"
+  "Sentinel stored as :summary-oneline for sessions with no user/assistant text.
+Used to distinguish \"already processed, nothing to summarize\" from
+\"not yet summarized\" (nil).")
+
 (defconst agent-log--summarize-max-consecutive-failures 3
   "Abort the current summary run after this many consecutive failures.")
 
@@ -623,6 +666,44 @@ a project, then for a session within that project."
                          :display display
                          :backend backend)))
     (agent-log--open-rendered session-id metadata)))
+
+(defun agent-log--metadata-from-file (file backend)
+  "Return render metadata parsed from FILE for BACKEND.
+Only the single session file is parsed; this does not scan the
+archive."
+  (agent-log--merge-render-metadata
+   (agent-log--metadata-from-entries
+    file backend (agent-log--parse-and-normalize file backend))
+   (agent-log--metadata-fallback-from-file backend file)))
+
+(defun agent-log--metadata-from-entries (file backend entries)
+  "Return render metadata for FILE and BACKEND from parsed ENTRIES."
+  (let* ((progress (agent-log--find-progress-entry entries))
+         (ts-iso (agent-log--find-session-timestamp entries))
+         (epoch-ms (when (stringp ts-iso)
+                     (agent-log--iso-to-epoch-ms ts-iso)))
+         (display (or (and backend
+                           (agent-log--first-user-text backend entries))
+                      ""))
+         (project (when progress (or (plist-get progress :cwd) ""))))
+    (list :file file
+          :timestamp epoch-ms
+          :project (or project "")
+          :display display
+          :backend backend)))
+
+(defun agent-log--merge-render-metadata (metadata parsed)
+  "Return METADATA filled with missing values from PARSED."
+  (let ((merged (copy-sequence metadata)))
+    (dolist (key '(:timestamp :project :display :backend :file :file-dir))
+      (let ((current (plist-get merged key))
+            (fallback (plist-get parsed key)))
+        (when (and (or (null current)
+                       (and (stringp current) (string-empty-p current)))
+                   fallback
+                   (not (and (stringp fallback) (string-empty-p fallback))))
+          (setq merged (plist-put merged key fallback)))))
+    merged))
 
 ;;;###autoload
 (defun agent-log-open-latest ()
@@ -819,6 +900,209 @@ ensuring concurrent operations do not clobber each other."
   (agent-log--index-update-props
    session-id (list :file rendered-path :jsonl-size jsonl-size)))
 
+;;;###autoload
+(defun agent-log-repair-rendered-index ()
+  "Repair rendered index entries that point into the unknown project.
+Each repair re-renders the session from its JSONL file, writes the
+Markdown under the project path derived from that file, and updates
+the rendered index.  Existing files under the unknown project
+directory are left in place."
+  (interactive)
+  (let ((index (agent-log--read-index))
+        (count 0))
+    (maphash
+     (lambda (session-id entry)
+       (when (agent-log--unknown-rendered-entry-p entry)
+         (when-let* ((session (agent-log--session-from-id-fast session-id)))
+           (let ((result (agent-log--render-to-file session-id (cdr session))))
+             (agent-log--index-merge
+              index session-id
+              (list :file (car result) :jsonl-size (cdr result)))
+             (cl-incf count)))))
+     index)
+    (when (> count 0)
+      (agent-log--write-index index))
+    (when (called-interactively-p 'interactive)
+      (message "agent-log: repaired %d rendered index entr%s"
+               count
+               (if (= count 1) "y" "ies")))
+    count))
+
+(defun agent-log--unknown-rendered-entry-p (entry)
+  "Return non-nil when ENTRY points to a rendered unknown-project file."
+  (when-let* ((file (plist-get entry :file)))
+    (let ((unknown-dir (expand-file-name
+                        "unknown" agent-log-rendered-directory)))
+      (string-prefix-p (file-name-as-directory (expand-file-name unknown-dir))
+                       (expand-file-name file)))))
+
+(defconst agent-log--test-index-entry-ids '("test-sid" "test-session-id")
+  "Known fixture IDs that should not persist in a real rendered index.")
+
+;;;###autoload
+(defun agent-log-rendered-index-audit ()
+  "Return a plist summarizing rendered index summary integrity.
+The result separates genuinely missing summaries from sessions marked
+as having no conversation, rendered-only historical entries whose JSONL
+source is gone, and stale index rows with no existing rendered file."
+  (interactive)
+  (let ((index (agent-log--read-index))
+        (audit '(:total 0
+                 :real-summary 0
+                 :no-conversation 0
+                 :source-present-missing-summary 0
+                 :rendered-only-missing-summary 0
+                 :stale-index-entry 0
+                 :unknown-folder 0
+                 :test-index-entry 0)))
+    (cl-labels ((inc (key)
+                  (setq audit
+                        (plist-put audit key
+                                   (1+ (or (plist-get audit key) 0))))))
+      (maphash
+       (lambda (session-id entry)
+         (inc :total)
+         (when (member session-id agent-log--test-index-entry-ids)
+           (inc :test-index-entry))
+         (when (agent-log--unknown-rendered-entry-p entry)
+           (inc :unknown-folder))
+         (pcase (agent-log--rendered-index-summary-state entry)
+           ('real-summary (inc :real-summary))
+           ('no-conversation (inc :no-conversation))
+           ('source-present-missing-summary
+            (inc :source-present-missing-summary))
+           ('rendered-only-missing-summary
+            (inc :rendered-only-missing-summary))
+           ('stale-index-entry (inc :stale-index-entry))))
+       index))
+    (when (called-interactively-p 'interactive)
+      (message
+       (concat "agent-log index: %d total, %d summarized, %d no-conversation, "
+               "%d source-present missing, %d rendered-only missing, "
+               "%d stale, %d unknown-folder, %d test")
+       (plist-get audit :total)
+       (plist-get audit :real-summary)
+       (plist-get audit :no-conversation)
+       (plist-get audit :source-present-missing-summary)
+       (plist-get audit :rendered-only-missing-summary)
+       (plist-get audit :stale-index-entry)
+       (plist-get audit :unknown-folder)
+       (plist-get audit :test-index-entry)))
+    audit))
+
+(defun agent-log--rendered-index-summary-state (entry)
+  "Return the summary integrity state for rendered index ENTRY."
+  (cond
+   ((agent-log--session-stored-real-summary-p entry)
+    'real-summary)
+   ((equal (plist-get entry :summary-oneline)
+           agent-log--no-conversation-sentinel)
+    'no-conversation)
+   (t
+    (let ((file (plist-get entry :file)))
+      (cond
+       ((not (and (stringp file) (file-exists-p file)))
+        'stale-index-entry)
+       ((let ((source (agent-log--rendered-source-file file)))
+          (and source (file-exists-p source)))
+        'source-present-missing-summary)
+       (t
+        'rendered-only-missing-summary))))))
+
+(defun agent-log--rendered-source-file (file)
+  "Return the JSONL source path recorded in rendered Markdown FILE."
+  (when (and (stringp file) (file-exists-p file))
+    (with-temp-buffer
+      (insert-file-contents file nil 0
+                            (min 5000
+                                 (file-attribute-size
+                                  (file-attributes file))))
+      (goto-char (point-min))
+      (when (re-search-forward "^<!-- source: \\(.+\\) -->$" nil t)
+        (match-string 1)))))
+
+;;;###autoload
+(defun agent-log-clean-test-index-entries ()
+  "Remove known stale test fixture entries from the rendered index.
+Only entries with known fixture IDs and no existing rendered file are
+removed."
+  (interactive)
+  (let ((index (agent-log--read-index))
+        (count 0))
+    (dolist (session-id agent-log--test-index-entry-ids)
+      (let ((entry (gethash session-id index :agent-log-missing)))
+        (unless (eq entry :agent-log-missing)
+          (let ((file (plist-get entry :file)))
+          (unless (and (stringp file) (file-exists-p file))
+            (remhash session-id index)
+            (cl-incf count))))))
+    (when (> count 0)
+      (agent-log--write-index index))
+    (when (called-interactively-p 'interactive)
+      (message "agent-log: removed %d stale test index entr%s"
+               count
+               (if (= count 1) "y" "ies")))
+    count))
+
+(defun agent-log--rendered-only-summary-candidates (&optional index)
+  "Return rendered-only index entries that still need summaries.
+Each element is (SESSION-ID . ENTRY).  When INDEX is nil, read the
+rendered index from disk."
+  (let ((index (or index (agent-log--read-index)))
+        candidates)
+    (maphash
+     (lambda (session-id entry)
+       (when (eq (agent-log--rendered-index-summary-state entry)
+                 'rendered-only-missing-summary)
+         (push (cons session-id entry) candidates)))
+     index)
+    (nreverse candidates)))
+
+(defun agent-log--rendered-conversation-text (file)
+  "Return summary input text extracted from rendered Markdown FILE."
+  (with-temp-buffer
+    (insert-file-contents file)
+    (goto-char (point-min))
+    (flush-lines "^<!-- .* -->$")
+    (goto-char (point-min))
+    (flush-lines "^> \\*\\*Summary\\*\\*:")
+    (agent-log--limit-summary-text (string-trim (buffer-string)))))
+
+;;;###autoload
+(defun agent-log-backfill-rendered-summaries ()
+  "Write existing index summaries into rendered Markdown files.
+This does not call an LLM.  It only copies summaries already stored in
+the rendered index into existing rendered files that do not yet contain
+a summary block."
+  (interactive)
+  (let ((index (agent-log--read-index))
+        (count 0))
+    (maphash
+     (lambda (session-id entry)
+       (when (and (agent-log--session-stored-real-summary-p entry)
+                  (plist-get entry :file)
+                  (file-exists-p (plist-get entry :file))
+                  (not (agent-log--rendered-file-has-summary-p
+                        (plist-get entry :file))))
+         (agent-log--update-rendered-summary-file session-id index)
+         (cl-incf count)))
+     index)
+    (when (called-interactively-p 'interactive)
+      (message "agent-log: backfilled %d rendered summar%s"
+               count
+               (if (= count 1) "y" "ies")))
+    count))
+
+(defun agent-log--rendered-file-has-summary-p (file)
+  "Return non-nil when FILE already contains a rendered summary block."
+  (with-temp-buffer
+    (insert-file-contents file nil 0
+                          (min 2000
+                               (file-attribute-size
+                                (file-attributes file))))
+    (goto-char (point-min))
+    (re-search-forward "^> \\*\\*Summary\\*\\*:" nil t)))
+
 ;;;;; Slug and filepath
 
 (defun agent-log--slugify (text)
@@ -890,11 +1174,19 @@ Returns (RENDERED-PATH . JSONL-SIZE)."
          (backend (or (plist-get metadata :backend)
                       (agent-log--default-backend)))
          (entries (agent-log--parse-and-normalize jsonl-file backend))
+         (parsed-metadata (agent-log--merge-render-metadata
+                           (agent-log--metadata-from-entries
+                            jsonl-file backend entries)
+                           (agent-log--metadata-fallback-from-file
+                            backend jsonl-file)))
+         (effective-metadata (agent-log--merge-render-metadata
+                              metadata parsed-metadata))
          (conversation (if backend
                            (agent-log--filter-conversation backend entries)
                          entries))
          (rendered-path (or output-path
-                            (agent-log--rendered-filepath session-id metadata)))
+                            (agent-log--rendered-filepath
+                             session-id effective-metadata)))
          (jsonl-size (file-attribute-size (file-attributes jsonl-file)))
          (session-meta (agent-log--extract-session-metadata-from-entries
                         entries)))
@@ -905,13 +1197,27 @@ Returns (RENDERED-PATH . JSONL-SIZE)."
       (let ((project (plist-get session-meta :project)))
         (when (equal project "unknown")
           (setq project (agent-log--short-project
-                         (or (plist-get metadata :project) ""))))
+                         (or (plist-get effective-metadata :project) ""))))
         (insert (format "# Session: %s — %s\n\n"
                         project
                         (plist-get session-meta :date))))
+      (when-let* ((summary (agent-log--rendered-summary-text session-id)))
+        (insert summary))
       (dolist (entry conversation)
         (insert (agent-log--render-entry entry backend))))
     (cons rendered-path jsonl-size)))
+
+(defun agent-log--rendered-summary-text (session-id &optional index)
+  "Return rendered summary Markdown for SESSION-ID, or nil.
+When INDEX is non-nil, use it instead of reading the rendered index
+from disk."
+  (let* ((entry (gethash session-id (or index (agent-log--read-index))))
+         (summary (when (agent-log--session-stored-real-summary-p entry)
+                    (plist-get entry :summary))))
+    (when (and (stringp summary)
+               (not (string-empty-p (string-trim summary))))
+      (format "> **Summary**: %s\n\n"
+              (agent-log--normalize-whitespace summary)))))
 
 (defun agent-log--ensure-rendered (session-id metadata)
   "Ensure SESSION-ID has an up-to-date rendered .md file.
@@ -1813,11 +2119,6 @@ preceding separator."
 
 ;;;;; Session summaries
 
-(defconst agent-log--no-conversation-sentinel "(no conversation)"
-  "Sentinel stored as :summary-oneline for sessions with no user/assistant text.
-Used to distinguish \"already processed, nothing to summarize\" from
-\"not yet summarized\" (nil).")
-
 (defconst agent-log--summary-conversation-hash-version 2
   "Version tag for hashes stored in `:summary-conversation-hash'.")
 
@@ -2272,6 +2573,137 @@ If summary generation is already in progress, stop it instead."
            pending 0 (length pending)
            agent-log--summarize-generation)))))))
 
+;;;###autoload
+(defun agent-log-recover-rendered-only-summaries (&optional limit)
+  "Generate summaries for rendered-only sessions whose JSONL source is gone.
+These summaries are explicitly marked in the index as recovered from
+rendered Markdown.  With prefix argument LIMIT, recover at most that
+many sessions."
+  (interactive "P")
+  (unless (require 'gptel nil t)
+    (user-error "Package `gptel' is required for summary recovery"))
+  (cond
+   (agent-log--rendered-summary-active
+    (cl-incf agent-log--rendered-summary-generation)
+    (setq agent-log--rendered-summary-active nil
+          agent-log--rendered-summary-stop nil
+          agent-log--rendered-summary-request-id nil)
+    (message "Rendered-only summary recovery stopped"))
+   (t
+    (let* ((candidates (agent-log--rendered-only-summary-candidates))
+           (limit (and limit (prefix-numeric-value limit)))
+           (batch (if (and limit (> limit 0))
+                      (seq-take candidates limit)
+                    candidates)))
+      (if (null batch)
+          (message "No rendered-only sessions need summary recovery")
+        (setq agent-log--rendered-summary-active t
+              agent-log--rendered-summary-stop nil)
+        (cl-incf agent-log--rendered-summary-generation)
+        (message
+         "Recovering %d rendered-only summar%s from Markdown..."
+         (length batch) (if (= (length batch) 1) "y" "ies"))
+        (run-with-timer
+         0 nil #'agent-log--summarize-rendered-next
+         batch 0 (length batch)
+         agent-log--rendered-summary-generation))))))
+
+(defun agent-log--summarize-rendered-next (remaining done total gen)
+  "Recover the next rendered-only summary from REMAINING.
+DONE, TOTAL, and GEN are chain-continuation state."
+  (when (and agent-log--rendered-summary-active
+             (= gen agent-log--rendered-summary-generation))
+    (if (or (null remaining) agent-log--rendered-summary-stop)
+        (let ((stopped agent-log--rendered-summary-stop))
+          (setq agent-log--rendered-summary-active nil
+                agent-log--rendered-summary-stop nil
+                agent-log--rendered-summary-request-id nil)
+          (message "Rendered-only summary recovery %s: %d/%d done"
+                   (if stopped "stopped" "complete") done total))
+      (pcase-let* ((`(,sid . ,entry) (car remaining))
+                   (file (plist-get entry :file)))
+        (condition-case err
+            (let* ((text (agent-log--rendered-conversation-text file))
+                   (hash (agent-log--conversation-text-hash text)))
+              (if (string-empty-p (string-trim text))
+                  (progn
+                    (agent-log--index-update-props
+                     sid (list :summary agent-log--no-conversation-sentinel
+                               :summary-oneline
+                               agent-log--no-conversation-sentinel
+                               :summary-conversation-hash hash
+                               :summary-source :rendered-markdown
+                               :summary-rendered-file file
+                               :summary-recovered-from-rendered t))
+                    (run-with-timer
+                     0 nil #'agent-log--summarize-rendered-next
+                     (cdr remaining) (1+ done) total gen))
+                (agent-log--summarize-rendered-one
+                 sid file text remaining done total gen)))
+          (error
+           (message "Failed to recover summary for %s: %s"
+                    sid (error-message-string err))
+           (run-with-timer
+            0.1 nil #'agent-log--summarize-rendered-next
+            (cdr remaining) (1+ done) total gen)))))))
+
+(defun agent-log--summarize-rendered-one
+    (sid file text remaining done total gen)
+  "Send a gptel request to summarize rendered Markdown for SID."
+  (let* ((prompt (agent-log--build-summary-prompt text))
+         (resolved (agent-log--resolve-summary-backend-and-model))
+         (gptel-backend (car resolved))
+         (gptel-model (cdr resolved))
+         (gptel-use-tools nil)
+         (request-id (cl-gensym "rendered-summary-")))
+    (message "Recovering rendered-only summary %d/%d with %s: %s"
+             (1+ done) total gptel-model
+             (agent-log--truncate-string file 70))
+    (setq agent-log--rendered-summary-request-id request-id)
+    (gptel-request prompt
+      :system agent-log--summary-system-message
+      :callback
+      (lambda (response _info)
+        (when (and (eq agent-log--rendered-summary-request-id request-id)
+                   (or (stringp response) (null response)))
+          (setq agent-log--rendered-summary-request-id nil)
+          (if (stringp response)
+              (agent-log--summarize-rendered-handle-success
+               response sid file text remaining done total gen)
+            (agent-log--summarize-rendered-handle-failure
+             sid remaining done total gen)))))))
+
+(defun agent-log--summarize-rendered-handle-success
+    (response sid file text remaining done total gen)
+  "Record rendered-only summary RESPONSE for SID.
+FILE is the rendered Markdown source, and TEXT is the summarized input."
+  (let ((parsed (agent-log--parse-summary-response response)))
+    (when parsed
+      (agent-log--index-update-props
+       sid (list :summary (car parsed)
+                 :summary-oneline (cdr parsed)
+                 :summary-conversation-hash
+                 (agent-log--conversation-text-hash text)
+                 :summary-source :rendered-markdown
+                 :summary-rendered-file file
+                 :summary-recovered-from-rendered t))
+      (agent-log--update-rendered-summary-file sid)))
+  (when (and agent-log--rendered-summary-active
+             (= gen agent-log--rendered-summary-generation))
+    (run-with-timer
+     0.1 nil #'agent-log--summarize-rendered-next
+     (cdr remaining) (1+ done) total gen)))
+
+(defun agent-log--summarize-rendered-handle-failure
+    (sid remaining done total gen)
+  "Advance rendered-only summary recovery after a failed request for SID."
+  (message "Rendered-only summary request failed for %s" sid)
+  (when (and agent-log--rendered-summary-active
+             (= gen agent-log--rendered-summary-generation))
+    (run-with-timer
+     0.1 nil #'agent-log--summarize-rendered-next
+     (cdr remaining) (1+ done) total gen)))
+
 (defun agent-log--auto-session-end-actions (&optional session-id)
   "Run configured automatic actions for SESSION-ID.
 When SESSION-ID is nil or cannot be resolved, do nothing.  Automatic
@@ -2565,16 +2997,12 @@ that identify the session which just stopped producing output."
             (agent-log--read-all-sessions)))
 
 (defun agent-log--session-from-id-fast (session-id)
-  "Return minimal session metadata for SESSION-ID without archive scans."
+  "Return session metadata for SESSION-ID without archive scans."
   (when-let* ((file (agent-log--find-session-file-any session-id)))
     (let ((backend (agent-log--backend-for-file file)))
-      (list session-id
-            :display ""
-            :timestamp nil
-            :project ""
-            :file-dir (file-name-directory file)
-            :file file
-            :backend backend))))
+      (cons session-id
+            (plist-put (agent-log--metadata-from-file file backend)
+                       :file-dir (file-name-directory file))))))
 
 ;;;###autoload
 (defun agent-log-stop-summarize-sessions ()
@@ -2740,6 +3168,7 @@ REMAINING, DONE, TOTAL, and GEN are chain-continuation state passed to
                        :summary-conversation-hash conversation-hash
                        :summary-jsonl-size (car jsonl-state)
                        :summary-jsonl-mtime (cdr jsonl-state)))
+            (agent-log--update-rendered-summary-file sid)
             (when agent-log-auto-rename-sessions
               (when (require 'agent-log-claude nil t)
                 (agent-log-claude--maybe-rename-session
@@ -2864,6 +3293,24 @@ a `message' entry, or nil.  Returns a string or nil."
               (insert (format "> **Summary**: %s\n\n" summary))
               (put-text-property start (point)
                                  'agent-log-summary t))))))))
+
+(defun agent-log--update-rendered-summary-file (session-id &optional index)
+  "Insert or replace SESSION-ID's summary in its rendered file.
+When INDEX is non-nil, use it instead of reading the rendered index
+from disk."
+  (let* ((index (or index (agent-log--read-index)))
+         (entry (gethash session-id index))
+         (file (plist-get entry :file))
+         (summary-text (agent-log--rendered-summary-text session-id index)))
+    (when (and file summary-text (file-exists-p file))
+      (with-temp-buffer
+        (insert-file-contents file)
+        (goto-char (point-min))
+        (when (re-search-forward "^# Session:.*\n\n" nil t)
+          (when (looking-at "> \\*\\*Summary\\*\\*: \\(?:.\\|\n> \\)*\n\n")
+            (delete-region (match-beginning 0) (match-end 0)))
+          (insert summary-text)
+          (write-region (point-min) (point-max) file nil 'quiet))))))
 
 (defun agent-log--remove-inserted-summary ()
   "Remove any previously inserted summary from the current buffer."
@@ -3605,7 +4052,11 @@ dollar cost of the scope request."
     ("w" "Copy current turn" agent-log-copy-turn)]
    ["Sync & AI"
     ("y" "Sync all" agent-log-sync-sessions)
+    ("a" "Audit rendered index" agent-log-rendered-index-audit)
+    ("Y" "Repair rendered index" agent-log-repair-rendered-index)
+    ("K" "Clean test index entries" agent-log-clean-test-index-entries)
     ("s" "Summarize sessions" agent-log-summarize-sessions)
+    ("S" "Recover rendered-only summaries" agent-log-recover-rendered-only-summaries)
     ("x" "Stop summarizing" agent-log-stop-summarize-sessions)
     ("R" "Rename sessions from summaries" agent-log-rename-sessions)
     ("/" "Search sessions with AI" agent-log-search)]

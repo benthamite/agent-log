@@ -559,6 +559,27 @@ SUMMARY defaults to ONELINE."
         (should (equal (agent-log-claude--session-project-directory "s1")
                        (file-name-as-directory project-dir)))))))
 
+(ert-deftest agent-log-test-metadata-from-file/claude-history-project-fallback ()
+  "Uses Claude history when the JSONL lacks progress CWD metadata."
+  (agent-log-test--with-temp-dir
+    (let* ((agent-log-directory agent-log-test--dir)
+           (projects-dir (expand-file-name
+                          "projects/-Users-me-project" agent-log-test--dir))
+           (jsonl-path (expand-file-name "s1.jsonl" projects-dir))
+           (history-path (expand-file-name "history.jsonl" agent-log-test--dir)))
+      (make-directory projects-dir t)
+      (with-temp-file jsonl-path
+        (insert "{\"type\":\"user\",\"timestamp\":\"2026-06-04T10:21:52Z\",\"message\":{\"role\":\"user\",\"content\":\"Hello project\"}}\n"))
+      (with-temp-file history-path
+        (insert "{\"sessionId\":\"s1\",\"project\":\"/Users/me/project\",\"timestamp\":1780568512124,\"display\":\"Hello from history\"}\n"))
+      (let ((metadata (agent-log--metadata-from-file
+                       jsonl-path agent-log-test--claude-backend)))
+        (should (equal (plist-get metadata :project)
+                       "/Users/me/project"))
+        (should (equal (plist-get metadata :display)
+                       "Hello project"))
+        (should (numberp (plist-get metadata :timestamp)))))))
+
 ;;;;; Index management
 
 (ert-deftest agent-log-test-read-index/missing-file ()
@@ -616,6 +637,191 @@ SUMMARY defaults to ONELINE."
     (puthash "s1" (list :file "/old.md") index)
     (agent-log--index-merge index "s1" (list :file "/new.md"))
     (should (equal (plist-get (gethash "s1" index) :file) "/new.md"))))
+
+(ert-deftest agent-log-test-repair-rendered-index/migrates-unknown-entry ()
+  "Re-renders unknown-folder index entries to their real project path."
+  (agent-log-test--with-temp-dir
+    (let* ((agent-log-rendered-directory
+            (expand-file-name "rendered" agent-log-test--dir))
+           (jsonl-path (agent-log-test--write-file
+                        "session.jsonl"
+                        (concat
+                         "{\"type\":\"progress\",\"cwd\":\"/Users/me/project\",\"timestamp\":\"2026-06-04T10:21:52Z\"}\n"
+                         "{\"type\":\"user\",\"timestamp\":\"2026-06-04T10:21:52Z\",\"message\":{\"role\":\"user\",\"content\":\"Hello project\"}}\n")))
+           (old-rendered (agent-log-test--write-file
+                          "rendered/unknown/unknown_untitled.md"
+                          "<!-- session: s1 -->\n"))
+           (index (make-hash-table :test #'equal)))
+      (puthash "s1" (list :file old-rendered
+                          :jsonl-size 1
+                          :summary "Existing abstract"
+                          :summary-oneline "Existing abstract")
+               index)
+      (agent-log--write-index index)
+      (cl-letf (((symbol-function 'agent-log--find-session-file-any)
+                 (lambda (sid)
+                   (and (equal sid "s1") jsonl-path)))
+                ((symbol-function 'agent-log--backend-for-file)
+                 (lambda (&rest _) agent-log-test--claude-backend)))
+        (should (= (agent-log-repair-rendered-index) 1)))
+      (let* ((entry (gethash "s1" (agent-log--read-index)))
+             (new-file (plist-get entry :file)))
+        (should (string-match-p "/project/" new-file))
+        (should-not (string-match-p "/unknown/" new-file))
+        (should (file-exists-p old-rendered))
+        (should (file-exists-p new-file))
+        (should (equal (plist-get entry :summary) "Existing abstract"))))))
+
+(ert-deftest agent-log-test-backfill-rendered-summaries ()
+  "Writes stored summaries into existing rendered Markdown files."
+  (agent-log-test--with-temp-dir
+    (let* ((agent-log-rendered-directory
+            (expand-file-name "rendered" agent-log-test--dir))
+           (rendered (agent-log-test--write-file
+                      "rendered/project/session.md"
+                      "<!-- session: s1 -->\n\n# Session: project — 2026-06-04\n\n---\n\n## User — now\n\nHello\n"))
+           (index (make-hash-table :test #'equal)))
+      (puthash "s1" (list :file rendered
+                          :summary "Existing abstract"
+                          :summary-oneline "Existing abstract")
+               index)
+      (agent-log--write-index index)
+      (should (= (agent-log-backfill-rendered-summaries) 1))
+      (let ((content (with-temp-buffer
+                       (insert-file-contents rendered)
+                       (buffer-string))))
+        (should (string-match-p
+                 "^> \\*\\*Summary\\*\\*: Existing abstract" content)))
+      (should (= (agent-log-backfill-rendered-summaries) 0)))))
+
+(ert-deftest agent-log-test-rendered-index-audit/classifies-summary-state ()
+  "Classifies rendered index entries by actionable summary state."
+  (agent-log-test--with-temp-dir
+    (let* ((agent-log-rendered-directory
+            (expand-file-name "rendered" agent-log-test--dir))
+           (source (agent-log-test--write-file
+                    "source/session.jsonl"
+                    "{\"type\":\"user\",\"message\":{\"content\":\"Hello\"}}\n"))
+           (present-rendered
+            (agent-log-test--write-file
+             "rendered/project/present.md"
+             (format "<!-- source: %s -->\n\n# Session: project\n" source)))
+           (missing-rendered
+            (agent-log-test--write-file
+             "rendered/project/missing.md"
+             "<!-- source: /tmp/not-present.jsonl -->\n\n# Session: project\n"))
+           (index (make-hash-table :test #'equal)))
+      (puthash "real" (list :file present-rendered
+                            :summary "Summary"
+                            :summary-oneline "Summary"
+                            :summary-conversation-hash "v2:abc")
+               index)
+      (puthash "none" (list :file present-rendered
+                            :summary agent-log--no-conversation-sentinel
+                            :summary-oneline agent-log--no-conversation-sentinel
+                            :summary-conversation-hash "v2:def")
+               index)
+      (puthash "source-present" (list :file present-rendered) index)
+      (puthash "rendered-only" (list :file missing-rendered) index)
+      (puthash "stale" nil index)
+      (agent-log--write-index index)
+      (let ((audit (agent-log-rendered-index-audit)))
+        (should (= (plist-get audit :total) 5))
+        (should (= (plist-get audit :real-summary) 1))
+        (should (= (plist-get audit :no-conversation) 1))
+        (should (= (plist-get audit :source-present-missing-summary) 1))
+        (should (= (plist-get audit :rendered-only-missing-summary) 1))
+        (should (= (plist-get audit :stale-index-entry) 1))))))
+
+(ert-deftest agent-log-test-clean-test-index-entries/removes-fixtures ()
+  "Removes stale test fixture entries from the rendered index."
+  (agent-log-test--with-temp-dir
+    (let* ((agent-log-rendered-directory
+            (expand-file-name "rendered" agent-log-test--dir))
+           (rendered (agent-log-test--write-file
+                      "rendered/project/session.md"
+                      "<!-- session: real -->\n"))
+           (index (make-hash-table :test #'equal)))
+      (puthash "test-sid" nil index)
+      (puthash "test-session-id" (list :jsonl-size 10) index)
+      (puthash "real" (list :file rendered) index)
+      (agent-log--write-index index)
+      (should (= (agent-log-clean-test-index-entries) 2))
+      (let ((loaded (agent-log--read-index)))
+        (should-not (gethash "test-sid" loaded))
+        (should-not (gethash "test-session-id" loaded))
+        (should (gethash "real" loaded))))))
+
+(ert-deftest agent-log-test-rendered-only-summary-candidates ()
+  "Finds only missing-summary entries whose rendered files are source-only."
+  (agent-log-test--with-temp-dir
+    (let* ((agent-log-rendered-directory
+            (expand-file-name "rendered" agent-log-test--dir))
+           (source (agent-log-test--write-file
+                    "source/session.jsonl"
+                    "{\"type\":\"user\",\"message\":{\"content\":\"Hello\"}}\n"))
+           (source-rendered
+            (agent-log-test--write-file
+             "rendered/project/source.md"
+             (format "<!-- source: %s -->\n\n# Session: project\n" source)))
+           (rendered-only
+            (agent-log-test--write-file
+             "rendered/project/rendered-only.md"
+             "<!-- source: /tmp/not-present.jsonl -->\n\n# Session: project\n"))
+           (index (make-hash-table :test #'equal)))
+      (puthash "source-present" (list :file source-rendered) index)
+      (puthash "rendered-only" (list :file rendered-only) index)
+      (puthash "summarized" (list :file rendered-only
+                                  :summary "Summary"
+                                  :summary-oneline "Summary"
+                                  :summary-conversation-hash "v2:abc")
+               index)
+      (agent-log--write-index index)
+      (let ((candidates (agent-log--rendered-only-summary-candidates index)))
+        (should (= (length candidates) 1))
+        (should (equal (caar candidates) "rendered-only"))))))
+
+(ert-deftest agent-log-test-summarize-rendered-handle-success/marks-recovered ()
+  "Stores rendered-only summaries with explicit recovery metadata."
+  (agent-log-test--with-temp-dir
+    (let* ((agent-log-rendered-directory
+            (expand-file-name "rendered" agent-log-test--dir))
+           (rendered (agent-log-test--write-file
+                      "rendered/project/session.md"
+                      (concat "<!-- session: s1 -->\n\n"
+                              "# Session: project\n\n"
+                              "---\n\n"
+                              "## User — now\n\nHello\n")))
+           (index (make-hash-table :test #'equal))
+           (text "User: Hello"))
+      (puthash "s1" (list :file rendered) index)
+      (agent-log--write-index index)
+      (agent-log--summarize-rendered-handle-success
+       "{\"oneline\":\"Greeting\",\"summary\":\"The user greeted the assistant.\"}"
+       "s1" rendered text nil 0 1 1)
+      (let* ((entry (gethash "s1" (agent-log--read-index)))
+             (content (with-temp-buffer
+                        (insert-file-contents rendered)
+                        (buffer-string))))
+        (should (equal (plist-get entry :summary-oneline) "Greeting"))
+        (should (equal (plist-get entry :summary-source) :rendered-markdown))
+        (should (equal (plist-get entry :summary-rendered-file) rendered))
+        (should (plist-get entry :summary-recovered-from-rendered))
+        (should (string-match-p
+                 "^> \\*\\*Summary\\*\\*: The user greeted the assistant\\."
+                 content))))))
+
+(ert-deftest agent-log-test-summarize-rendered-handle-failure/finishes ()
+  "A rendered-only summary failure advances the recovery loop."
+  (let ((agent-log--rendered-summary-active t)
+        (agent-log--rendered-summary-generation 1)
+        (agent-log--rendered-summary-stop nil))
+    (cl-letf (((symbol-function 'run-with-timer)
+               (lambda (_secs _repeat fn &rest args)
+                 (apply fn args))))
+      (agent-log--summarize-rendered-handle-failure
+       "s1" nil 0 1 1)
+      (should-not agent-log--rendered-summary-active))))
 
 ;;;;; Tool result extraction
 
@@ -1092,6 +1298,55 @@ SUMMARY defaults to ONELINE."
         (should (string-match-p "## User" content))
         (should (string-match-p "hello" content))))))
 
+(ert-deftest agent-log-test-render-to-file/uses-parsed-metadata-for-path ()
+  "Uses metadata parsed from the JSONL when caller metadata is minimal."
+  (agent-log-test--with-temp-dir
+    (let* ((agent-log-rendered-directory
+            (expand-file-name "rendered" agent-log-test--dir))
+           (jsonl-path (agent-log-test--write-file
+                        "session.jsonl"
+                        (concat
+                         "{\"type\":\"progress\",\"cwd\":\"/Users/me/project\",\"timestamp\":\"2026-06-04T10:21:52Z\"}\n"
+                         "{\"type\":\"user\",\"timestamp\":\"2026-06-04T10:21:52Z\",\"message\":{\"role\":\"user\",\"content\":\"Hello project\"}}\n")))
+           (metadata (list :file jsonl-path
+                           :timestamp nil
+                           :project ""
+                           :display ""
+                           :backend agent-log-test--claude-backend))
+           (result (agent-log--render-to-file "s1" metadata))
+           (rendered-path (car result)))
+      (should (string-match-p "/project/" rendered-path))
+      (should-not (string-match-p "/unknown/" rendered-path))
+      (should (string-match-p "2026-06-04_07-21_hello-project\\.md\\'"
+                              rendered-path)))))
+
+(ert-deftest agent-log-test-render-to-file/persists-summary ()
+  "Writes an existing index summary into the rendered Markdown file."
+  (agent-log-test--with-temp-dir
+    (let* ((agent-log-rendered-directory
+            (expand-file-name "rendered" agent-log-test--dir))
+           (jsonl-path (agent-log-test--write-file
+                        "session.jsonl"
+                        (concat
+                         "{\"type\":\"progress\",\"cwd\":\"/Users/me/project\",\"timestamp\":\"2026-06-04T07:21:52Z\"}\n"
+                         "{\"type\":\"user\",\"timestamp\":\"2026-06-04T07:21:52Z\",\"message\":{\"role\":\"user\",\"content\":\"Hello\"}}\n")))
+           (metadata (list :file jsonl-path
+                           :timestamp 1780557712000
+                           :project "/Users/me/project"
+                           :display "Hello"
+                           :backend agent-log-test--claude-backend))
+           (index (make-hash-table :test #'equal)))
+      (puthash "s1" (list :summary "Existing abstract"
+                          :summary-oneline "Existing abstract")
+               index)
+      (agent-log--write-index index)
+      (let* ((result (agent-log--render-to-file "s1" metadata))
+             (content (with-temp-buffer
+                        (insert-file-contents (car result))
+                        (buffer-string))))
+        (should (string-match-p "> \\*\\*Summary\\*\\*: Existing abstract"
+                                content))))))
+
 ;;;;; Summary parsing
 
 (ert-deftest agent-log-test-parse-summary-response/valid-json ()
@@ -1267,6 +1522,20 @@ SUMMARY defaults to ONELINE."
 (ert-deftest agent-log-test-group-by-project/empty ()
   "Returns empty list for no sessions."
   (should (null (agent-log--group-by-project nil))))
+
+(ert-deftest agent-log-test-session-ignored-p/tmp ()
+  "Ignores sessions whose project is under the temporary directory."
+  (should (agent-log--session-ignored-p (list "s" :project "/tmp/codex-gt")))
+  (should (agent-log--session-ignored-p
+           (list "s" :project "/private/tmp/codex-gt")))
+  (should (agent-log--session-ignored-p (list "s" :project "/tmp"))))
+
+(ert-deftest agent-log-test-session-ignored-p/keeps-real-paths ()
+  "Keeps real directories, including names that merely begin with tmp."
+  (should-not (agent-log--session-ignored-p (list "s" :project "/Users/me/proj")))
+  (should-not (agent-log--session-ignored-p (list "s" :project "/tmpfoo")))
+  (should-not (agent-log--session-ignored-p (list "s" :project "/tmp-backups")))
+  (should-not (agent-log--session-ignored-p (list "s" :project ""))))
 
 ;;;;; Sessions needing summary
 
@@ -1707,44 +1976,48 @@ rereading every transcript."
 
 (ert-deftest agent-log-test-auto-session-end-actions/targets-single-session ()
   "Auto session-end actions spawn a worker only for the identified session."
-  (let* ((agent-log--summary-workers (make-hash-table :test #'equal))
-         command
-         (agent-log-auto-sync-sessions nil)
-         (agent-log-auto-summarize-sessions t)
-         (agent-log--summarize-active nil)
-         (agent-log--summarize-blocked-reason nil))
-    (cl-letf (((symbol-function 'agent-log--read-all-sessions)
-               (lambda ()
-                 (ert-fail "automatic session-end action scanned archive")))
-              ((symbol-function 'agent-log--find-session-file-any)
-               (lambda (sid)
-                 (and (equal sid "s1") "/a.jsonl")))
-              ((symbol-function 'agent-log--backend-for-file)
-               (lambda (&rest _) nil))
-              ((symbol-function 'make-process)
-               (lambda (&rest args)
-                 (setq command (plist-get args :command))
-                 (make-symbol "process"))))
-      (unwind-protect
-          (progn
-            (agent-log--auto-session-end-actions "s1")
-            (should command)
-            (should (member "--quick" command))
-            (should (member "--batch" command))
-            (let* ((state-file (cadr (member "--load" command)))
-                   (state (and state-file
-                               (file-exists-p state-file)
-                               (with-temp-buffer
-                                 (insert-file-contents state-file)
-                                 (buffer-string)))))
-              (should state)
-              (should (string-match-p
-                       "agent-log--batch-summarize-session \"s1\""
-                       state))
-              (should-not (string-match-p "\"s2\"" state))))
-        (when-let* ((state-file (cadr (member "--load" command))))
-          (when (file-exists-p state-file)
-            (delete-file state-file)))))))
+  (agent-log-test--with-temp-dir
+    (let* ((agent-log--summary-workers (make-hash-table :test #'equal))
+           (jsonl-path (agent-log-test--write-file
+                        "s1.jsonl"
+                        "{\"type\":\"user\",\"timestamp\":\"2023-11-14T12:00:00Z\",\"message\":{\"role\":\"user\",\"content\":\"hi\"}}\n"))
+           command
+           (agent-log-auto-sync-sessions nil)
+           (agent-log-auto-summarize-sessions t)
+           (agent-log--summarize-active nil)
+           (agent-log--summarize-blocked-reason nil))
+      (cl-letf (((symbol-function 'agent-log--read-all-sessions)
+                 (lambda ()
+                   (ert-fail "automatic session-end action scanned archive")))
+                ((symbol-function 'agent-log--find-session-file-any)
+                 (lambda (sid)
+                   (and (equal sid "s1") jsonl-path)))
+                ((symbol-function 'agent-log--backend-for-file)
+                 (lambda (&rest _) nil))
+                ((symbol-function 'make-process)
+                 (lambda (&rest args)
+                   (setq command (plist-get args :command))
+                   (make-symbol "process"))))
+        (unwind-protect
+            (progn
+              (agent-log--auto-session-end-actions "s1")
+              (should command)
+              (should (member "--quick" command))
+              (should (member "--batch" command))
+              (let* ((state-file (cadr (member "--load" command)))
+                     (state (and state-file
+                                 (file-exists-p state-file)
+                                 (with-temp-buffer
+                                   (insert-file-contents state-file)
+                                   (buffer-string)))))
+                (should state)
+                (should (string-match-p
+                         "agent-log--batch-summarize-session \"s1\""
+                         state))
+                (should-not (string-match-p "\"s2\"" state))))
+          (when-let* ((state-file (cadr (member "--load" command))))
+            (when (file-exists-p state-file)
+              (delete-file state-file))))))))
 
 (ert-deftest agent-log-test-auto-session-end-actions/unresolved-skips-archive ()
   "Unresolved automatic events skip quietly without archive-wide work."
@@ -1761,6 +2034,28 @@ rereading every transcript."
       (agent-log--auto-session-end-actions nil)
       (should-not called)
       (should-not messages))))
+
+(ert-deftest agent-log-test-session-from-id-fast/derives-render-metadata ()
+  "Fast session lookup returns metadata rich enough for rendering."
+  (agent-log-test--with-temp-dir
+    (let ((jsonl-path
+           (agent-log-test--write-file
+            "session.jsonl"
+            (concat
+             "{\"type\":\"progress\",\"cwd\":\"/Users/me/project\",\"timestamp\":\"2026-06-04T07:21:52Z\"}\n"
+             "{\"type\":\"user\",\"timestamp\":\"2026-06-04T07:21:52Z\",\"message\":{\"role\":\"user\",\"content\":\"Hello project\"}}\n"))))
+      (cl-letf (((symbol-function 'agent-log--find-session-file-any)
+                 (lambda (sid)
+                   (and (equal sid "s1") jsonl-path)))
+                ((symbol-function 'agent-log--backend-for-file)
+                 (lambda (&rest _) agent-log-test--claude-backend)))
+        (let ((session (agent-log--session-from-id-fast "s1")))
+          (should (equal (car session) "s1"))
+          (should (equal (plist-get (cdr session) :project)
+                         "/Users/me/project"))
+          (should (equal (plist-get (cdr session) :display)
+                         "Hello project"))
+          (should (numberp (plist-get (cdr session) :timestamp))))))))
 
 (ert-deftest agent-log-test-auto-summary-sweep/spawns-background-worker ()
   "Automatic backlog sweeps start a batch worker, not a live archive scan."
@@ -2275,7 +2570,7 @@ session."
            (jsonl-content "{\"type\":\"user\",\"timestamp\":\"2023-11-14T12:00:00Z\",\"message\":{\"role\":\"user\",\"content\":\"hi\"}}\n")
            (jsonl-path (agent-log-test--write-file "test.jsonl" jsonl-content))
            (old-metadata (list :file jsonl-path :timestamp 1700000000000
-                               :project "/project" :display ""))
+                               :project "/project" :display "old"))
            (new-metadata (list :file jsonl-path :timestamp 1700000000000
                                :project "/project" :display "hi"))
            (path1 (agent-log--ensure-rendered "s1" old-metadata))
