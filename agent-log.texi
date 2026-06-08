@@ -825,6 +825,7 @@ Verify that @code{agent-log-live-update} is set to @code{t} (@ref{Live updates})
 @example
 make test     # run the full ERT suite
 make compile  # byte-compile with warnings-as-errors
+TZ=UTC make test  # run the suite with GitHub Actions' timezone
 @end example
 
 @node License

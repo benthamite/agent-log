@@ -693,6 +693,7 @@ Verify that ~agent-log-live-update~ is set to ~t~ ([[#h:live-updates][Live updat
 #+begin_src sh
 make test     # run the full ERT suite
 make compile  # byte-compile with warnings-as-errors
+TZ=UTC make test  # run the suite with GitHub Actions' timezone
 #+end_src
 
 * License

@@ -1314,10 +1314,14 @@ SUMMARY defaults to ONELINE."
                            :display ""
                            :backend agent-log-test--claude-backend))
            (result (agent-log--render-to-file "s1" metadata))
-           (rendered-path (car result)))
+           (rendered-path (car result))
+           (expected-timestamp
+            (format-time-string "%Y-%m-%d_%H-%M"
+                                (date-to-time "2026-06-04T10:21:52Z"))))
       (should (string-match-p "/project/" rendered-path))
       (should-not (string-match-p "/unknown/" rendered-path))
-      (should (string-match-p "2026-06-04_07-21_hello-project\\.md\\'"
+      (should (string-match-p (concat (regexp-quote expected-timestamp)
+                                      "_hello-project\\.md\\'")
                               rendered-path)))))
 
 (ert-deftest agent-log-test-render-to-file/persists-summary ()
