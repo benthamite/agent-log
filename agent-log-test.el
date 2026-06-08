@@ -2743,10 +2743,29 @@ session."
 
 (require 'agent-log-codex)
 
+(defvar codex-terminal-backend)
+
 (defvar agent-log-test--codex-backend agent-log-codex--instance
   "Codex backend instance for use in tests.")
 
 ;;;;;; Session discovery
+
+(ert-deftest agent-log-test-codex-resume-session/app-server ()
+  "Resumes Codex logs through app-server when app-server is the active backend."
+  (let ((codex-terminal-backend 'app-server)
+        (agent-log--session-project "/tmp/project/")
+        called)
+    (cl-letf (((symbol-function 'require)
+               (lambda (feature &optional _filename _noerror)
+                 (eq feature 'codex)))
+              ((symbol-function 'codex--app-server-launch-resume-session)
+               (lambda (session-id)
+                 (setq called session-id)))
+              ((symbol-function 'codex--start-subcommand)
+               (lambda (&rest _)
+                 (ert-fail "app-server resume should not use terminal subcommand"))))
+      (agent-log--resume-session agent-log-test--codex-backend "sid-123"))
+    (should (equal called "sid-123"))))
 
 (ert-deftest agent-log-test-codex-find-session-for-project/allows-subagent ()
   "Finds the newest matching Codex session by default."

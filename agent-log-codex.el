@@ -45,9 +45,11 @@
 (require 'agent-log)
 
 (declare-function codex--start-subcommand "codex" (subcommand &optional args extra-args))
+(declare-function codex--app-server-launch-resume-session "codex-app-server" (session-id))
 (declare-function codex--buffer-p "codex" (buffer))
 (declare-function codex--buffer-directory-for "codex" (buffer))
 (defvar agent-log-codex--instance)
+(defvar codex-terminal-backend)
 (defvar codex-event-hook nil
   "Hook run for Codex lifecycle events.")
 (defvar codex-start-hook nil
@@ -561,7 +563,10 @@ the same project and launch-time heuristic as
                               default-directory)))
     (cl-letf (((symbol-function 'codex--directory)
                (lambda () default-directory)))
-      (codex--start-subcommand "resume" nil (list session-id)))))
+      (if (and (eq codex-terminal-backend 'app-server)
+               (fboundp 'codex--app-server-launch-resume-session))
+          (codex--app-server-launch-resume-session session-id)
+        (codex--start-subcommand "resume" nil (list session-id))))))
 
 ;;;;;; Current-buffer session detection
 
