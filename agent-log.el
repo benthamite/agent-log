@@ -252,6 +252,14 @@ testing a coding agent).  Such sessions remain on disk and can still be
 opened explicitly with `agent-log-open-file' or `agent-log-open-session'."
   :type '(repeat regexp))
 
+(defcustom agent-log-session-sort-key 'creation-time
+  "Which timestamp to use when sorting session browser entries.
+The value `creation-time' sorts by the session timestamp recorded
+by the backend.  The value `modification-time' sorts by the
+source JSONL file's last modification time."
+  :type '(choice (const :tag "Creation time" creation-time)
+                 (const :tag "Modification time" modification-time)))
+
 (defun agent-log--read-all-sessions ()
   "Return merged sessions from all active backends, sorted most-recent-first.
 Sessions whose project path matches `agent-log-ignored-project-regexps'
@@ -264,10 +272,30 @@ are excluded."
                         (agent-log-backend-name backend)
                         (error-message-string err)))))
     (setq all (seq-remove #'agent-log--session-ignored-p all))
-    (sort all (lambda (a b)
-                (agent-log--timestamp>
-                 (plist-get (cdr a) :timestamp)
-                 (plist-get (cdr b) :timestamp))))))
+    (agent-log--sort-sessions all)))
+
+(defun agent-log--sort-sessions (sessions)
+  "Return SESSIONS sorted according to `agent-log-session-sort-key'."
+  (sort (copy-sequence sessions)
+        (lambda (a b)
+          (agent-log--timestamp>
+           (agent-log--session-sort-value a)
+           (agent-log--session-sort-value b)))))
+
+(defun agent-log--session-sort-value (session)
+  "Return the sortable timestamp for SESSION."
+  (let ((metadata (cdr session)))
+    (pcase agent-log-session-sort-key
+      ('modification-time
+       (or (agent-log--session-file-mtime-ms metadata)
+           (plist-get metadata :timestamp)))
+      (_ (plist-get metadata :timestamp)))))
+
+(defun agent-log--session-file-mtime-ms (metadata)
+  "Return METADATA's source file modification time in milliseconds."
+  (when-let* ((file (plist-get metadata :file))
+              (attrs (file-attributes file)))
+    (* 1000 (float-time (file-attribute-modification-time attrs)))))
 
 (defun agent-log--session-ignored-p (session)
   "Return non-nil when SESSION's project matches an ignored regexp.
@@ -1313,15 +1341,16 @@ Projects are sorted by most recent session timestamp."
            result)
       (maphash (lambda (project group-sessions)
                  (let ((name (cdr (assoc project display-names))))
-                   (push (cons name group-sessions) result)))
+                   (push (cons name (agent-log--sort-sessions group-sessions))
+                         result)))
                groups)
-      ;; Sort by most recent session timestamp.
+      ;; Sort by most recent session according to the selected sort key.
       ;; Each element is (project (sid . plist) ...), so cadr is the
       ;; first session and cdadr is its metadata plist.
       (sort result (lambda (a b)
                      (agent-log--timestamp>
-                      (plist-get (cdadr a) :timestamp)
-                      (plist-get (cdadr b) :timestamp)))))))
+                      (agent-log--session-sort-value (cadr a))
+                      (agent-log--session-sort-value (cadr b))))))))
 
 (defun agent-log--build-candidates (sessions)
   "Build an alist of (display-string . (session-id . metadata)) from SESSIONS."
@@ -4071,6 +4100,26 @@ dollar cost of the scope request."
   (message "Group by project → %s"
            (if agent-log-group-by-project "on" "off")))
 
+(transient-define-suffix agent-log-cycle-session-sort-key ()
+  "Cycle `agent-log-session-sort-key' through creation and modification time."
+  :description (lambda ()
+                 (format "Sort sessions: %s"
+                         (propertize
+                          (pcase agent-log-session-sort-key
+                            ('modification-time "modified")
+                            (_ "created"))
+                          'face 'transient-value)))
+  :transient t
+  (interactive)
+  (setq agent-log-session-sort-key
+        (pcase agent-log-session-sort-key
+          ('creation-time 'modification-time)
+          (_ 'creation-time)))
+  (message "Sort sessions → %s"
+           (pcase agent-log-session-sort-key
+             ('modification-time "modified")
+             (_ "created"))))
+
 ;;;###autoload (autoload 'agent-log-menu "agent-log" nil t)
 (transient-define-prefix agent-log-menu ()
   "Transient menu for Agent Log commands."
@@ -4103,7 +4152,8 @@ dollar cost of the scope request."
     ("-t" agent-log-cycle-show-thinking)
     ("-o" agent-log-cycle-show-tools)
     ("-u" agent-log-toggle-live-update)
-    ("-g" agent-log-toggle-group-by-project)]])
+    ("-g" agent-log-toggle-group-by-project)
+    ("-m" agent-log-cycle-session-sort-key)]])
 
 (provide 'agent-log)
 ;;; agent-log.el ends here

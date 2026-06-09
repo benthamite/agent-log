@@ -1523,6 +1523,50 @@ SUMMARY defaults to ONELINE."
       ;; project-a should have 2 sessions
       (should (= (length (cdr (car result))) 2)))))
 
+(ert-deftest agent-log-test-sort-sessions/creation-time ()
+  "Sorts sessions by creation timestamp by default."
+  (let ((agent-log-session-sort-key 'creation-time)
+        (sessions (list (list "older" :timestamp 1000)
+                        (list "newer" :timestamp 3000))))
+    (should (equal (mapcar #'car (agent-log--sort-sessions sessions))
+                   '("newer" "older")))))
+
+(ert-deftest agent-log-test-sort-sessions/modification-time ()
+  "Sorts sessions by source file modification time when configured."
+  (agent-log-test--with-temp-dir
+    (let* ((old-file (agent-log-test--write-file "old.jsonl" "{}\n"))
+           (new-file (agent-log-test--write-file "new.jsonl" "{}\n"))
+           (agent-log-session-sort-key 'modification-time)
+           (sessions (list (list "created-newer" :timestamp 3000
+                                 :file old-file)
+                           (list "modified-newer" :timestamp 1000
+                                 :file new-file))))
+      (set-file-times old-file (seconds-to-time 100))
+      (set-file-times new-file (seconds-to-time 200))
+      (should (equal (mapcar #'car (agent-log--sort-sessions sessions))
+                     '("modified-newer" "created-newer"))))))
+
+(ert-deftest agent-log-test-group-by-project/modification-time ()
+  "Orders project groups by the newest session modification time."
+  (agent-log-test--with-temp-dir
+    (let* ((a-old (agent-log-test--write-file "a-old.jsonl" "{}\n"))
+           (a-new (agent-log-test--write-file "a-new.jsonl" "{}\n"))
+           (b-new (agent-log-test--write-file "b-new.jsonl" "{}\n"))
+           (agent-log-session-sort-key 'modification-time)
+           (sessions (list (list "a-old" :project "/home/user/project-a"
+                                 :timestamp 3000 :file a-old)
+                           (list "b-new" :project "/home/user/project-b"
+                                 :timestamp 2000 :file b-new)
+                           (list "a-new" :project "/home/user/project-a"
+                                 :timestamp 1000 :file a-new))))
+      (set-file-times a-old (seconds-to-time 100))
+      (set-file-times a-new (seconds-to-time 200))
+      (set-file-times b-new (seconds-to-time 300))
+      (let ((result (agent-log--group-by-project sessions)))
+        (should (equal (car (car result)) "project-b"))
+        (should (equal (mapcar #'car (cdr (cadr result)))
+                       '("a-new" "a-old")))))))
+
 (ert-deftest agent-log-test-group-by-project/empty ()
   "Returns empty list for no sessions."
   (should (null (agent-log--group-by-project nil))))

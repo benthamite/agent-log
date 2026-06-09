@@ -175,10 +175,13 @@ Increase these values if you find that truncated tool content is hiding informat
 :END:
 
 #+vindex: agent-log-group-by-project
+#+vindex: agent-log-session-sort-key
 #+vindex: agent-log-ignored-project-regexps
 #+vindex: agent-log-slug-max-length
 
 The user option ~agent-log-group-by-project~ controls whether ~agent-log-browse-sessions~ groups sessions by project ([[#h:session-browsing][Session browsing]]).  When non-~nil~ (the default), the command first prompts for a project, then for a session within that project.  When ~nil~, all sessions are presented in a single flat list.  The grouped view is more convenient when you have many sessions across several projects; the flat view is useful for quickly finding a recent session regardless of project.
+
+The user option ~agent-log-session-sort-key~ controls which timestamp defines “most recent” in the session browser.  The default, ~creation-time~, sorts by the backend's recorded session timestamp.  Set it to ~modification-time~ to sort by the source JSONL file's last modification time instead, so resumed or appended sessions rise to the top.
 
 The user option ~agent-log-ignored-project-regexps~ is a list of regular expressions; any session whose working directory matches one of them is omitted from the browser, ~agent-log-open-latest~, and AI search.  The default excludes sessions run under the system temporary directory (=/tmp= and =/private/tmp=), which is where throwaway scratch sessions accumulate — for example when repeatedly launching a coding agent in disposable directories to test it.  Ignored sessions are not deleted: they remain on disk and can still be opened directly with ~agent-log-open-file~ or ~agent-log-open-session~.  Add your own patterns to hide other transient or uninteresting locations.
 
@@ -261,7 +264,7 @@ The command ~agent-log-browse-sessions~ is the primary entry point for exploring
 
 Each candidate is prefixed with a backend-specific icon so you can tell at a glance which agent a session belongs to.  In GUI frames the icon is an inline SVG image; in terminal frames it falls back to a short text label (e.g. =CC= for Claude Code, =CX= for Codex).  The size column shows the human-readable size of the source JSONL file.
 
-When ~agent-log-group-by-project~ is non-~nil~ (the default), the command first prompts for a project, then for a session within that project ([[#h:session-browser-options][Session browser options]]).  Sessions are sorted most-recent-first.  If AI summaries have been generated for any sessions ([[#h:summary-generation][Summary generation]]), the summary replaces the quoted first message in the candidate display.
+When ~agent-log-group-by-project~ is non-~nil~ (the default), the command first prompts for a project, then for a session within that project ([[#h:session-browser-options][Session browser options]]).  Sessions are sorted most-recent-first using ~agent-log-session-sort-key~.  If AI summaries have been generated for any sessions ([[#h:summary-generation][Summary generation]]), the summary replaces the quoted first message in the candidate display.
 
 Each project is labelled by the shortest trailing portion of its working directory that uniquely identifies it.  A project whose final directory component is unique is shown by that component alone (for example, =my-project=); when several projects share a final component, each label grows one parent directory at a time until it is distinct (for example, =8.1.0-dev/elpaca/sources/codex= versus =8.3.0-dev/elpaca/sources/codex=).  This keeps labels short while guaranteeing that two distinct project directories never collapse to the same entry.
 
@@ -571,7 +574,7 @@ The Open column includes ~agent-log-resume-session~ (bound to =s=), which opens 
 
 The Navigate column groups movement commands (=n=, =p= for stepping through turns), section folding (=TAB= to toggle at point, =C= to collapse all, =E= to expand all), and buffer operations (=G= to re-render, =w= to copy the current turn).  Note that the collapse and expand commands are one-shot operations on the current buffer view; the persistent per-type visibility defaults (hidden, collapsed, visible) are controlled by the Settings toggles (=-t= for thinking, =-o= for tools).
 
-The Settings column displays the current value of each option (e.g., ~collapsed~, ~on~, ~off~) highlighted with the ~transient-value~ face, matching the convention used by =magit= and other transient-based menus.
+The Settings column displays the current value of each option (e.g., ~collapsed~, ~on~, ~off~, ~created~, ~modified~) highlighted with the ~transient-value~ face, matching the convention used by =magit= and other transient-based menus.
 
 * How it works
 :PROPERTIES:
