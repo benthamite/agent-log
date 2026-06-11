@@ -2314,7 +2314,9 @@ returns nil."
         (length 0))
     (dolist (normalized (agent-log--summary-normalize-entries
                          (list entry) backend))
-      (when-let* ((text (agent-log--conversation-entry-text
+      (when-let* (((or (null backend)
+                       (agent-log--conversation-entry-p backend normalized)))
+                  (text (agent-log--conversation-entry-text
                          normalized backend)))
         (push text parts)
         (cl-incf length (length text))))

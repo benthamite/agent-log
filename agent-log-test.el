@@ -1500,6 +1500,24 @@ SUMMARY defaults to ONELINE."
                       path agent-log-test--claude-backend)
                      "User: hello\n\n")))))
 
+(ert-deftest agent-log-test-conversation-text-from-file/skips-claude-local-commands ()
+  "Skips Claude local command XML entries in summary text."
+  (agent-log-test--with-temp-dir
+    (let* ((content
+            (concat
+             "{\"type\":\"user\",\"message\":{\"role\":\"user\","
+             "\"content\":\"<local-command-caveat>ignore</local-command-caveat>\"}}\n"
+             "{\"type\":\"user\",\"message\":{\"role\":\"user\","
+             "\"content\":\"<command-name>/model</command-name>\"}}\n"
+             "{\"type\":\"user\",\"message\":{\"role\":\"user\","
+             "\"content\":\"<local-command-stdout>Opus 4.8</local-command-stdout>\"}}\n"
+             "{\"type\":\"user\",\"message\":{\"role\":\"user\","
+             "\"content\":\"Real question\"}}\n"))
+           (path (agent-log-test--write-file "s1.jsonl" content)))
+      (should (equal (agent-log--conversation-text-from-file
+                      path agent-log-test--claude-backend)
+                     "User: Real question\n\n")))))
+
 ;;;;; Build summary prompt
 
 (ert-deftest agent-log-test-build-summary-prompt ()
