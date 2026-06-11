@@ -2919,6 +2919,8 @@ that identify the session which just stopped producing output."
                 (setq agent-log-directory ,agent-log-directory
                       agent-log-backends ',agent-log-backends
                       agent-log-active-backends ',agent-log-active-backends
+                      agent-log-auto-rename-sessions
+                      ,agent-log-auto-rename-sessions
                       agent-log-summary-backend ',agent-log-summary-backend
                       agent-log-summary-model ',agent-log-summary-model
                       agent-log-summary-max-content-length

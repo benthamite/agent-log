@@ -2058,6 +2058,7 @@ rereading every transcript."
            command
            (agent-log-auto-sync-sessions nil)
            (agent-log-auto-summarize-sessions t)
+           (agent-log-auto-rename-sessions t)
            (agent-log--summarize-active nil)
            (agent-log--summarize-blocked-reason nil))
       (cl-letf (((symbol-function 'agent-log--read-all-sessions)
@@ -2087,6 +2088,9 @@ rereading every transcript."
                 (should state)
                 (should (string-match-p
                          "agent-log--batch-summarize-session \"s1\""
+                         state))
+                (should (string-match-p
+                         "agent-log-auto-rename-sessions t"
                          state))
                 (should-not (string-match-p "\"s2\"" state))))
           (when-let* ((state-file (cadr (member "--load" command))))
