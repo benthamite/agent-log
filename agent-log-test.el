@@ -1564,6 +1564,28 @@ SUMMARY defaults to ONELINE."
       (should (equal (mapcar #'car (agent-log--sort-sessions sessions))
                      '("modified-newer" "created-newer"))))))
 
+(ert-deftest agent-log-test-sort-sessions/modification-time-caches-file-state ()
+  "Reads source file metadata once per session when sorting by mtime."
+  (agent-log-test--with-temp-dir
+    (let* ((old-file (agent-log-test--write-file "old.jsonl" "{}\n"))
+           (mid-file (agent-log-test--write-file "mid.jsonl" "{}\n"))
+           (new-file (agent-log-test--write-file "new.jsonl" "{}\n"))
+           (agent-log-session-sort-key 'modification-time)
+           (sessions (list (list "old" :timestamp 3000 :file old-file)
+                           (list "new" :timestamp 2000 :file new-file)
+                           (list "mid" :timestamp 1000 :file mid-file)))
+           (orig-file-attributes (symbol-function 'file-attributes))
+           (calls 0))
+      (set-file-times old-file (seconds-to-time 100))
+      (set-file-times mid-file (seconds-to-time 200))
+      (set-file-times new-file (seconds-to-time 300))
+      (cl-letf (((symbol-function 'file-attributes)
+                 (lambda (&rest args)
+                   (cl-incf calls)
+                   (apply orig-file-attributes args))))
+        (agent-log--sort-sessions sessions)
+        (should (= calls (length sessions)))))))
+
 (ert-deftest agent-log-test-group-by-project/modification-time ()
   "Orders project groups by the newest session modification time."
   (agent-log-test--with-temp-dir
@@ -2808,6 +2830,32 @@ session."
                  (rx "unknown" (+ space) "project" (+ space) "2k"
                      (+ space) "\"Hello\"")
                  (caar (agent-log--build-candidates sessions))))))))
+
+(ert-deftest agent-log-test-build-candidates/caches-session-size ()
+  "Reads source file metadata once per session while building candidates."
+  (agent-log-test--with-temp-dir
+    (let* ((jsonl-path (agent-log-test--write-file
+                        "session.jsonl"
+                        (make-string 2048 ?x)))
+           (sessions (list (list "s1"
+                                  :file jsonl-path
+                                  :timestamp nil
+                                  :project "/tmp/project"
+                                  :display "Hello")))
+           (orig-file-attributes (symbol-function 'file-attributes))
+           (calls 0))
+      (cl-letf (((symbol-function 'agent-log--read-index)
+                 (lambda () (make-hash-table :test #'equal)))
+                ((symbol-function 'image-type-available-p)
+                 (lambda (_type) nil))
+                ((symbol-function 'frame-width)
+                 (lambda (&optional _frame) 100))
+                ((symbol-function 'file-attributes)
+                 (lambda (&rest args)
+                   (cl-incf calls)
+                   (apply orig-file-attributes args))))
+        (agent-log--build-candidates sessions)
+        (should (= calls 1))))))
 
 ;;;;; Codex backend
 

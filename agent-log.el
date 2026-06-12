@@ -293,9 +293,30 @@ are excluded."
 
 (defun agent-log--session-file-mtime-ms (metadata)
   "Return METADATA's source file modification time in milliseconds."
+  (cdr (agent-log--session-file-state metadata)))
+
+(defun agent-log--session-file-state (metadata)
+  "Return cached source file state for METADATA.
+The return value is a cons cell (SIZE . MTIME-MS), where SIZE is
+the source file size in bytes and MTIME-MS is the source file
+modification time in milliseconds."
+  (let ((cached (plist-get metadata :source-file-state)))
+    (cond
+     ((consp cached) cached)
+     ((eq cached 'missing) nil)
+     (t (or (agent-log--cache-session-file-state metadata)
+            (progn (plist-put metadata :source-file-state 'missing)
+                   nil))))))
+
+(defun agent-log--cache-session-file-state (metadata)
+  "Read and cache source file state for METADATA."
   (when-let* ((file (plist-get metadata :file))
               (attrs (file-attributes file)))
-    (* 1000 (float-time (file-attribute-modification-time attrs)))))
+    (let ((state (cons (file-attribute-size attrs)
+                       (* 1000 (float-time
+                                (file-attribute-modification-time attrs))))))
+      (plist-put metadata :source-file-state state)
+      state)))
 
 (defun agent-log--session-ignored-p (session)
   "Return non-nil when SESSION's project matches an ignored regexp.
@@ -1410,9 +1431,8 @@ Projects are sorted by most recent session timestamp."
 
 (defun agent-log--session-size-label (metadata)
   "Return a human-readable source file size label for METADATA."
-  (if-let* ((file (plist-get metadata :file))
-            (attrs (file-attributes file))
-            (size (file-attribute-size attrs)))
+  (if-let* ((state (agent-log--session-file-state metadata))
+            (size (car state)))
       (file-size-human-readable size)
     "?"))
 
