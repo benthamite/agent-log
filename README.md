@@ -17,7 +17,7 @@ Key capabilities:
 
 ## Installation
 
-**Requirements:** Emacs 29.1 or later, and [markdown-mode](https://jblevins.org/projects/markdown-mode/) 2.6 or later.
+**Requirements:** Emacs 29.1 or later, [markdown-mode](https://jblevins.org/projects/markdown-mode/) 2.6 or later, and [transient](https://github.com/magit/transient) 0.13.3 or later.
 
 ### package-vc (built-in since Emacs 30)
 

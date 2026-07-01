@@ -35,7 +35,7 @@ The core capabilities of =agent-log.el= are:
 - *AI-powered search*.  A two-stage LLM pipeline lets you search your session history with natural language queries.  A scope-narrowing model filters sessions by project and date range, then a selection model identifies the most relevant sessions and presents a narrative with clickable links ([[#h:ai-search][AI search]]).
 - *Session resumption*.  You can resume any session directly in the coding agent from within the rendered buffer, provided the corresponding Emacs integration package is installed (e.g. =claude-code= for Claude Code) ([[#h:session-resumption][Session resumption]]).
 
-The package requires Emacs 29.1 or later and [[https://jblevins.org/projects/markdown-mode/][markdown-mode]] 2.6 or later.  The optional summary feature requires [[https://github.com/karthink/gptel][gptel]].  Session resumption for Claude Code sessions requires [[https://github.com/stevemolitor/claude-code.el][claude-code]]; for Codex sessions it requires [[https://github.com/benthamite/codex.el][codex]].
+The package requires Emacs 29.1 or later, [[https://jblevins.org/projects/markdown-mode/][markdown-mode]] 2.6 or later, and [[https://github.com/magit/transient][transient]] 0.13.3 or later.  The optional summary feature requires [[https://github.com/karthink/gptel][gptel]].  Session resumption for Claude Code sessions requires [[https://github.com/stevemolitor/claude-code.el][claude-code]]; for Codex sessions it requires [[https://github.com/benthamite/codex.el][codex]].
 
 The development repository is on [[https://github.com/benthamite/agent-log][GitHub]].
 

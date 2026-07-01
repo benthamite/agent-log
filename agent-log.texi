@@ -147,7 +147,7 @@ The core capabilities of @samp{agent-log.el} are:
 @strong{Session resumption}.  You can resume any session directly in the coding agent from within the rendered buffer, provided the corresponding Emacs integration package is installed (e.g. @samp{claude-code} for Claude Code) (@ref{Session resumption}).
 @end itemize
 
-The package requires Emacs 29.1 or later and @uref{https://jblevins.org/projects/markdown-mode/, markdown-mode} 2.6 or later.  The optional summary feature requires @uref{https://github.com/karthink/gptel, gptel}.  Session resumption for Claude Code sessions requires @uref{https://github.com/stevemolitor/claude-code.el, claude-code}; for Codex sessions it requires @uref{https://github.com/benthamite/codex.el, codex}.
+The package requires Emacs 29.1 or later, @uref{https://jblevins.org/projects/markdown-mode/, markdown-mode} 2.6 or later, and @uref{https://github.com/magit/transient, transient} 0.13.3 or later.  The optional summary feature requires @uref{https://github.com/karthink/gptel, gptel}.  Session resumption for Claude Code sessions requires @uref{https://github.com/stevemolitor/claude-code.el, claude-code}; for Codex sessions it requires @uref{https://github.com/benthamite/codex.el, codex}.
 
 The development repository is on @uref{https://github.com/benthamite/agent-log, GitHub}.
 
