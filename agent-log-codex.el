@@ -109,7 +109,8 @@ Each value is a plist (:display :timestamp :project :file :file-dir
                                          (agent-log-backend-directory backend)))
          (file-index (agent-log--build-session-file-index backend))
          (history (make-hash-table :test #'equal))
-         (meta-cache (make-hash-table :test #'equal))
+         (metadata-cache (agent-log-codex--read-metadata-cache backend))
+         metadata-cache-dirty
          result)
     ;; Parse history.jsonl to get first-message text and earliest timestamp.
     (when (file-exists-p history-file)
@@ -134,14 +135,21 @@ Each value is a plist (:display :timestamp :project :file :file-dir
               (ts-sec (when hist (plist-get hist :ts)))
               (ts-ms (when (numberp ts-sec) (* ts-sec 1000)))
               (display (when hist (plist-get hist :text)))
-              (session-meta (agent-log-codex--read-session-meta file))
+              (file-state (agent-log-codex--session-file-state file))
+              (session-meta
+               (or (agent-log-codex--metadata-cache-lookup
+                    metadata-cache sid file file-state)
+                   (let ((entry (agent-log-codex--metadata-cache-entry
+                                 file file-state)))
+                     (puthash sid entry metadata-cache)
+                     (setq metadata-cache-dirty t)
+                     entry)))
               (cwd (or (plist-get session-meta :cwd) ""))
               ;; Fall back to session_meta timestamp if history has none.
               (ts-ms (or ts-ms
                          (agent-log--iso-to-epoch-ms
                           (plist-get session-meta :timestamp))))
               (display (or display "")))
-         (puthash sid session-meta meta-cache)
          (push (list sid
                      :display display
                      :timestamp ts-ms
@@ -149,13 +157,85 @@ Each value is a plist (:display :timestamp :project :file :file-dir
                      :file-dir (file-name-directory file)
                      :file file
                      :backend backend
+                     :source-file-state file-state
                      :source (plist-get session-meta :source))
                result)))
      file-index)
+    (when metadata-cache-dirty
+      (agent-log-codex--write-metadata-cache backend metadata-cache))
     (sort result (lambda (a b)
                    (agent-log--timestamp>
                     (plist-get (cdr a) :timestamp)
                     (plist-get (cdr b) :timestamp))))))
+
+(defconst agent-log-codex--metadata-cache-file
+  ".agent-log-session-metadata-cache.el"
+  "Filename for the Codex session metadata cache.")
+
+(defun agent-log-codex--metadata-cache-path (backend)
+  "Return BACKEND's Codex session metadata cache path."
+  (expand-file-name agent-log-codex--metadata-cache-file
+                    (agent-log-backend-directory backend)))
+
+(defun agent-log-codex--read-metadata-cache (backend)
+  "Read BACKEND's Codex session metadata cache."
+  (let ((file (agent-log-codex--metadata-cache-path backend)))
+    (condition-case err
+        (if (file-exists-p file)
+            (let ((obj (with-temp-buffer
+                         (let ((coding-system-for-read 'utf-8-emacs-unix))
+                           (insert-file-contents file))
+                         (read (current-buffer)))))
+              (if (hash-table-p obj)
+                  obj
+                (make-hash-table :test #'equal)))
+          (make-hash-table :test #'equal))
+      (error
+       (message "agent-log: failed to read Codex metadata cache: %s"
+                (error-message-string err))
+       (make-hash-table :test #'equal)))))
+
+(defun agent-log-codex--write-metadata-cache (backend cache)
+  "Write BACKEND's Codex session metadata CACHE."
+  (let* ((file (agent-log-codex--metadata-cache-path backend))
+         (dir (file-name-directory file)))
+    (make-directory dir t)
+    (let ((tmp (make-temp-file (expand-file-name
+                                ".agent-log-session-metadata-cache-" dir)
+                               nil ".el")))
+      (condition-case err
+          (progn
+            (let ((coding-system-for-write 'utf-8-emacs-unix))
+              (with-temp-file tmp
+                (let ((print-level nil)
+                      (print-length nil))
+                  (prin1 cache (current-buffer))
+                  (insert "\n"))))
+            (rename-file tmp file t))
+        (error
+         (ignore-errors (delete-file tmp))
+         (message "agent-log: failed to write Codex metadata cache: %s"
+                  (error-message-string err)))))))
+
+(defun agent-log-codex--metadata-cache-lookup (cache sid file file-state)
+  "Return cached metadata for SID when FILE and FILE-STATE still match CACHE."
+  (when-let* ((entry (gethash sid cache))
+              ((equal (plist-get entry :file) (expand-file-name file)))
+              ((equal (plist-get entry :source-file-state) file-state)))
+    entry))
+
+(defun agent-log-codex--metadata-cache-entry (file file-state)
+  "Build a Codex metadata cache entry for FILE with FILE-STATE."
+  (let ((session-meta (agent-log-codex--read-session-meta file)))
+    (list :file (expand-file-name file)
+          :source-file-state file-state
+          :cwd (or (plist-get session-meta :cwd) "")
+          :timestamp (plist-get session-meta :timestamp)
+          :source (plist-get session-meta :source))))
+
+(defun agent-log-codex--session-file-state (file)
+  "Return source file state for FILE."
+  (agent-log--session-file-state (list :file file)))
 
 (cl-defmethod agent-log--build-session-file-index ((backend agent-log-codex))
   "Build a hash table mapping session-id to JSONL file path.

@@ -2868,6 +2868,48 @@ session."
 
 ;;;;;; Session discovery
 
+(ert-deftest agent-log-test-codex-read-sessions/reuses-metadata-cache ()
+  "Does not reread unchanged Codex transcripts after metadata is cached."
+  (agent-log-test--with-temp-dir
+    (let* ((sid "019df82b-8607-7231-a491-e57316e4fa02")
+           (jsonl-path
+            (agent-log-test--write-file
+             (concat "sessions/2026/05/06/rollout-2026-05-06T00-00-00-"
+                     sid ".jsonl")
+             (concat
+              "{\"type\":\"session_meta\","
+              "\"timestamp\":\"2026-05-06T00:00:00Z\","
+              "\"payload\":{\"id\":\"" sid "\","
+              "\"cwd\":\"/tmp/project\","
+              "\"timestamp\":\"2026-05-06T00:00:00Z\","
+              "\"source\":\"cli\"}}\n"
+              "{\"type\":\"response_item\"}\n")))
+           (backend
+            (agent-log--make-codex
+             :name "Codex"
+             :key 'codex
+             :directory agent-log-test--dir
+             :rendered-directory (expand-file-name "rendered"
+                                                   agent-log-test--dir)))
+           (orig-insert-file-contents
+            (symbol-function 'insert-file-contents))
+           (transcript-reads 0))
+      (agent-log-test--write-file
+       "history.jsonl"
+       (concat "{\"session_id\":\"" sid
+               "\",\"ts\":1778025600,\"text\":\"Hello\"}\n"))
+      (agent-log--read-sessions backend)
+      (cl-letf (((symbol-function 'insert-file-contents)
+                 (lambda (filename &rest args)
+                   (when (equal (expand-file-name filename) jsonl-path)
+                     (cl-incf transcript-reads))
+                   (apply orig-insert-file-contents filename args))))
+        (let ((sessions (agent-log--read-sessions backend)))
+          (should (= (length sessions) 1))
+          (should (equal (plist-get (cdar sessions) :project)
+                         "/tmp/project"))
+          (should (= transcript-reads 0)))))))
+
 (ert-deftest agent-log-test-codex-resume-session/app-server ()
   "Resumes Codex logs through app-server when app-server is the active backend."
   (let ((codex-terminal-backend 'app-server)

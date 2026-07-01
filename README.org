@@ -625,6 +625,8 @@ The Codex backend reads from:
 
 Each line in a Codex session file is an envelope ~{timestamp, type, payload}~.  The ~type~ field determines how the entry is processed: ~session_meta~ entries provide session metadata (working directory, model, CLI version, and source); ~response_item~ entries carry the conversation content (user and assistant messages, function calls and their outputs, web searches, reasoning blocks); ~event_msg~ and ~turn_context~ entries are internal bookkeeping and are skipped during rendering.  The normalization step converts this envelope format to the canonical flat representation used by the rendering pipeline.  The backend preserves the =source= metadata while discovering sessions so that child sessions spawned by Codex subagents can be rendered and browsed normally, while still being ignored by ~agent-log-open-current-session~ when it is resolving the log for a live terminal buffer ([[#h:session-browsing][Session browsing]]).
 
+Because Codex stores project and source metadata in each transcript rather than in =history.jsonl=, the backend caches discovered session metadata in =~/.codex/.agent-log-session-metadata-cache.el=.  Cache entries are reused while the transcript path, size, and modification time are unchanged, so archive-wide commands can list sessions without rereading every transcript prefix on each run.  If a transcript changes, only that session's metadata is refreshed from its =session_meta= line.
+
 ** Rendered directory structure
 :PROPERTIES:
 :CUSTOM_ID: h:rendered-directory-structure
