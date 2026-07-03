@@ -32,6 +32,7 @@
 ;;; Code:
 
 (require 'cl-lib)
+(require 'seq)
 (require 'agent-log)
 
 ;;;;; Soft dependency: claude-code
@@ -611,10 +612,81 @@ in `history.jsonl' whose project matches the buffer directory."
         (and session-id session-dir
              (let ((f (expand-file-name (concat session-id ".jsonl") session-dir)))
                (and (file-exists-p f) f)))
+        (and session-dir (agent-log-claude--visible-session-file session-dir))
         (and session-dir (agent-log-claude--find-latest-jsonl session-dir))
         (when-let* ((match (agent-log-claude--find-session-for-project
                             dir (agent-log--read-sessions backend))))
           (plist-get (cdr match) :file)))))
+
+(defun agent-log-claude--visible-session-file (directory)
+  "Return the JSONL file in DIRECTORY matching visible Claude buffer text."
+  (when-let* ((files (directory-files directory t "\\.jsonl\\'"))
+              (snippets (agent-log-claude--visible-session-snippets)))
+    (agent-log-claude--best-file-containing-snippets files snippets)))
+
+(defun agent-log-claude--visible-session-snippets ()
+  "Return distinctive transcript snippets visible in the current buffer."
+  (let* ((start (max (point-min) (- (point-max) 12000)))
+         (text (buffer-substring-no-properties start (point-max)))
+         (lines (nreverse (split-string text "\n" t))))
+    (seq-take
+     (cl-loop for line in lines
+              for snippet = (agent-log-claude--normalize-visible-snippet line)
+              when (agent-log-claude--visible-snippet-line-p snippet line)
+              collect snippet)
+     8)))
+
+(defun agent-log-claude--visible-snippet-line-p (line raw-line)
+  "Return non-nil if LINE from RAW-LINE is useful for transcript matching."
+  (and (or (>= (length line) 40)
+           (and (string-match-p "\\`[[:space:]]*⏺" raw-line)
+                (>= (length line) 20)))
+       (not (string-match-p "\\`[[:space:]─&_]+\\'" line))
+       (not (string-prefix-p "⏵" line))
+       (not (string-prefix-p "⧉" line))
+       (not (string-match-p "Pontificating.*·" line))
+       (not (string-match-p "\\`\\(?:Searching for\\|Read [0-9]+ files?\\) "
+                            line))))
+
+(defun agent-log-claude--normalize-visible-snippet (line)
+  "Return a searchable transcript snippet from visible terminal LINE."
+  (let ((text (string-trim line)))
+    (setq text (replace-regexp-in-string "\\`[⏺❯][[:space:]]*" "" text))
+    (setq text (replace-regexp-in-string "\\`[•*-][[:space:]]+" "" text))
+    (setq text (replace-regexp-in-string "\\`[0-9]+[.)][[:space:]]+" "" text))
+    (setq text (replace-regexp-in-string "`" "" text))
+    (string-trim (replace-regexp-in-string "[[:space:]]+" " " text))))
+
+(defun agent-log-claude--best-file-containing-snippets (files snippets)
+  "Return the unique best FILES match for SNIPPETS, or nil."
+  (let ((best-file nil)
+        (best-score 0)
+        (tied nil))
+    (dolist (file files)
+      (let ((score (agent-log-claude--file-snippet-score file snippets)))
+        (cond
+         ((> score best-score)
+          (setq best-file file
+                best-score score
+                tied nil))
+         ((and (> score 0) (= score best-score))
+          (setq tied t)))))
+    (and (> best-score 0) (not tied) best-file)))
+
+(defun agent-log-claude--file-snippet-score (file snippets)
+  "Return the number of SNIPPETS found in FILE."
+  (if (not (and file (file-readable-p file)))
+      0
+    (with-temp-buffer
+      (insert-file-contents file)
+      (goto-char (point-min))
+      (while (search-forward "`" nil t)
+        (replace-match "" t t))
+      (cl-count-if
+       (lambda (snippet)
+         (goto-char (point-min))
+         (search-forward snippet nil t))
+       snippets))))
 
 ;;;;; Interactive commands
 

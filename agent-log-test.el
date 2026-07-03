@@ -2857,6 +2857,98 @@ session."
         (agent-log--build-candidates sessions)
         (should (= calls 1))))))
 
+;;;;; Claude current-buffer session detection
+
+(ert-deftest agent-log-test-claude-current-buffer-session-file/visible-text ()
+  "Matches visible Claude terminal text before the project mtime fallback."
+  (agent-log-test--with-temp-dir
+    (let* ((dir "/tmp/project")
+           (line "Now let me read the remaining affected files")
+           (current-file (agent-log-test--write-file
+                          "claude-project/current.jsonl"
+                          (format
+                           "{\"message\":{\"content\":\"%s\"}}\n"
+                           line)))
+           (latest-file (agent-log-test--write-file
+                         "claude-project/latest.jsonl"
+                         "{\"message\":{\"content\":\"unrelated newer session\"}}\n"))
+           (session-dir (file-name-directory current-file)))
+      (set-file-times current-file (seconds-to-time 100))
+      (set-file-times latest-file (seconds-to-time 200))
+      (with-temp-buffer
+        (insert "⏺ " line "\n")
+        (cl-letf (((symbol-function 'agent-log-claude--read-status-file)
+                   (lambda () nil))
+                  ((symbol-function 'claude-code--extract-directory-from-buffer-name)
+                   (lambda (_buffer-name) dir))
+                  ((symbol-function 'agent-log-claude--find-project-session-dir)
+                   (lambda (_directory) session-dir)))
+          (should (equal (agent-log--current-buffer-session-file
+                          agent-log-test--claude-backend)
+                         current-file)))))))
+
+(ert-deftest agent-log-test-claude-current-buffer-session-file/visible-text-score ()
+  "Uses combined visible Claude snippets when no single line is unique."
+  (agent-log-test--with-temp-dir
+    (let* ((dir "/tmp/project")
+           (line-a "shared patch hunk about writing moves.json with UTF-8 encoding")
+           (line-b "shared patch hunk about writing moves-summary with UTF-8 encoding")
+           (current-file (agent-log-test--write-file
+                          "claude-project/current.jsonl"
+                          (format "%s\n%s\n" line-a line-b)))
+           (other-a-file (agent-log-test--write-file
+                          "claude-project/other-a.jsonl"
+                          (concat line-a "\n")))
+           (other-b-file (agent-log-test--write-file
+                          "claude-project/other-b.jsonl"
+                          (concat line-b "\n")))
+           (latest-file (agent-log-test--write-file
+                         "claude-project/latest.jsonl"
+                         "unrelated newer session\n"))
+           (session-dir (file-name-directory current-file)))
+      (set-file-times current-file (seconds-to-time 100))
+      (set-file-times other-a-file (seconds-to-time 150))
+      (set-file-times other-b-file (seconds-to-time 175))
+      (set-file-times latest-file (seconds-to-time 200))
+      (with-temp-buffer
+        (insert line-a "\n" line-b "\n")
+        (cl-letf (((symbol-function 'agent-log-claude--read-status-file)
+                   (lambda () nil))
+                  ((symbol-function 'claude-code--extract-directory-from-buffer-name)
+                   (lambda (_buffer-name) dir))
+                  ((symbol-function 'agent-log-claude--find-project-session-dir)
+                   (lambda (_directory) session-dir)))
+          (should (equal (agent-log--current-buffer-session-file
+                          agent-log-test--claude-backend)
+                         current-file)))))))
+
+(ert-deftest agent-log-test-claude-current-buffer-session-file/short-assistant-line ()
+  "Uses short Claude assistant prompt lines as visible session evidence."
+  (agent-log-test--with-temp-dir
+    (let* ((dir "/tmp/project")
+           (line "Now gather.py encoding fixes:")
+           (current-file (agent-log-test--write-file
+                          "claude-project/current.jsonl"
+                          (concat line "\n")))
+           (latest-file (agent-log-test--write-file
+                         "claude-project/latest.jsonl"
+                         "unrelated newer session\n"))
+           (session-dir (file-name-directory current-file)))
+      (set-file-times current-file (seconds-to-time 100))
+      (set-file-times latest-file (seconds-to-time 200))
+      (with-temp-buffer
+        (insert "⏵⏵ auto mode on (shift+tab to cycle) · ← for agents\n")
+        (insert "⏺ " line "\n")
+        (cl-letf (((symbol-function 'agent-log-claude--read-status-file)
+                   (lambda () nil))
+                  ((symbol-function 'claude-code--extract-directory-from-buffer-name)
+                   (lambda (_buffer-name) dir))
+                  ((symbol-function 'agent-log-claude--find-project-session-dir)
+                   (lambda (_directory) session-dir)))
+          (should (equal (agent-log--current-buffer-session-file
+                          agent-log-test--claude-backend)
+                         current-file)))))))
+
 ;;;;; Codex backend
 
 (require 'agent-log-codex)
