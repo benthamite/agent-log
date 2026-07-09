@@ -47,6 +47,7 @@
 (require 'json)
 (require 'filenotify)
 (require 'outline)
+(require 'timer)
 (require 'markdown-mode)
 (require 'transient)
 
@@ -451,19 +452,38 @@ When nil, defaults to `gptel-model'."
 (defvar agent-log--auto-summary-sweep-timer nil
   "Timer used to periodically sweep for unsummarized sessions.")
 
+(defvar agent-log-auto-summarize-sessions)
+(defvar agent-log-auto-summarize-sweep-interval)
+
 (defun agent-log--update-auto-summary-sweep-timer (&rest _)
   "Install or cancel the automatic summary backlog sweep timer."
   (when (timerp agent-log--auto-summary-sweep-timer)
     (cancel-timer agent-log--auto-summary-sweep-timer))
   (setq agent-log--auto-summary-sweep-timer nil)
-  (when (and (bound-and-true-p agent-log-auto-summarize-sessions)
-             (boundp 'agent-log-auto-summarize-sweep-interval)
-             (numberp agent-log-auto-summarize-sweep-interval)
-             (> agent-log-auto-summarize-sweep-interval 0))
+  (when (agent-log--auto-summary-sweep-enabled-p)
     (setq agent-log--auto-summary-sweep-timer
           (run-at-time agent-log-auto-summarize-sweep-interval
                        agent-log-auto-summarize-sweep-interval
                        #'agent-log--auto-summary-sweep))))
+
+(defun agent-log--auto-summary-sweep-enabled-p ()
+  "Return non-nil when automatic backlog sweeps should be scheduled."
+  (and (bound-and-true-p agent-log-auto-summarize-sessions)
+       (boundp 'agent-log-auto-summarize-sweep-interval)
+       (numberp agent-log-auto-summarize-sweep-interval)
+       (> agent-log-auto-summarize-sweep-interval 0)))
+
+(defun agent-log--auto-summary-sweep-timer-current-p ()
+  "Return non-nil if the automatic summary sweep timer can still fire."
+  (and (timerp agent-log--auto-summary-sweep-timer)
+       (memq agent-log--auto-summary-sweep-timer timer-list)
+       (not (timer--triggered agent-log--auto-summary-sweep-timer))))
+
+(defun agent-log--ensure-auto-summary-sweep-timer ()
+  "Repair the automatic summary sweep timer when it is missing or stale."
+  (when (and (agent-log--auto-summary-sweep-enabled-p)
+             (not (agent-log--auto-summary-sweep-timer-current-p)))
+    (agent-log--update-auto-summary-sweep-timer)))
 
 (defcustom agent-log-auto-sync-sessions nil
   "Whether to sync sessions when an agent session stops.
@@ -2831,6 +2851,19 @@ not call it as a fallback."
     (agent-log--spawn-summary-sweep-worker
      agent-log-auto-summarize-sweep-limit)))
 
+(defun agent-log--maybe-start-auto-summary-sweep ()
+  "Start a background summary sweep if automatic backlog work is idle."
+  (when (agent-log--auto-summary-sweep-enabled-p)
+    (agent-log--ensure-auto-summary-sweep-timer)
+    (when (and (agent-log--auto-summarize-ready-p)
+               (not (agent-log--summary-sweep-worker-active-p)))
+      (agent-log--auto-summary-sweep)
+      t)))
+
+(defun agent-log--summary-sweep-worker-active-p ()
+  "Return non-nil when a background summary sweep worker is active."
+  (gethash :sweep agent-log--summary-workers))
+
 (defun agent-log--auto-summarize-ready-p ()
   "Return non-nil when automatic summary generation may start."
   (and agent-log-auto-summarize-sessions
@@ -3945,13 +3978,15 @@ clickable links to the matching logs."
          (index (agent-log--read-index)))
     (let* ((metadata (agent-log--search-gather-metadata sessions index))
            (unsummarized (plist-get metadata :unsummarized))
-           (summarized (plist-get metadata :summarized)))
+           (summarized (plist-get metadata :summarized))
+           (sweep-started nil))
       (when (zerop summarized)
         (user-error "%s" (agent-log--search-no-summaries-message metadata)))
       (when (> unsummarized 0)
+        (setq sweep-started (agent-log--maybe-start-auto-summary-sweep))
         (unless (y-or-n-p
-                 (format "%d session(s) lack current summaries and will be excluded. Continue? "
-                         unsummarized))
+                 (agent-log--search-unsummarized-prompt
+                  unsummarized sweep-started))
           (user-error "Search aborted")))
       (setq agent-log--search-sessions-cache sessions
             agent-log--search-index-cache index)
@@ -3968,6 +4003,16 @@ clickable links to the matching logs."
             (agent-log--search-scope-callback
              response query sessions index summarized
              (agent-log--search-cost info))))))))
+
+(defun agent-log--search-unsummarized-prompt (count sweep-started)
+  "Return the search confirmation prompt for COUNT unsummarized sessions.
+SWEEP-STARTED non-nil means a background summary sweep was started."
+  (concat
+   (format "%d session(s) lack usable summaries and will be excluded" count)
+   (if sweep-started
+       "; a background summary sweep has been started"
+     "")
+   ". Continue? "))
 
 (defun agent-log--search-no-summaries-message (metadata)
   "Return the user-facing search error for METADATA."

@@ -2216,6 +2216,30 @@ rereading every transcript."
           (when (file-exists-p state-file)
             (delete-file state-file)))))))
 
+(ert-deftest agent-log-test-auto-summary-sweep-timer/repairs-triggered-timer ()
+  "Repairs a sweep timer that is present but no longer able to fire."
+  (let ((old-timer (run-at-time 3600 nil #'ignore))
+        (agent-log--auto-summary-sweep-timer nil)
+        (agent-log-auto-summarize-sessions t)
+        (agent-log-auto-summarize-sweep-interval 900)
+        new-timer)
+    (unwind-protect
+        (progn
+          (setq agent-log--auto-summary-sweep-timer old-timer)
+          (setf (timer--triggered old-timer) t)
+          (cl-letf (((symbol-function 'run-at-time)
+                     (lambda (time repeat function &rest args)
+                       (setq new-timer (list time repeat function args)))))
+            (agent-log--ensure-auto-summary-sweep-timer)
+            (should (equal new-timer
+                           (list 900 900
+                                 #'agent-log--auto-summary-sweep nil)))
+            (should (equal agent-log--auto-summary-sweep-timer
+                           new-timer))
+            (should-not (memq old-timer timer-list))))
+      (when (timerp old-timer)
+        (cancel-timer old-timer)))))
+
 (ert-deftest agent-log-test-auto-summary-sweep/skips-duplicate-worker ()
   "Automatic backlog sweeps do not start overlapping sweep workers."
   (let ((agent-log--summary-workers (make-hash-table :test #'equal)))
@@ -2382,6 +2406,67 @@ session."
                      session (gethash "s1" (agent-log--read-index))))
         (should (agent-log--session-summary-usable-p
                  (gethash "s1" (agent-log--read-index))))))))
+
+(ert-deftest agent-log-test-search/kicks-sweep-for-missing-summaries ()
+  "Search starts a background sweep before warning about missing summaries."
+  (agent-log-test--with-temp-dir
+    (let* ((content "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"hello\"}}\n")
+           (s1-path (agent-log-test--write-file "s1.jsonl" content))
+           (s2-path (agent-log-test--write-file "s2.jsonl" content))
+           (s1 (list "s1" :file s1-path
+                     :backend agent-log-test--claude-backend
+                     :timestamp 1700000000000
+                     :project "/tmp/project"))
+           (s2 (list "s2" :file s2-path
+                     :backend agent-log-test--claude-backend
+                     :timestamp 1700000001000
+                     :project "/tmp/project"))
+           (sessions (list s1 s2))
+           (index (make-hash-table :test #'equal))
+           (orig-require (symbol-function 'require))
+           (agent-log--summary-workers (make-hash-table :test #'equal))
+           (agent-log-auto-summarize-sessions t)
+           (agent-log-auto-summarize-sweep-interval 900)
+           (agent-log-auto-summarize-sweep-limit 7)
+           (agent-log--summarize-active nil)
+           (agent-log--summarize-blocked-reason nil)
+           (timer (run-at-time 3600 nil #'ignore))
+           (agent-log--auto-summary-sweep-timer timer)
+           prompt
+           requested
+           kicked-limit)
+      (puthash "s1" (agent-log-test--summary-entry (cdr s1) "A") index)
+      (unwind-protect
+          (cl-letf (((symbol-function 'require)
+                     (lambda (feature &optional filename noerror)
+                       (if (eq feature 'gptel)
+                           t
+                         (funcall orig-require feature filename noerror))))
+                    ((symbol-function 'agent-log--active-backend-instances)
+                     (lambda () nil))
+                    ((symbol-function 'agent-log--read-all-sessions)
+                     (lambda () sessions))
+                    ((symbol-function 'agent-log--read-index)
+                     (lambda () index))
+                    ((symbol-function 'agent-log--spawn-summary-sweep-worker)
+                     (lambda (limit)
+                       (setq kicked-limit limit)))
+                    ((symbol-function 'agent-log--resolve-search-scope-backend-and-model)
+                     (lambda () (cons nil "test-model")))
+                    ((symbol-function 'y-or-n-p)
+                     (lambda (text)
+                       (setq prompt text)
+                       t))
+                    ((symbol-function 'gptel-request)
+                     (lambda (&rest _)
+                       (setq requested t))))
+            (agent-log-search "anything")
+            (should requested)
+            (should (= kicked-limit 7))
+            (should (string-match-p "lack usable summaries" prompt))
+            (should (string-match-p "background summary sweep" prompt))
+            (should-not (string-match-p "lack current summaries" prompt)))
+        (cancel-timer timer)))))
 
 ;;;;; Search metadata
 
