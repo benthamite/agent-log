@@ -180,6 +180,10 @@ Returns a plist with :project and :date.")
 Return nil if no matching session file can be identified."
   (:method ((_backend agent-log-backend)) nil))
 
+(cl-defgeneric agent-log--session-user-visible-p (backend session)
+  "Return non-nil when SESSION from BACKEND is an ordinary user session."
+  (:method ((_backend agent-log-backend) _session) t))
+
 (cl-defgeneric agent-log--session-id-from-file (backend file)
   "Return the session ID for FILE under BACKEND.
 The default strips the extension from the basename, which is correct
@@ -261,14 +265,22 @@ source JSONL file's last modification time."
   :type '(choice (const :tag "Creation time" creation-time)
                  (const :tag "Modification time" modification-time)))
 
-(defun agent-log--read-all-sessions ()
+(defun agent-log--read-all-sessions (&optional include-internal)
   "Return merged sessions from all active backends, sorted most-recent-first.
 Sessions whose project path matches `agent-log-ignored-project-regexps'
-are excluded."
+or whose backend classifies them as internal are excluded.  When
+INCLUDE-INTERNAL is non-nil, include internal backend sessions."
   (let ((all '()))
     (dolist (backend (agent-log--active-backend-instances))
       (condition-case err
-          (setq all (nconc all (agent-log--read-sessions backend)))
+          (let ((sessions (agent-log--read-sessions backend)))
+            (unless include-internal
+              (setq sessions
+                    (seq-filter
+                     (lambda (session)
+                       (agent-log--session-user-visible-p backend session))
+                     sessions)))
+            (setq all (nconc all sessions)))
         (error (message "agent-log: failed to read sessions from %s: %s"
                         (agent-log-backend-name backend)
                         (error-message-string err)))))
@@ -825,12 +837,13 @@ active backends (e.g. Claude Code or Codex)."
     (agent-log-open-file file)))
 
 ;;;###autoload
-(defun agent-log-sync-sessions (&optional callback)
+(defun agent-log-sync-sessions (&optional callback include-internal)
   "Render all unrendered or stale sessions.
 Uses timers to avoid blocking Emacs.  When CALLBACK is non-nil,
-call it with no arguments after the last session is rendered."
+call it with no arguments after the last session is rendered.  When
+INCLUDE-INTERNAL is non-nil, also render internal backend sessions."
   (interactive)
-  (let* ((sessions (agent-log--read-all-sessions))
+  (let* ((sessions (agent-log--read-all-sessions include-internal))
          (index (agent-log--read-index))
          (pending (agent-log--pending-sessions sessions index)))
     (if (null pending)
@@ -3122,9 +3135,7 @@ that identify the session which just stopped producing output."
 
 (defun agent-log--find-session-by-id (session-id)
   "Return the session metadata entry for SESSION-ID, or nil."
-  (seq-find (lambda (session)
-              (equal (car session) session-id))
-            (agent-log--read-all-sessions)))
+  (agent-log--session-from-id-fast session-id))
 
 (defun agent-log--session-from-id-fast (session-id)
   "Return session metadata for SESSION-ID without archive scans."

@@ -298,7 +298,8 @@ and should be protected with filesystem-level controls."
     (user-error "Aborted"))
   (agent-log-redact--clear-rendered-directory)
   (agent-log-sync-sessions
-   (lambda () (message "agent-log-redact: rebuild complete"))))
+   (lambda () (message "agent-log-redact: rebuild complete"))
+   t))
 
 ;;;###autoload
 (defun agent-log-redact-existing-in-place ()

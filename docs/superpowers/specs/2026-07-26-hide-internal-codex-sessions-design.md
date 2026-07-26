@@ -27,7 +27,11 @@ archive summarization, background summary sweeps, and AI search.  Direct
 `agent-log-open-session` and `agent-log-open-file` continue to resolve raw files,
 so internal transcripts remain available when explicitly requested.
 
-No child files, rendered Markdown, or cached summaries are deleted.
+Maintenance code can explicitly include internal sessions while retaining the
+existing ignored-project rules.  In particular, the redaction rebuild must
+re-render non-ignored internal transcripts after clearing the rendered archive.
+No child files, rendered Markdown, or cached summaries are deleted merely
+because ordinary session views hide them.
 
 ## Verification
 
@@ -35,6 +39,8 @@ Add regression coverage that mixes a top-level Codex session, a spawned worker,
 a guardian, and a Claude session.  The shared archive collection must retain the
 top-level Codex and Claude records while excluding both internal Codex records.
 Also verify that direct Codex discovery still returns all records.
+Verify that redaction rebuild includes internal sessions and that exact-ID
+lookup continues to resolve them.
 
 Run the targeted regression test, the full ERT suite, byte compilation, and an
 archive-backed check against the onboarding project.  The archive-backed check

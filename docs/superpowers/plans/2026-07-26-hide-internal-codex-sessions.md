@@ -41,6 +41,7 @@ Expected: FAIL because both internal Codex IDs are still present.
 **Files:**
 - Modify: `agent-log.el`
 - Modify: `agent-log-codex.el`
+- Modify: `agent-log-redact.el`
 
 - [ ] **Step 1: Add the generic method**
 
@@ -57,7 +58,14 @@ Add `agent-log--session-user-visible-p` to the predicate applied by
 Specialize `agent-log--session-user-visible-p` for `agent-log-codex` and return
 nil when `agent-log-codex--subagent-session-p` identifies the record.
 
-- [ ] **Step 4: Run the regression test and verify GREEN**
+- [ ] **Step 4: Preserve maintenance and exact-ID paths**
+
+Allow maintenance callers to include internal backend sessions while retaining
+the existing ignored-project filter.  Use that path when the redaction command
+clears and rebuilds rendered logs.  Resolve exact session IDs through the direct
+file lookup rather than the visible archive collection.
+
+- [ ] **Step 5: Run the regression tests and verify GREEN**
 
 Run the targeted ERT command from Task 1.
 
@@ -95,8 +103,9 @@ zero records whose source contains `:subagent`.
 
 - [ ] **Step 4: Commit the implementation**
 
-Stage only `agent-log.el`, `agent-log-codex.el`, `agent-log-test.el`,
-`README.org`, and `agent-log.texi`, preserving unrelated working-tree changes.
+Stage only the implementation hunks in `agent-log.el`, `agent-log-codex.el`,
+`agent-log-redact.el`, `agent-log-test.el`, `README.org`, `agent-log.texi`, and
+the design/plan files, preserving unrelated working-tree changes.
 Commit with:
 
 ```sh

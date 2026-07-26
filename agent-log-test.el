@@ -1657,6 +1657,110 @@ SUMMARY defaults to ONELINE."
   (should-not (agent-log--session-ignored-p (list "s" :project "/tmp-backups")))
   (should-not (agent-log--session-ignored-p (list "s" :project ""))))
 
+(ert-deftest
+    agent-log-test-read-all-sessions/excludes-internal-codex-sessions ()
+  "Keeps user sessions while excluding Codex workers and guardians."
+  (let* ((codex agent-log-codex--instance)
+         (claude agent-log-test--claude-backend)
+         (project "/Users/me/project")
+         (parent (list "parent" :project project :timestamp 4000
+                       :source "vscode"))
+         (worker (list "worker" :project project :timestamp 3000
+                       :source
+                       '(:subagent
+                         (:thread_spawn (:parent_thread_id "parent")))))
+         (guardian (list "guardian" :project project :timestamp 2000
+                         :source '(:subagent (:other "guardian"))))
+         (claude-session
+          (list "claude" :project project :timestamp 1000)))
+    (cl-letf (((symbol-function 'agent-log--active-backend-instances)
+               (lambda () (list codex claude)))
+              ((symbol-function 'agent-log--read-sessions)
+               (lambda (backend)
+                 (if (eq backend codex)
+                     (list parent worker guardian)
+                   (list claude-session)))))
+      (should (equal (mapcar #'car (agent-log--read-all-sessions))
+                     '("parent" "claude")))
+      (should (equal (mapcar #'car (agent-log--read-all-sessions t))
+                     '("parent" "worker" "guardian" "claude"))))))
+
+(ert-deftest agent-log-test-browse-sessions/excludes-internal-codex-sessions ()
+  "Does not offer internal Codex sessions in the ordinary chooser."
+  (agent-log-test--with-temp-dir
+    (let* ((codex agent-log-codex--instance)
+           (project "/Users/me/project")
+           (parent (list "parent" :project project :timestamp 2000
+                         :source "vscode"))
+           (worker (list "worker" :project project :timestamp 1000
+                         :source
+                         '(:subagent
+                           (:thread_spawn (:parent_thread_id "parent")))))
+           (agent-log-group-by-project nil)
+           (agent-log-auto-summarize-sessions nil)
+           (agent-log-rendered-directory agent-log-test--dir)
+           candidates
+           opened)
+      (cl-letf (((symbol-function 'agent-log--active-backend-instances)
+                 (lambda () (list codex)))
+                ((symbol-function 'agent-log--read-sessions)
+                 (lambda (_backend) (list parent worker)))
+                ((symbol-function 'agent-log--completing-read)
+                 (lambda (_prompt collection)
+                   (setq candidates collection)
+                   (caar collection)))
+                ((symbol-function 'agent-log--open-rendered)
+                 (lambda (session-id _metadata)
+                   (setq opened session-id))))
+        (agent-log-browse-sessions)
+        (should (equal (mapcar #'cadr candidates) '("parent")))
+        (should (equal opened "parent"))))))
+
+(ert-deftest
+    agent-log-test-browse-sessions/grouped-excludes-internal-codex-sessions ()
+  "Excludes internal Codex sessions from both grouped chooser steps."
+  (agent-log-test--with-temp-dir
+    (let* ((codex agent-log-codex--instance)
+           (visible-project "/Users/me/visible")
+           (parent (list "parent" :project visible-project :timestamp 3000
+                         :source "vscode"))
+           (same-project-worker
+            (list "same-project-worker" :project visible-project
+                  :timestamp 2000
+                  :source
+                  '(:subagent
+                    (:thread_spawn (:parent_thread_id "parent")))))
+           (internal-only-worker
+            (list "internal-only-worker" :project "/Users/me/internal-only"
+                  :timestamp 1000
+                  :source '(:subagent (:other "guardian"))))
+           (agent-log-group-by-project t)
+           (agent-log-auto-summarize-sessions nil)
+           (agent-log-rendered-directory agent-log-test--dir)
+           project-candidates
+           session-candidates
+           opened)
+      (cl-letf (((symbol-function 'agent-log--active-backend-instances)
+                 (lambda () (list codex)))
+                ((symbol-function 'agent-log--read-sessions)
+                 (lambda (_backend)
+                   (list parent same-project-worker internal-only-worker)))
+                ((symbol-function 'agent-log--completing-read)
+                 (lambda (prompt collection)
+                   (if (equal prompt "Project: ")
+                       (progn
+                         (setq project-candidates collection)
+                         "visible")
+                     (setq session-candidates collection)
+                     (caar collection))))
+                ((symbol-function 'agent-log--open-rendered)
+                 (lambda (session-id _metadata)
+                   (setq opened session-id))))
+        (agent-log-browse-sessions)
+        (should (equal project-candidates '("visible")))
+        (should (equal (mapcar #'cadr session-candidates) '("parent")))
+        (should (equal opened "parent"))))))
+
 ;;;;; Sessions needing summary
 
 (ert-deftest agent-log-test-sessions-needing-summary/all-need ()
@@ -2184,6 +2288,16 @@ rereading every transcript."
       (agent-log--auto-session-end-actions nil)
       (should-not called)
       (should-not messages))))
+
+(ert-deftest agent-log-test-find-session-by-id/includes-internal-session ()
+  "Resolves an explicit internal session without visible archive filtering."
+  (let ((child '("child" :source (:subagent (:other "guardian")))))
+    (cl-letf (((symbol-function 'agent-log--read-all-sessions)
+               (lambda (&rest _) nil))
+              ((symbol-function 'agent-log--session-from-id-fast)
+               (lambda (session-id)
+                 (and (equal session-id "child") child))))
+      (should (equal (agent-log--find-session-by-id "child") child)))))
 
 (ert-deftest agent-log-test-session-from-id-fast/derives-render-metadata ()
   "Fast session lookup returns metadata rich enough for rendering."
@@ -3077,6 +3191,62 @@ session."
 
 ;;;;;; Session discovery
 
+(ert-deftest
+    agent-log-test-codex-read-sessions/preserves-internal-source-through-cache ()
+  "Keeps internal source metadata across cold and cached discovery."
+  (agent-log-test--with-temp-dir
+    (let* ((parent-id "019df82b-8607-7231-a491-e57316e4fa02")
+           (worker-id "019df82b-8607-7231-a491-e57316e4fa03")
+           (guardian-id "019df82b-8607-7231-a491-e57316e4fa04")
+           (project "/Users/me/onboarding")
+           (backend
+            (agent-log--make-codex
+             :name "Codex"
+             :key 'codex
+             :directory agent-log-test--dir
+             :rendered-directory (expand-file-name "rendered"
+                                                   agent-log-test--dir)))
+           cold
+           warm
+           visible)
+      (dolist
+          (fixture
+           `((,parent-id . "\"vscode\"")
+             (,worker-id
+              . "{\"subagent\":{\"thread_spawn\":{\"parent_thread_id\":\
+\"019df82b-8607-7231-a491-e57316e4fa02\"}}}")
+             (,guardian-id . "{\"subagent\":{\"other\":\"guardian\"}}")))
+        (let ((sid (car fixture))
+              (source-json (cdr fixture)))
+          (agent-log-test--write-file
+           (concat "sessions/2026/05/06/rollout-2026-05-06T00-00-00-"
+                   sid ".jsonl")
+           (format
+            (concat "{\"type\":\"session_meta\","
+                    "\"timestamp\":\"2026-05-06T00:00:00Z\","
+                    "\"payload\":{\"id\":\"%s\",\"cwd\":\"%s\","
+                    "\"timestamp\":\"2026-05-06T00:00:00Z\","
+                    "\"source\":%s}}\n")
+            sid project source-json))))
+      (setq cold (agent-log--read-sessions backend))
+      (should (= (length cold) 3))
+      (should-not
+       (agent-log-codex--subagent-session-p (assoc parent-id cold)))
+      (should (agent-log-codex--subagent-session-p (assoc worker-id cold)))
+      (should (agent-log-codex--subagent-session-p (assoc guardian-id cold)))
+      (should (file-exists-p (agent-log-codex--metadata-cache-path backend)))
+      (cl-letf (((symbol-function 'agent-log-codex--read-session-meta)
+                 (lambda (_file)
+                   (ert-fail "Warm discovery reread a transcript")))
+                ((symbol-function 'agent-log--active-backend-instances)
+                 (lambda () (list backend))))
+        (setq warm (agent-log--read-sessions backend)
+              visible (agent-log--read-all-sessions)))
+      (should (= (length warm) 3))
+      (should (agent-log-codex--subagent-session-p (assoc worker-id warm)))
+      (should (agent-log-codex--subagent-session-p (assoc guardian-id warm)))
+      (should (equal (mapcar #'car visible) (list parent-id))))))
+
 (ert-deftest agent-log-test-codex-read-sessions/reuses-metadata-cache ()
   "Does not reread unchanged Codex transcripts after metadata is cached."
   (agent-log-test--with-temp-dir
@@ -3814,6 +3984,19 @@ session."
       (should (equal (plist-get tool-use :name) "apply_patch")))))
 
 ;;;;; Redaction
+
+(ert-deftest agent-log-test-redact-rebuild-all/includes-internal-sessions ()
+  "Rebuilds internal renderings after clearing the complete archive."
+  (let (cleared sync-args)
+    (cl-letf (((symbol-function 'yes-or-no-p) (lambda (&rest _) t))
+              ((symbol-function 'agent-log-redact--clear-rendered-directory)
+               (lambda () (setq cleared t)))
+              ((symbol-function 'agent-log-sync-sessions)
+               (lambda (&rest args) (setq sync-args args))))
+      (agent-log-redact-rebuild-all)
+      (should cleared)
+      (should (functionp (car sync-args)))
+      (should (eq (cadr sync-args) t)))))
 
 (ert-deftest agent-log-test-redact-jsonl-line/preserves-opaque-values ()
   "Leaves opaque JSON values byte-identical when only they match."

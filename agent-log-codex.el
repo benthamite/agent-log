@@ -739,6 +739,11 @@ timestamp is within `agent-log-codex--session-start-match-window-ms'."
     (and (listp source)
          (plist-member source :subagent))))
 
+(cl-defmethod agent-log--session-user-visible-p
+  ((_backend agent-log-codex) session)
+  "Return non-nil when Codex SESSION is not an internal subagent."
+  (not (agent-log-codex--subagent-session-p session)))
+
 (defun agent-log-codex--nearest-session-by-timestamp
     (sessions target-timestamp-ms)
   "Return the session in SESSIONS launched nearest TARGET-TIMESTAMP-MS."
