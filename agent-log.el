@@ -1612,12 +1612,21 @@ BACKEND is passed through to tool-use rendering for dispatch."
              (role (plist-get message :role))
              (content (plist-get message :content))
              (time-str (agent-log--format-iso-timestamp timestamp)))
-        (cond
-         ((equal role "user")
-          (agent-log--render-user-turn content time-str))
-         ((equal role "assistant")
-          (agent-log--render-assistant-turn content time-str backend))
-         (t ""))))))
+        (agent-log--scrub-nul-chars
+         (cond
+          ((equal role "user")
+           (agent-log--render-user-turn content time-str))
+          ((equal role "assistant")
+           (agent-log--render-assistant-turn content time-str backend))
+          (t "")))))))
+
+(defun agent-log--scrub-nul-chars (text)
+  "Return TEXT with NUL characters replaced by the ␀ symbol.
+A single NUL byte in a rendered file makes Emacs visit it as binary,
+turning every non-ASCII character into raw bytes."
+  (if (string-search "\0" text)
+      (string-replace "\0" "␀" text)
+    text))
 
 (defun agent-log--render-user-turn (content time-str)
   "Render a user turn with CONTENT and TIME-STR.

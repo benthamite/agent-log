@@ -301,6 +301,8 @@ If the rendered directory does not yet exist, the command creates it.
 
 By default, rendering is lazy: sessions are rendered to =.md= files on first access via ~agent-log-browse-sessions~ or ~agent-log-open-file~.  The package maintains an index file (=_index.el=) in the rendered directory that maps session IDs to rendered file paths and JSONL file sizes.  When you access a session, the package compares the current JSONL file size and the rendered path implied by the current metadata against the indexed values; if either differs, the session is re-rendered.  This lets placeholder paths from newly-created sessions update once the session metadata or first user message provides a better date or title.
 
+Rendered output never contains NUL characters: any NUL that appears in conversation content (for example, in captured terminal output from a build tool) is replaced with the visible =␀= symbol.  A single NUL byte would otherwise make Emacs visit the rendered file as binary, breaking display of non-ASCII characters and crashing integrations that serialize the buffer content as JSON.
+
 The command ~agent-log-sync-sessions~ renders all unrendered or stale sessions in bulk.  It processes sessions one at a time using ~run-with-timer~ to avoid blocking Emacs.  A progress message reports how many sessions were rendered.
 
 The command ~agent-log-refresh~ re-renders the session displayed in the current buffer from its JSONL source.  This is useful if the rendered file appears stale or if you have changed display settings such as ~agent-log-show-thinking~ or ~agent-log-show-tools~ ([[#h:display-of-thinking-and-tool-sections][Display of thinking and tool sections]]).  The keybinding is =g= in ~agent-log-mode~.

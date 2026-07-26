@@ -985,6 +985,16 @@ SUMMARY defaults to ONELINE."
                      :message (list :role "system" :content "foo"))))
     (should (equal (agent-log--render-entry entry) ""))))
 
+(ert-deftest agent-log-test-render-entry/scrubs-nul-chars ()
+  "Replaces NUL characters in rendered output with a visible symbol."
+  (let ((entry (list :type "user"
+                     :timestamp "2023-11-14T12:00:00Z"
+                     :message (list :role "user"
+                                    :content "transforming \0virtual:entry"))))
+    (let ((result (agent-log--render-entry entry)))
+      (should-not (string-search "\0" result))
+      (should (string-search "␀virtual:entry" result)))))
+
 (ert-deftest agent-log-test-render-user-turn/string ()
   "Renders string user content."
   (let ((result (agent-log--render-user-turn "Hello" "2023-11-14")))
@@ -1297,6 +1307,28 @@ SUMMARY defaults to ONELINE."
                        (buffer-string))))
         (should (string-match-p "## User" content))
         (should (string-match-p "hello" content))))))
+
+(ert-deftest agent-log-test-render-to-file/no-nul-bytes-in-output ()
+  "Writes no NUL bytes, which would make Emacs visit the file as binary."
+  (agent-log-test--with-temp-dir
+    (let* ((jsonl-content
+            (concat
+             "{\"type\":\"user\",\"timestamp\":\"2023-11-14T12:00:00Z\","
+             "\"message\":{\"role\":\"user\",\"content\":"
+             "\"transforming \\u0000virtual:entry \\u2014 done\"}}\n"))
+           (jsonl-path (agent-log-test--write-file "test.jsonl" jsonl-content))
+           (output-path (expand-file-name "output.md" agent-log-test--dir))
+           (metadata (list :file jsonl-path :timestamp nil :project "" :display "")))
+      (agent-log--render-to-file "s1" metadata output-path)
+      (let ((raw (with-temp-buffer
+                   (set-buffer-multibyte nil)
+                   (insert-file-contents-literally output-path)
+                   (buffer-string))))
+        (should-not (string-search "\0" raw)))
+      (let ((content (with-temp-buffer
+                       (insert-file-contents output-path)
+                       (buffer-string))))
+        (should (string-search "␀virtual:entry — done" content))))))
 
 (ert-deftest agent-log-test-render-to-file/uses-parsed-metadata-for-path ()
   "Uses metadata parsed from the JSONL when caller metadata is minimal."
