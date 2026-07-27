@@ -298,8 +298,11 @@ and should be protected with filesystem-level controls."
     (user-error "Aborted"))
   (agent-log-redact--clear-rendered-directory)
   (agent-log-sync-sessions
-   (lambda () (message "agent-log-redact: rebuild complete"))
-   t))
+   (lambda (result)
+     (if (plist-get result :ok)
+         (message "agent-log-redact: rebuild complete")
+       (message "agent-log-redact: rebuild failed during %s"
+                (plist-get result :stage))))))
 
 ;;;###autoload
 (defun agent-log-redact-existing-in-place ()

@@ -638,6 +638,32 @@ SUMMARY defaults to ONELINE."
     (agent-log--index-merge index "s1" (list :file "/new.md"))
     (should (equal (plist-get (gethash "s1" index) :file) "/new.md"))))
 
+(ert-deftest agent-log-test-index-sanitize-file-ownership ()
+  "Stale or wrong-owner file pointers are cleared without losing summaries."
+  (agent-log-test--with-temp-dir
+    (let* ((valid
+            (agent-log-test--write-file
+             "valid.md"
+             "<!-- session: valid -->\n<!-- source: /tmp/valid.jsonl -->\n"))
+           (wrong
+            (agent-log-test--write-file
+             "wrong.md"
+             "<!-- session: actual -->\n<!-- source: /tmp/actual.jsonl -->\n"))
+           (missing (expand-file-name "missing.md" agent-log-test--dir))
+           (index (make-hash-table :test #'equal)))
+      (puthash "valid" (list :file valid :jsonl-size 1 :summary "V") index)
+      (puthash "wrong" (list :file wrong :jsonl-size 2 :summary "W") index)
+      (puthash "missing"
+               (list :file missing :jsonl-size 3 :summary "M")
+               index)
+      (should (= (agent-log--sanitize-index-file-ownership index) 2))
+      (should (equal (plist-get (gethash "valid" index) :file) valid))
+      (dolist (sid '("wrong" "missing"))
+        (let ((entry (gethash sid index)))
+          (should-not (plist-member entry :file))
+          (should-not (plist-member entry :jsonl-size))
+          (should (plist-get entry :summary)))))))
+
 (ert-deftest agent-log-test-repair-rendered-index/migrates-unknown-entry ()
   "Re-renders unknown-folder index entries to their real project path."
   (agent-log-test--with-temp-dir
@@ -1232,8 +1258,9 @@ SUMMARY defaults to ONELINE."
                          :display "Fix the bug"))
          (result (agent-log--rendered-filepath "session-1" metadata)))
     (should (string-match-p "/tmp/rendered/my-app/" result))
-    (should (string-match-p "fix-the-bug\\.md$" result))
-    (should (string-match-p "2023-11-1[45]_" result))))
+    (should (string-match-p
+             "fix-the-bug--claude-code--session-1\\.md$" result))
+    (should (string-match-p "2023-11-14_" result))))
 
 (ert-deftest agent-log-test-rendered-filepath/missing-timestamp ()
   "Handles missing (non-numeric) timestamp."
@@ -1242,7 +1269,8 @@ SUMMARY defaults to ONELINE."
                          :project "/project"
                          :display "test")))
     (let ((result (agent-log--rendered-filepath "s1" metadata)))
-      (should (string-match-p "unknown_test\\.md" result)))))
+      (should (string-match-p
+               "unknown_test--claude-code--s1\\.md" result)))))
 
 (ert-deftest agent-log-test-rendered-filepath/empty-display ()
   "Handles empty display text."
@@ -1251,7 +1279,58 @@ SUMMARY defaults to ONELINE."
                          :project "/project"
                          :display "")))
     (let ((result (agent-log--rendered-filepath "s1" metadata)))
-      (should (string-match-p "untitled\\.md" result)))))
+      (should (string-match-p
+               "untitled--claude-code--s1\\.md" result)))))
+
+(ert-deftest agent-log-test-rendered-filepath/session-identity-is-injective ()
+  "Different backend/session identities never share a rendered path."
+  (let* ((agent-log-rendered-directory "/tmp/rendered")
+         (codex-backend
+          (agent-log--make-codex
+           :name "Codex" :key 'codex :directory "/tmp/.codex"))
+         (base (list :timestamp 1700000000000
+                     :project "/project"
+                     :display "Same title"))
+         (claude-path
+          (agent-log--rendered-filepath
+           "same-id" (plist-put (copy-sequence base)
+                                :backend agent-log-test--claude-backend)))
+         (codex-path
+          (agent-log--rendered-filepath
+           "same-id" (plist-put (copy-sequence base)
+                                :backend codex-backend)))
+         (other-codex-path
+          (agent-log--rendered-filepath
+           "other-id" (plist-put (copy-sequence base)
+                                 :backend codex-backend))))
+    (should-not (equal claude-path codex-path))
+    (should-not (equal codex-path other-codex-path))
+    (should (string-match-p "--claude-code--same-id\\.md\\'" claude-path))
+    (should (string-match-p "--codex--same-id\\.md\\'" codex-path))))
+
+(ert-deftest agent-log-test-rendered-filepath/is-timezone-stable ()
+  "Rendered paths use UTC rather than the local timezone."
+  (let* ((agent-log-rendered-directory "/tmp/rendered")
+         (metadata (list :timestamp 1700000000000
+                         :project "/project"
+                         :display "Same title"
+                         :backend agent-log-test--claude-backend))
+         utc-path
+         argentina-path)
+    (let ((process-environment
+           (cons "TZ=UTC"
+                 (seq-remove
+                  (lambda (entry) (string-prefix-p "TZ=" entry))
+                  process-environment))))
+      (setq utc-path (agent-log--rendered-filepath "same-id" metadata)))
+    (let ((process-environment
+           (cons "TZ=America/Argentina/Buenos_Aires"
+                 (seq-remove
+                  (lambda (entry) (string-prefix-p "TZ=" entry))
+                  process-environment))))
+      (setq argentina-path
+            (agent-log--rendered-filepath "same-id" metadata)))
+    (should (equal utc-path argentina-path))))
 
 ;;;;; Render to file (integration)
 
@@ -1347,13 +1426,11 @@ SUMMARY defaults to ONELINE."
                            :backend agent-log-test--claude-backend))
            (result (agent-log--render-to-file "s1" metadata))
            (rendered-path (car result))
-           (expected-timestamp
-            (format-time-string "%Y-%m-%d_%H-%M"
-                                (date-to-time "2026-06-04T10:21:52Z"))))
+           (expected-timestamp "2026-06-04_10-21"))
       (should (string-match-p "/project/" rendered-path))
       (should-not (string-match-p "/unknown/" rendered-path))
       (should (string-match-p (concat (regexp-quote expected-timestamp)
-                                      "_hello-project\\.md\\'")
+                                      "_hello-project--claude-code--s1\\.md\\'")
                               rendered-path)))))
 
 (ert-deftest agent-log-test-render-to-file/persists-summary ()
@@ -1657,8 +1734,7 @@ SUMMARY defaults to ONELINE."
   (should-not (agent-log--session-ignored-p (list "s" :project "/tmp-backups")))
   (should-not (agent-log--session-ignored-p (list "s" :project ""))))
 
-(ert-deftest
-    agent-log-test-read-all-sessions/excludes-internal-codex-sessions ()
+(ert-deftest agent-log-test-read-all-sessions/always-excludes-internal-sessions ()
   "Keeps user sessions while excluding Codex workers and guardians."
   (let* ((codex agent-log-codex--instance)
          (claude agent-log-test--claude-backend)
@@ -1681,9 +1757,7 @@ SUMMARY defaults to ONELINE."
                      (list parent worker guardian)
                    (list claude-session)))))
       (should (equal (mapcar #'car (agent-log--read-all-sessions))
-                     '("parent" "claude")))
-      (should (equal (mapcar #'car (agent-log--read-all-sessions t))
-                     '("parent" "worker" "guardian" "claude"))))))
+                     '("parent" "claude"))))))
 
 (ert-deftest agent-log-test-browse-sessions/excludes-internal-codex-sessions ()
   "Does not offer internal Codex sessions in the ordinary chooser."
@@ -2893,15 +2967,21 @@ session."
   (agent-log-test--with-temp-dir
     (let* ((agent-log-rendered-directory
             (expand-file-name "rendered" agent-log-test--dir))
+           (backend
+            (agent-log--make-claude
+             :name "Claude" :key 'claude-code
+             :directory agent-log-test--dir))
            (jsonl-content "{\"type\":\"user\",\"timestamp\":\"2023-11-14T12:00:00Z\",\"message\":{\"role\":\"user\",\"content\":\"hi\"}}\n")
            (jsonl-path (agent-log-test--write-file "test.jsonl" jsonl-content))
            (metadata (list :file jsonl-path :timestamp 1700000000000
-                           :project "/project" :display "hi")))
+                           :project "/project" :display "hi"
+                           :backend backend)))
       ;; First call — renders
       (let ((path1 (agent-log--ensure-rendered "s1" metadata)))
-        ;; Modify the rendered file content so we can detect if it gets re-rendered
-        (with-temp-file path1
-          (insert "MARKER: original render"))
+        ;; Append a marker without destroying the ownership front matter.
+        (with-temp-buffer
+          (insert "\nMARKER: original render\n")
+          (write-region (point-min) (point-max) path1 t 'quiet))
         ;; Second call — should use cache (same jsonl size)
         (let ((path2 (agent-log--ensure-rendered "s1" metadata)))
           (should (equal path1 path2))
@@ -2912,21 +2992,316 @@ session."
             (should (string-match-p "MARKER: original render" content))))))))
 
 (ert-deftest agent-log-test-ensure-rendered/path-change-rerenders ()
-  "Re-renders when metadata implies a better rendered path."
+  "Re-renders and retires the old file when display metadata changes."
   (agent-log-test--with-temp-dir
     (let* ((agent-log-rendered-directory
             (expand-file-name "rendered" agent-log-test--dir))
+           (backend
+            (agent-log--make-claude
+             :name "Claude" :key 'claude-code
+             :directory agent-log-test--dir))
            (jsonl-content "{\"type\":\"user\",\"timestamp\":\"2023-11-14T12:00:00Z\",\"message\":{\"role\":\"user\",\"content\":\"hi\"}}\n")
            (jsonl-path (agent-log-test--write-file "test.jsonl" jsonl-content))
            (old-metadata (list :file jsonl-path :timestamp 1700000000000
-                               :project "/project" :display "old"))
+                               :project "/project" :display "old"
+                               :backend backend))
            (new-metadata (list :file jsonl-path :timestamp 1700000000000
-                               :project "/project" :display "hi"))
+                               :project "/project" :display "hi"
+                               :backend backend))
            (path1 (agent-log--ensure-rendered "s1" old-metadata))
            (path2 (agent-log--ensure-rendered "s1" new-metadata)))
       (should-not (equal path1 path2))
-      (should (string-match-p "hi\\.md\\'" path2))
-      (should (file-exists-p path2)))))
+      (should (string-match-p "hi--claude-code--s1\\.md\\'" path2))
+      (should (file-exists-p path2))
+      (should-not (file-exists-p path1)))))
+
+(ert-deftest agent-log-test-ensure-rendered/indexed-current-beats-stale-target ()
+  "Migration copies the indexed current artifact over a stale target."
+  (agent-log-test--with-temp-dir
+    (let* ((agent-log-rendered-directory
+            (expand-file-name "rendered" agent-log-test--dir))
+           (backend
+            (agent-log--make-claude
+             :name "Claude" :key 'claude-code
+             :directory agent-log-test--dir))
+           (source
+            (agent-log-test--write-file
+             "session.jsonl"
+             "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"hi\"}}\n"))
+           (old-metadata
+            (list :file source :timestamp 1700000000000
+                  :project "/project" :display "Old" :backend backend))
+           (new-metadata
+            (list :file source :timestamp 1700000000000
+                  :project "/project" :display "New" :backend backend))
+           (old-path (agent-log--ensure-rendered "s1" old-metadata))
+           (new-path (agent-log--rendered-filepath "s1" new-metadata)))
+      (with-temp-buffer
+        (insert "\nCURRENT\n")
+        (write-region (point-min) (point-max) old-path t 'quiet))
+      (make-directory (file-name-directory new-path) t)
+      (with-temp-file new-path
+        (insert (agent-log--render-front-matter
+                 "s1" source
+                 (file-attribute-size (file-attributes source))
+                 backend)
+                "STALE\n"))
+      (should (equal (agent-log--ensure-rendered "s1" new-metadata)
+                     new-path))
+      (let ((content (with-temp-buffer
+                       (insert-file-contents new-path)
+                       (buffer-string))))
+        (should (string-search "CURRENT" content))
+        (should-not (string-search "STALE" content)))
+      (should-not (file-exists-p old-path)))))
+
+(ert-deftest agent-log-test-ensure-rendered/refuses-wrong-owner-target ()
+  "Never overwrites a canonical path whose front matter has another owner."
+  (agent-log-test--with-temp-dir
+    (let* ((agent-log-rendered-directory
+            (expand-file-name "rendered" agent-log-test--dir))
+           (backend
+            (agent-log--make-claude
+             :name "Claude" :key 'claude-code
+             :directory agent-log-test--dir))
+           (source (agent-log-test--write-file "session.jsonl" "{}\n"))
+           (metadata
+            (list :file source :timestamp 1700000000000
+                  :project "/project" :display "Target" :backend backend))
+           (target (agent-log--rendered-filepath "s1" metadata)))
+      (make-directory (file-name-directory target) t)
+      (with-temp-file target
+        (insert (agent-log--render-front-matter
+                 "other" source 3 backend)
+                "DO NOT OVERWRITE\n"))
+      (should-error (agent-log--ensure-rendered "s1" metadata))
+      (let ((content (with-temp-buffer
+                       (insert-file-contents target)
+                       (buffer-string))))
+        (should (string-search "DO NOT OVERWRITE" content)))
+      (should-not (gethash "s1" (agent-log--read-index))))))
+
+(ert-deftest agent-log-test-ensure-rendered/rerenders-source-mismatch ()
+  "A same-ID artifact from another source is not accepted as canonical."
+  (agent-log-test--with-temp-dir
+    (let* ((agent-log-rendered-directory
+            (expand-file-name "rendered" agent-log-test--dir))
+           (backend
+            (agent-log--make-claude
+             :name "Claude" :key 'claude-code
+             :directory agent-log-test--dir))
+           (content
+            (concat
+             "{\"type\":\"user\",\"timestamp\":\"2026-01-01T00:00:00Z\","
+             "\"message\":{\"role\":\"user\",\"content\":\"hello\"}}\n"))
+           (old-source (agent-log-test--write-file "old.jsonl" content))
+           (new-source (agent-log-test--write-file "new.jsonl" content))
+           (metadata
+            (list :file new-source :timestamp 0 :project "/project"
+                  :display "hello" :backend backend))
+           (target (agent-log--rendered-filepath "s1" metadata))
+           (index (make-hash-table :test #'equal))
+           (size (file-attribute-size (file-attributes old-source))))
+      (make-directory (file-name-directory target) t)
+      (with-temp-file target
+        (insert (agent-log--render-front-matter
+                 "s1" old-source size backend)))
+      (puthash "s1" (list :file target :jsonl-size size) index)
+      (agent-log--write-index index)
+      (agent-log--ensure-rendered "s1" metadata)
+      (should
+       (agent-log--same-path-p
+        (plist-get (agent-log--rendered-front-matter target) :source)
+        new-source)))))
+
+(ert-deftest agent-log-test-ensure-rendered/deferred-index-update ()
+  "Archive sync can update one in-memory index without per-session rewrites."
+  (agent-log-test--with-temp-dir
+    (let* ((agent-log-rendered-directory
+            (expand-file-name "rendered" agent-log-test--dir))
+           (source
+            (agent-log-test--write-file
+             "session.jsonl"
+             (concat
+              "{\"type\":\"user\",\"timestamp\":\"2026-01-01T00:00:00Z\","
+              "\"message\":{\"role\":\"user\",\"content\":\"hello\"}}\n")))
+           (metadata
+            (list :file source :timestamp 0 :project "/project"
+                  :display "hello"
+                  :backend agent-log-test--claude-backend))
+           (index (make-hash-table :test #'equal))
+           (writes 0))
+      (cl-letf (((symbol-function 'agent-log--write-index)
+                 (lambda (_index) (cl-incf writes))))
+        (agent-log--ensure-rendered "s1" metadata index t))
+      (should (= writes 0))
+      (should (plist-get (gethash "s1" index) :file)))))
+
+(ert-deftest agent-log-test-trash-rendered-file/refuses-outside-root ()
+  "A managed-looking file outside the rendered root is never trashed."
+  (agent-log-test--with-temp-dir
+    (let* ((agent-log-rendered-directory
+            (expand-file-name "rendered" agent-log-test--dir))
+           (outside
+            (agent-log-test--write-file
+             "outside.md"
+             "<!-- session: s1 -->\n<!-- source: /tmp/source.jsonl -->\n")))
+      (should-error (agent-log--trash-rendered-file outside))
+      (should (file-exists-p outside)))))
+
+(ert-deftest agent-log-test-rendered-filepath/refuses-project-escape ()
+  "A hostile project leaf cannot place rendered output outside its root."
+  (agent-log-test--with-temp-dir
+    (let ((agent-log-rendered-directory
+           (expand-file-name "rendered" agent-log-test--dir)))
+      (should-error
+       (agent-log--rendered-filepath
+        "s1"
+        (list :timestamp 0 :project ".." :display "x"
+              :backend agent-log-test--claude-backend))))))
+
+(ert-deftest agent-log-test-plan-reconciliation/normalizes-discovered-paths ()
+  "Absolute desired paths match abbreviated paths returned by archive scans."
+  (agent-log-test--with-temp-dir
+    (let* ((agent-log-rendered-directory
+            (expand-file-name "rendered" agent-log-test--dir))
+           (source
+            (agent-log-test--write-file
+             ".claude/projects/project/s1.jsonl" "{}\n"))
+           (backend
+            (agent-log--make-claude
+             :name "Claude Code" :key 'claude-code
+             :directory (expand-file-name ".claude" agent-log-test--dir)))
+           (metadata
+            (list :file source :timestamp 0 :project "/project"
+                  :display "x" :backend backend))
+           (session (cons "s1" metadata))
+           (desired (agent-log--rendered-filepath "s1" metadata))
+           (index (make-hash-table :test #'equal)))
+      (make-directory (file-name-directory desired) t)
+      (with-temp-file desired
+        (insert (agent-log--render-front-matter
+                 "s1" source 3 backend)))
+      (puthash "s1" (list :file desired :jsonl-size 3) index)
+      (cl-letf (((symbol-function 'directory-files-recursively)
+                 (lambda (&rest _)
+                   (list
+                    (concat (file-name-directory desired)
+                            "../project/"
+                            (file-name-nondirectory desired))))))
+        (let ((plan
+               (agent-log--plan-rendered-reconciliation
+                (list session) (list backend) index)))
+          (should-not (plist-get plan :conflicts)))))))
+
+(ert-deftest agent-log-test-reconcile-rendered-files/removes-managed-stale-files ()
+  "Keeps one canonical artifact and retires duplicate and noncanonical ones."
+  (agent-log-test--with-temp-dir
+    (let* ((agent-log-rendered-directory
+            (expand-file-name "rendered" agent-log-test--dir))
+           (backend-dir (expand-file-name ".codex" agent-log-test--dir))
+           (backend
+            (agent-log--make-codex
+             :name "Codex" :key 'codex :directory backend-dir))
+           (source
+            (agent-log-test--write-file
+             ".codex/sessions/rollout-canonical.jsonl" "{}\n"))
+           (orphan-source
+            (agent-log-test--write-file
+             ".codex/sessions/rollout-internal.jsonl"
+             (concat
+              "{\"type\":\"session_meta\","
+              "\"payload\":{\"id\":\"internal\","
+              "\"cwd\":\"/project\","
+              "\"timestamp\":\"2026-07-26T18:00:00Z\","
+              "\"source\":{\"subagent\":{\"other\":\"guardian\"}}}}\n")))
+           (metadata
+            (list :file source :timestamp 1700000000000
+                  :project "/project" :display "Canonical" :backend backend))
+           (canonical (cons "canonical" metadata))
+           (desired (agent-log--rendered-filepath "canonical" metadata))
+           (duplicate (expand-file-name "project/old-duplicate.md"
+                                        agent-log-rendered-directory))
+           (orphan (expand-file-name "project/internal.md"
+                                     agent-log-rendered-directory))
+           (index (make-hash-table :test #'equal))
+           trashed)
+      (make-directory (file-name-directory desired) t)
+      (dolist (spec `((,desired "canonical" ,source)
+                      (,duplicate "canonical" ,source)
+                      (,orphan "internal" ,orphan-source)))
+        (with-temp-file (car spec)
+          (insert (format "<!-- session: %s -->\n<!-- source: %s -->\n"
+                          (cadr spec) (caddr spec)))))
+      (puthash "canonical" (list :file desired :jsonl-size 3) index)
+      (puthash "internal" (list :file orphan :jsonl-size 3) index)
+      (agent-log--write-index index)
+      (cl-letf (((symbol-function 'agent-log-codex--effective-home)
+                 (lambda (_backend)
+                   (file-name-as-directory backend-dir)))
+                ((symbol-function 'agent-log--trash-rendered-file)
+                 (lambda (file)
+                   (push file trashed)
+                   (delete-file file))))
+        (agent-log--reconcile-rendered-files
+         (list canonical) (list backend)))
+      (should (file-exists-p desired))
+      (should-not (file-exists-p duplicate))
+      (should-not (file-exists-p orphan))
+      (should (= (length trashed) 2))
+      (let ((updated-index (agent-log--read-index)))
+        (should (gethash "canonical" updated-index))
+        (should-not (gethash "internal" updated-index)))
+      (let ((before (length trashed))
+            (plan
+             (cl-letf (((symbol-function 'agent-log-codex--effective-home)
+                        (lambda (_backend)
+                          (file-name-as-directory backend-dir))))
+               (agent-log--reconcile-rendered-files
+                (list canonical) (list backend)))))
+        (should (= before (length trashed)))
+        (should-not (plist-get plan :trash))))))
+
+(ert-deftest agent-log-test-reconcile-rendered-files/retires-exec-preserves-unknown ()
+  "Reconciliation retires known exec history but preserves unknown ownership."
+  (agent-log-test--with-temp-dir
+    (let* ((agent-log-rendered-directory
+            (expand-file-name "rendered" agent-log-test--dir))
+           (backend-dir (expand-file-name ".codex" agent-log-test--dir))
+           (backend
+            (agent-log--make-codex
+             :name "Codex" :key 'codex :directory backend-dir))
+           (exec-source
+            (agent-log-test--write-file
+             ".codex/sessions/exec.jsonl"
+             (concat
+              "{\"type\":\"session_meta\","
+              "\"payload\":{\"id\":\"exec\",\"cwd\":\"/project\","
+              "\"source\":\"exec\"}}\n")))
+           (exec-file
+            (expand-file-name "project/exec.md"
+                              agent-log-rendered-directory))
+           (unknown-file
+            (expand-file-name "project/unknown.md"
+                              agent-log-rendered-directory))
+           trashed)
+      (make-directory (file-name-directory exec-file) t)
+      (with-temp-file exec-file
+        (insert (format "<!-- session: exec -->\n<!-- source: %s -->\n"
+                        exec-source)))
+      (with-temp-file unknown-file
+        (insert "<!-- session: unknown -->\n<!-- source: /elsewhere/missing.jsonl -->\n"))
+      (cl-letf (((symbol-function 'agent-log-codex--effective-home)
+                 (lambda (_backend)
+                   (file-name-as-directory backend-dir)))
+                ((symbol-function 'agent-log--trash-rendered-file)
+                 (lambda (file) (push file trashed))))
+        (let ((plan
+               (agent-log--reconcile-rendered-files nil (list backend))))
+          (should (equal trashed (list exec-file)))
+          (should (= (plist-get plan :preserved) 0))
+          (should (= (plist-get plan :unknown) 1))))
+      (should (file-exists-p unknown-file)))))
 
 ;;;;; Incremental text processing
 
@@ -2993,11 +3368,24 @@ session."
   "Detects up-to-date sessions."
   (agent-log-test--with-temp-dir
     (let* ((jsonl-content "{\"type\":\"user\"}\n")
+           (backend
+            (agent-log--make-claude
+             :name "Claude" :key 'claude-code
+             :directory agent-log-test--dir))
            (jsonl-path (agent-log-test--write-file "test.jsonl" jsonl-content))
            (jsonl-size (file-attribute-size (file-attributes jsonl-path)))
-           (rendered-path (agent-log-test--write-file "rendered.md" "rendered"))
-           (sessions (list (list "s1" :file jsonl-path)))
+           (agent-log-rendered-directory
+            (expand-file-name "rendered" agent-log-test--dir))
+           (metadata
+            (list :file jsonl-path :timestamp nil :project "/project"
+                  :display "" :backend backend))
+           (rendered-path (agent-log--rendered-filepath "s1" metadata))
+           (sessions (list (cons "s1" metadata)))
            (index (make-hash-table :test #'equal)))
+      (make-directory (file-name-directory rendered-path) t)
+      (with-temp-file rendered-path
+        (insert (agent-log--render-front-matter
+                 "s1" jsonl-path jsonl-size backend)))
       (puthash "s1" (list :file rendered-path :jsonl-size jsonl-size) index)
       (let ((pending (agent-log--pending-sessions sessions index)))
         (should (= (length pending) 0))))))
@@ -3014,6 +3402,77 @@ session."
       (puthash "s1" (list :file rendered-path :jsonl-size 10) index)
       (let ((pending (agent-log--pending-sessions sessions index)))
         (should (= (length pending) 1))))))
+
+(ert-deftest agent-log-test-pending-sessions/missing-source-does-not-block ()
+  "A stale catalog row is not renderable and does not abort other work."
+  (let* ((sessions '(("missing" :file "/does/not/exist.jsonl")))
+         (index (make-hash-table :test #'equal)))
+    (should-not (agent-log--pending-sessions sessions index))))
+
+(ert-deftest agent-log-test-plan-reconciliation/preserves-missing-source-row ()
+  "A catalog row with a missing source cannot authorize archive cleanup."
+  (agent-log-test--with-temp-dir
+    (let* ((agent-log-rendered-directory
+            (expand-file-name "rendered" agent-log-test--dir))
+           (backend agent-log-test--codex-backend)
+           (metadata
+            (list :file "/does/not/exist.jsonl" :timestamp 0
+                  :project "/project" :display "missing" :backend backend))
+           (index (make-hash-table :test #'equal))
+           (plan
+            (agent-log--plan-rendered-reconciliation
+             (list (cons "missing" metadata)) (list backend) index)))
+      (should-not (plist-get plan :conflicts))
+      (should-not (plist-get plan :trash)))))
+
+(ert-deftest agent-log-test-sync-sessions/reports-reconciliation-failure ()
+  "A reconciliation error reaches the completion callback as terminal state."
+  (let (result)
+    (cl-letf (((symbol-function 'agent-log--active-backend-instances)
+               (lambda () nil))
+              ((symbol-function 'agent-log--read-all-sessions)
+               (lambda (&rest _) nil))
+              ((symbol-function 'agent-log--read-index-strict)
+               (lambda () (make-hash-table :test #'equal)))
+              ((symbol-function 'agent-log--validate-render-sync-plan)
+               (lambda (_sessions) t))
+              ((symbol-function 'agent-log--pending-sessions)
+               (lambda (&rest _) nil))
+              ((symbol-function 'agent-log--reconcile-rendered-files)
+               (lambda (&rest _) (error "reconcile failed"))))
+      (agent-log-sync-sessions (lambda (status) (setq result status))))
+    (should-not (plist-get result :ok))
+    (should (eq (plist-get result :stage) 'reconcile))
+    (should (equal (error-message-string (plist-get result :error))
+                   "reconcile failed"))))
+
+(ert-deftest agent-log-test-sync-sessions/reports-render-failure ()
+  "A render failure is terminal and does not report successful completion."
+  (let ((session '("s1" :file "/tmp/source.jsonl"))
+        reconciled
+        result)
+    (cl-letf (((symbol-function 'agent-log--active-backend-instances)
+               (lambda () nil))
+              ((symbol-function 'agent-log--read-all-sessions)
+               (lambda (&rest _) (list session)))
+              ((symbol-function 'agent-log--read-index-strict)
+               (lambda () (make-hash-table :test #'equal)))
+              ((symbol-function 'agent-log--validate-render-sync-plan)
+               (lambda (_sessions) t))
+              ((symbol-function 'agent-log--pending-sessions)
+               (lambda (&rest _) (list session)))
+              ((symbol-function 'agent-log--sync-next)
+               (lambda (_pending _done _total finish error-callback
+                        &rest _ignored)
+                 (funcall error-callback session '(error "render failed"))
+                 (funcall finish)))
+              ((symbol-function 'agent-log--reconcile-rendered-files)
+               (lambda (&rest _) (setq reconciled t))))
+      (agent-log-sync-sessions (lambda (status) (setq result status))))
+    (should-not reconciled)
+    (should-not (plist-get result :ok))
+    (should (eq (plist-get result :stage) 'render))
+    (should (= (length (plist-get result :failures)) 1))))
 
 ;;;;; Append to file
 
@@ -3191,78 +3650,28 @@ session."
 
 ;;;;;; Session discovery
 
-(ert-deftest
-    agent-log-test-codex-read-sessions/preserves-internal-source-through-cache ()
-  "Keeps internal source metadata across cold and cached discovery."
+(ert-deftest agent-log-test-codex-read-sessions/uses-canonical-thread-list ()
+  "Uses Codex's interactive thread catalog, never raw rollout membership."
   (agent-log-test--with-temp-dir
     (let* ((parent-id "019df82b-8607-7231-a491-e57316e4fa02")
-           (worker-id "019df82b-8607-7231-a491-e57316e4fa03")
-           (guardian-id "019df82b-8607-7231-a491-e57316e4fa04")
+           (other-id "019df82b-8607-7231-a491-e57316e4fa03")
+           (raw-only-id "019df82b-8607-7231-a491-e57316e4fa04")
            (project "/Users/me/onboarding")
-           (backend
-            (agent-log--make-codex
-             :name "Codex"
-             :key 'codex
-             :directory agent-log-test--dir
-             :rendered-directory (expand-file-name "rendered"
-                                                   agent-log-test--dir)))
-           cold
-           warm
-           visible)
-      (dolist
-          (fixture
-           `((,parent-id . "\"vscode\"")
-             (,worker-id
-              . "{\"subagent\":{\"thread_spawn\":{\"parent_thread_id\":\
-\"019df82b-8607-7231-a491-e57316e4fa02\"}}}")
-             (,guardian-id . "{\"subagent\":{\"other\":\"guardian\"}}")))
-        (let ((sid (car fixture))
-              (source-json (cdr fixture)))
-          (agent-log-test--write-file
-           (concat "sessions/2026/05/06/rollout-2026-05-06T00-00-00-"
-                   sid ".jsonl")
-           (format
-            (concat "{\"type\":\"session_meta\","
-                    "\"timestamp\":\"2026-05-06T00:00:00Z\","
-                    "\"payload\":{\"id\":\"%s\",\"cwd\":\"%s\","
-                    "\"timestamp\":\"2026-05-06T00:00:00Z\","
-                    "\"source\":%s}}\n")
-            sid project source-json))))
-      (setq cold (agent-log--read-sessions backend))
-      (should (= (length cold) 3))
-      (should-not
-       (agent-log-codex--subagent-session-p (assoc parent-id cold)))
-      (should (agent-log-codex--subagent-session-p (assoc worker-id cold)))
-      (should (agent-log-codex--subagent-session-p (assoc guardian-id cold)))
-      (should (file-exists-p (agent-log-codex--metadata-cache-path backend)))
-      (cl-letf (((symbol-function 'agent-log-codex--read-session-meta)
-                 (lambda (_file)
-                   (ert-fail "Warm discovery reread a transcript")))
-                ((symbol-function 'agent-log--active-backend-instances)
-                 (lambda () (list backend))))
-        (setq warm (agent-log--read-sessions backend)
-              visible (agent-log--read-all-sessions)))
-      (should (= (length warm) 3))
-      (should (agent-log-codex--subagent-session-p (assoc worker-id warm)))
-      (should (agent-log-codex--subagent-session-p (assoc guardian-id warm)))
-      (should (equal (mapcar #'car visible) (list parent-id))))))
-
-(ert-deftest agent-log-test-codex-read-sessions/reuses-metadata-cache ()
-  "Does not reread unchanged Codex transcripts after metadata is cached."
-  (agent-log-test--with-temp-dir
-    (let* ((sid "019df82b-8607-7231-a491-e57316e4fa02")
-           (jsonl-path
+           (parent-file
             (agent-log-test--write-file
              (concat "sessions/2026/05/06/rollout-2026-05-06T00-00-00-"
-                     sid ".jsonl")
-             (concat
-              "{\"type\":\"session_meta\","
-              "\"timestamp\":\"2026-05-06T00:00:00Z\","
-              "\"payload\":{\"id\":\"" sid "\","
-              "\"cwd\":\"/tmp/project\","
-              "\"timestamp\":\"2026-05-06T00:00:00Z\","
-              "\"source\":\"cli\"}}\n"
-              "{\"type\":\"response_item\"}\n")))
+                     parent-id ".jsonl")
+             "{\"type\":\"session_meta\"}\n"))
+           (other-file
+            (agent-log-test--write-file
+             (concat "sessions/2026/05/07/rollout-2026-05-07T00-00-00-"
+                     other-id ".jsonl")
+             "{\"type\":\"session_meta\"}\n"))
+           (_raw-only-file
+            (agent-log-test--write-file
+             (concat "sessions/2026/05/08/rollout-2026-05-08T00-00-00-"
+                     raw-only-id ".jsonl")
+             "{\"type\":\"session_meta\"}\n"))
            (backend
             (agent-log--make-codex
              :name "Codex"
@@ -3270,52 +3679,281 @@ session."
              :directory agent-log-test--dir
              :rendered-directory (expand-file-name "rendered"
                                                    agent-log-test--dir)))
-           (orig-insert-file-contents
-            (symbol-function 'insert-file-contents))
-           (transcript-reads 0))
-      (agent-log-test--write-file
-       "history.jsonl"
-       (concat "{\"session_id\":\"" sid
-               "\",\"ts\":1778025600,\"text\":\"Hello\"}\n"))
-      (agent-log--read-sessions backend)
-      (cl-letf (((symbol-function 'insert-file-contents)
-                 (lambda (filename &rest args)
-                   (when (equal (expand-file-name filename) jsonl-path)
-                     (cl-incf transcript-reads))
-                   (apply orig-insert-file-contents filename args))))
+           (threads
+            `(((id . ,parent-id)
+               (path . ,parent-file)
+               (preview . "Real first prompt")
+               (cwd . ,project)
+               (createdAt . 1778025600)
+               (updatedAt . 1778025700)
+               (source . "vscode"))
+              ((id . ,other-id)
+               (path . ,other-file)
+               (preview . "Another real prompt")
+               (cwd . ,project)
+               (createdAt . 1778112000)
+               (updatedAt . 1778112100)
+               (source . "cli")))))
+      (cl-letf (((symbol-function 'agent-log-codex--thread-list)
+                 (lambda (actual-backend)
+                   (should (eq actual-backend backend))
+                   threads)))
         (let ((sessions (agent-log--read-sessions backend)))
-          (should (= (length sessions) 1))
-          (should (equal (plist-get (cdar sessions) :project)
-                         "/tmp/project"))
-          (should (= transcript-reads 0)))))))
+          (should (equal (mapcar #'car sessions)
+                         (list other-id parent-id)))
+          (should-not (assoc raw-only-id sessions))
+          (should (equal (plist-get (cdr (assoc parent-id sessions)) :display)
+                         "Real first prompt"))
+          (should (equal (plist-get (cdr (assoc parent-id sessions)) :file)
+                         parent-file))
+          (should (= (plist-get (cdr (assoc parent-id sessions)) :timestamp)
+                     1778025600000)))))))
+
+(ert-deftest agent-log-test-codex-thread-list/matches-native-wire-contract ()
+  "Uses the active home, native filters, provider, pagination, and ID dedup."
+  (let* ((backend
+          (agent-log--make-codex
+           :name "Codex" :key 'codex :directory "/unused/.codex"))
+         (effective-home "/tmp/active-codex-home/")
+         calls
+         spawned-environment)
+    (cl-letf (((symbol-function 'agent-log-codex--effective-home)
+               (lambda (_backend) effective-home))
+              ((symbol-function 'make-process)
+               (lambda (&rest _args)
+                 (setq spawned-environment process-environment)
+                 'fake-process))
+              ((symbol-function 'agent-log-codex--stop-catalog-process)
+               (lambda (&rest _args) nil))
+              ((symbol-function 'agent-log-codex--catalog-request)
+               (lambda (_process request-id method params)
+                 (push (list request-id method params) calls)
+                 (pcase method
+                   ("initialize" '((serverInfo . ((name . "codex")))))
+                   ("config/read"
+                    '((config . ((model_provider . "openai")))))
+                   ("thread/list"
+                    (if (null (alist-get 'cursor params))
+                        '((data . [((id . "one"))])
+                          (nextCursor . "page-2"))
+                      '((data . [((id . "one")) ((id . "two"))])
+                        (nextCursor . nil))))))))
+      (should (equal (mapcar (lambda (thread) (alist-get 'id thread))
+                             (agent-log-codex--thread-list backend))
+                     '("one" "two"))))
+    (setq calls (nreverse calls))
+    (should (equal (mapcar #'cadr calls)
+                   '("initialize" "config/read"
+                     "thread/list" "thread/list")))
+    (let ((first-page (nth 2 (nth 2 calls)))
+          (second-page (nth 2 (nth 3 calls))))
+      (should (equal (append (alist-get 'sourceKinds first-page) nil)
+                     '("cli" "vscode")))
+      (should (equal (append (alist-get 'modelProviders first-page) nil)
+                     '("openai")))
+      (should (eq (alist-get 'archived first-page) :json-false))
+      (should (eq (alist-get 'useStateDbOnly first-page) :json-false))
+      (should (equal (alist-get 'sortKey first-page) "updated_at"))
+      (should (equal (alist-get 'cursor second-page) "page-2")))
+    (should (member "CODEX_HOME=/tmp/active-codex-home"
+                    spawned-environment))))
+
+(ert-deftest agent-log-test-codex-effective-home/uses-active-agent-account ()
+  "Catalog discovery follows the account used by new native Codex sessions."
+  (let ((backend
+         (agent-log--make-codex
+          :name "Codex" :key 'codex :directory "/fallback/.codex")))
+    (cl-letf (((symbol-function 'agent-codex--effective-codex-home)
+               (lambda () "/tmp/.codex-active")))
+      (should
+       (equal (agent-log-codex--effective-home backend)
+              "/tmp/.codex-active/")))))
+
+(ert-deftest agent-log-test-codex-file-lookup/uses-effective-home ()
+  "Codex source lookup follows the same account root as native discovery."
+  (agent-log-test--with-temp-dir
+    (let* ((backend
+            (agent-log--make-codex
+             :name "Codex" :key 'codex
+             :directory (expand-file-name "inactive" agent-log-test--dir)))
+           (active-home (expand-file-name "active" agent-log-test--dir))
+           (session-id "019df82b-8607-7231-a491-e57316e4fa02")
+           (file
+            (agent-log-test--write-file
+             (concat "active/sessions/2026/05/06/rollout-" session-id
+                     ".jsonl")
+             "{}\n")))
+      (cl-letf (((symbol-function 'agent-log-codex--effective-home)
+                 (lambda (_backend) (file-name-as-directory active-home))))
+        (should (equal (agent-log--find-session-file backend session-id)
+                       file))
+        (should
+         (equal (gethash session-id
+                         (agent-log--build-session-file-index backend))
+                file))))))
+
+(ert-deftest agent-log-test-backend-for-file/uses-backend-source-roots ()
+  "Backend inference honors account-aware source directories."
+  (let* ((fallback
+          (agent-log--make-claude
+           :name "Claude" :key 'claude-code :directory "/fallback/.claude"))
+         (backend
+          (agent-log--make-codex
+           :name "Codex" :key 'codex :directory "/inactive/.codex"))
+         (source "/active/.codex/sessions/2026/05/06/rollout-id.jsonl"))
+    (cl-letf (((symbol-function 'agent-log--active-backend-instances)
+               (lambda () (list fallback backend)))
+              ((symbol-function 'agent-log--backend-source-directories)
+               (lambda (actual-backend)
+                 (if (eq actual-backend backend)
+                     '("/active/.codex/sessions")
+                   '("/fallback/.claude")))))
+      (should (eq (agent-log--backend-for-file source) backend)))))
 
 (ert-deftest agent-log-test-codex-resume-session/app-server ()
   "Resumes Codex logs through app-server when app-server is the active backend."
   (let ((codex-terminal-backend 'app-server)
         (agent-log--session-project "/tmp/project/")
+        (agent-log-codex--exact-resume-paths
+         (make-hash-table :test #'equal))
+        cached
         called)
-    (cl-letf (((symbol-function 'require)
+    (cl-letf (((symbol-function 'agent-log--read-sessions)
+               (lambda (_backend)
+                 '(("sid-123" :project "/tmp/project"
+                    :file "/tmp/exact-rollout.jsonl"))))
+              ((symbol-function 'require)
                (lambda (feature &optional _filename _noerror)
                  (eq feature 'codex)))
               ((symbol-function 'codex--app-server-launch-resume-session)
                (lambda (session-id)
                  (setq called session-id)))
+              ((symbol-function 'codex--cache-session-transcript)
+               (lambda (session-id file)
+                 (setq cached (cons session-id file))))
+              ((symbol-function 'file-readable-p)
+               (lambda (file) (equal file "/tmp/exact-rollout.jsonl")))
               ((symbol-function 'codex--start-subcommand)
                (lambda (&rest _)
                  (ert-fail "app-server resume should not use terminal subcommand"))))
       (agent-log--resume-session agent-log-test--codex-backend "sid-123"))
-    (should (equal called "sid-123"))))
+    (should (equal called "sid-123"))
+    (should (equal cached
+                   '("sid-123" . "/tmp/exact-rollout.jsonl")))))
 
-(ert-deftest agent-log-test-codex-find-session-for-project/allows-subagent ()
-  "Finds the newest matching Codex session by default."
-  (let* ((dir "/tmp/project")
-         (sessions
-          `(("child" :project ,dir :timestamp 2000
-             :source (:subagent (:thread_spawn (:parent_thread_id "parent"))))
-            ("parent" :project ,dir :timestamp 1000 :source "cli"))))
-    (should (equal (car (agent-log-codex--find-session-for-project
-                         dir sessions))
-                   "child"))))
+(ert-deftest agent-log-test-codex-exact-resume/uses-catalog-path ()
+  "Agent Log app-server resume sends the exact catalog path without rescanning."
+  (agent-log-test--with-temp-dir
+    (let* ((session-id "sid-123")
+           (transcript (agent-log-test--write-file "exact.jsonl" "{}\n"))
+           sent
+           fallback-called)
+      (puthash session-id transcript agent-log-codex--exact-resume-paths)
+      (cl-letf (((symbol-function 'codex--app-server-send-resume)
+                 (lambda (method thread)
+                   (setq sent (list method thread)))))
+        (agent-log-codex--exact-resume-advice
+         (lambda (_sid) (setq fallback-called t))
+         session-id))
+      (should-not fallback-called)
+      (should
+       (equal sent
+              (list "thread/resume"
+                    `((id . ,session-id) (path . ,transcript)))))
+      (should-not (gethash session-id
+                           agent-log-codex--exact-resume-paths)))))
+
+(ert-deftest agent-log-test-codex-resume-session/rejects-noncanonical-id ()
+  "Refuses a raw rollout UUID that Codex's thread catalog cannot resume."
+  (let ((codex-terminal-backend 'app-server)
+        (agent-log--session-project "/tmp/project/")
+        launched)
+    (cl-letf (((symbol-function 'agent-log--read-sessions)
+               (lambda (_backend)
+                 '(("canonical" :project "/tmp/project"))))
+              ((symbol-function 'require) (lambda (&rest _) t))
+              ((symbol-function 'codex--app-server-launch-resume-session)
+               (lambda (_session-id) (setq launched t)))
+              ((symbol-function 'codex--start-subcommand)
+               (lambda (&rest _) (setq launched t))))
+      (should-error
+       (agent-log--resume-session agent-log-test--codex-backend "raw-child")
+       :type 'user-error)
+      (should-not launched))))
+
+(ert-deftest agent-log-test-codex-browse-open-resume/canonical-id ()
+  "Browses, opens, and resumes the exact ID returned by Codex."
+  (agent-log-test--with-temp-dir
+    (let* ((session-id "019df82b-8607-7231-a491-e57316e4fa02")
+           (project-dir (expand-file-name "onboarding" agent-log-test--dir))
+           (jsonl-path
+            (agent-log-test--write-file
+             (concat "sessions/2026/05/06/rollout-2026-05-06T00-00-00-"
+                     session-id ".jsonl")
+             (concat
+              "{\"timestamp\":\"2026-05-06T00:00:00Z\","
+              "\"type\":\"session_meta\",\"payload\":{\"id\":\""
+              session-id "\",\"cwd\":\"" project-dir
+              "\",\"timestamp\":\"2026-05-06T00:00:00Z\","
+              "\"source\":\"vscode\"}}\n"
+              "{\"timestamp\":\"2026-05-06T00:00:01Z\","
+              "\"type\":\"response_item\",\"payload\":{\"type\":\"message\","
+              "\"role\":\"user\",\"content\":[{\"type\":\"input_text\","
+              "\"text\":\"Actual prompt\"}]}}\n")))
+           (backend
+            (agent-log--make-codex
+             :name "Codex"
+             :key 'codex
+             :directory agent-log-test--dir
+             :rendered-directory (expand-file-name "rendered"
+                                                   agent-log-test--dir)))
+           (thread
+            `((id . ,session-id)
+              (path . ,jsonl-path)
+              (preview . "Actual prompt")
+              (cwd . ,project-dir)
+              (createdAt . 1778025600)
+              (updatedAt . 1778025700)
+              (source . "vscode")))
+           (agent-log-rendered-directory
+            (expand-file-name "rendered" agent-log-test--dir))
+           (agent-log-group-by-project t)
+           (agent-log-auto-summarize-sessions nil)
+           (codex-terminal-backend 'app-server)
+           (original-require (symbol-function 'require))
+           opened-buffer
+           launched)
+      (make-directory project-dir t)
+      (unwind-protect
+          (cl-letf (((symbol-function 'agent-log--active-backend-instances)
+                     (lambda () (list backend)))
+                    ((symbol-function 'agent-log-codex--thread-list)
+                     (lambda (_backend) (list thread)))
+                    ((symbol-function 'agent-log--completing-read)
+                     (lambda (_prompt collection)
+                       (if (consp (car collection))
+                           (caar collection)
+                         (car collection))))
+                    ((symbol-function 'pop-to-buffer)
+                     (lambda (buffer &rest _)
+                       (setq opened-buffer buffer)
+                       (set-buffer buffer)))
+                    ((symbol-function 'require)
+                     (lambda (feature &optional _filename _noerror)
+                       (if (eq feature 'codex)
+                           t
+                         (funcall original-require feature nil t))))
+                    ((symbol-function 'agent-log--active-session-ids)
+                     (lambda (_backend) nil))
+                    ((symbol-function 'codex--app-server-launch-resume-session)
+                     (lambda (actual-id) (setq launched actual-id))))
+            (agent-log-browse-sessions)
+            (should (buffer-live-p opened-buffer))
+            (should (equal agent-log--session-id session-id))
+            (agent-log-resume-session)
+            (should (equal launched session-id)))
+        (when (buffer-live-p opened-buffer)
+          (kill-buffer opened-buffer))))))
 
 (ert-deftest agent-log-test-codex-find-session-for-project/top-level-only ()
   "Ignores subagents when resolving the session for a live terminal buffer."
@@ -3327,6 +3965,30 @@ session."
     (should (equal (car (agent-log-codex--find-session-for-project
                          dir sessions t))
                    "parent"))))
+
+(ert-deftest agent-log-test-codex-source-user-visible/noninteractive-retires ()
+  "Known exec and subagent metadata authorize rendered-file retirement."
+  (agent-log-test--with-temp-dir
+    (let ((backend
+           (agent-log--make-codex
+            :name "Codex" :key 'codex
+            :directory agent-log-test--dir)))
+      (dolist (source '("cli" "future-kind"))
+        (should-not
+         (agent-log-codex--session-meta-noninteractive-p
+          (list :source source))))
+      (should
+       (agent-log-codex--session-meta-noninteractive-p
+        '(:source "exec")))
+      (should
+       (agent-log-codex--session-meta-noninteractive-p
+        '(:source (:subagent (:other "guardian")))))
+      (should
+       (agent-log-codex--session-meta-noninteractive-p
+        '(:source "unknown" :thread_source "subagent")))
+      (let ((unreadable (expand-file-name "missing.jsonl"
+                                          agent-log-test--dir)))
+        (should (agent-log--source-user-visible-p backend unreadable))))))
 
 (ert-deftest agent-log-test-codex-find-session-for-project/process-start ()
   "Uses process start time to distinguish top-level sessions in one project."
@@ -3807,6 +4469,14 @@ session."
   (let ((entry (list :message (list :content "<turn_aborted>interrupted</turn_aborted>"))))
     (should (agent-log--system-entry-p agent-log-test--codex-backend entry))))
 
+(ert-deftest agent-log-test-codex-system-entry-p/recommended-plugins ()
+  "Detects the injected <recommended_plugins> block."
+  (let ((entry
+         (list :message
+               (list :content
+                     "<recommended_plugins>Here is a list...</recommended_plugins>"))))
+    (should (agent-log--system-entry-p agent-log-test--codex-backend entry))))
+
 (ert-deftest agent-log-test-codex-system-entry-p/normal-message ()
   "Does not flag normal user messages as system."
   (let ((entry (list :message (list :content "Fix the bug"))))
@@ -3864,6 +4534,20 @@ session."
                                                          :text "Real question")))))))
     (should (equal (agent-log--first-user-text agent-log-test--codex-backend entries)
                    "Real question"))))
+
+(ert-deftest agent-log-test-codex-first-user-text/skips-recommended-plugins ()
+  "Does not use injected plugin recommendations as a title."
+  (let* ((entries
+          (list
+           (list :type "user"
+                 :message
+                 (list :content
+                       "<recommended_plugins>Here is a list...</recommended_plugins>"))
+           (list :type "user"
+                 :message (list :content "The actual user prompt")))))
+    (should
+     (equal (agent-log--first-user-text agent-log-test--codex-backend entries)
+            "The actual user prompt"))))
 
 ;;;;;; Tool input summaries
 
@@ -3985,8 +4669,8 @@ session."
 
 ;;;;; Redaction
 
-(ert-deftest agent-log-test-redact-rebuild-all/includes-internal-sessions ()
-  "Rebuilds internal renderings after clearing the complete archive."
+(ert-deftest agent-log-test-redact-rebuild-all/uses-canonical-sessions ()
+  "Rebuilds only sessions in each provider's canonical catalog."
   (let (cleared sync-args)
     (cl-letf (((symbol-function 'yes-or-no-p) (lambda (&rest _) t))
               ((symbol-function 'agent-log-redact--clear-rendered-directory)
@@ -3996,7 +4680,7 @@ session."
       (agent-log-redact-rebuild-all)
       (should cleared)
       (should (functionp (car sync-args)))
-      (should (eq (cadr sync-args) t)))))
+      (should-not (cadr sync-args)))))
 
 (ert-deftest agent-log-test-redact-jsonl-line/preserves-opaque-values ()
   "Leaves opaque JSON values byte-identical when only they match."

@@ -235,6 +235,8 @@ The user option @code{agent-log-directory} specifies the root directory of the C
 
 The user option @code{agent-log-rendered-directory} specifies the directory where rendered Markdown files are stored.  Each project gets its own subdirectory, and each session is rendered as a dated @samp{.md} file within it (@ref{Sync and rendering}).  The default value is @samp{~/.claude/rendered}.  You might change this if you want rendered files to live outside the default configuration directory, for example on a path indexed by a desktop search tool.
 
+For Codex, Agent Log follows the same account-aware home selected by the installed Agent integration.  If that integration is unavailable, it uses @samp{CODEX_HOME} and then the Codex backend's configured directory.  Session discovery, transcript lookup, and resume all use this same resolved home.
+
 @node Display of thinking and tool sections
 @section Display of thinking and tool sections
 
@@ -299,7 +301,7 @@ The user option @code{agent-log-session-sort-key} controls which timestamp defin
 
 The user option @code{agent-log-ignored-project-regexps} is a list of regular expressions; any session whose working directory matches one of them is omitted from the browser, @code{agent-log-open-latest}, and AI search.  The default excludes sessions run under the system temporary directory (@samp{/tmp} and @samp{/private/tmp}), which is where throwaway scratch sessions accumulate — for example when repeatedly launching a coding agent in disposable directories to test it.  Ignored sessions are not deleted: they remain on disk and can still be opened directly with @code{agent-log-open-file} or @code{agent-log-open-session}.  Add your own patterns to hide other transient or uninteresting locations.
 
-The user option @code{agent-log-slug-max-length} sets the maximum length of the slug portion of rendered filenames.  The slug is derived from the first user message and appears after the date in the filename (e.g., @samp{2026-02-22_11-56_redesign-agent-log-package.md}).  The default value is @code{50}.
+The user option @code{agent-log-slug-max-length} sets the maximum length of the slug portion of rendered filenames.  The slug is derived from the first user message and appears after the UTC date in the filename.  The backend and full session ID follow the slug so repeated opening text cannot collapse distinct sessions (e.g., @samp{2026-02-22_11-56_redesign-agent-log-package--codex--019c...md}).  The default value is @code{50}.
 
 @node Live updates
 @section Live updates
@@ -373,7 +375,7 @@ In @code{dollars} mode, cost estimation requires the @samp{gptel-plus} package. 
 @findex agent-log-open-session
 @findex agent-log-open-current-session
 
-The command @code{agent-log-browse-sessions} is the primary entry point for exploring your session history.  It reads @samp{history.jsonl}, resolves each session to its JSONL file on disk, and presents the results in a @code{completing-read} prompt.  Each candidate is formatted as:
+The command @code{agent-log-browse-sessions} is the primary entry point for exploring your session history.  It asks each active backend for its canonical session catalog, resolves each session to its exact JSONL file, and presents the results in a @code{completing-read} prompt.  For Codex, the catalog comes from app-server @samp{thread/list} with the same source-kind, provider, archive, and working-directory identity used by native Resume; Agent Log does not infer interactive sessions by scanning every rollout file.  Each candidate is formatted as:
 
 @example
 [icon] 2026-02-22 14:06  my-project  42k  "Fix the authentication bug in..."
@@ -383,7 +385,7 @@ Each candidate is prefixed with a backend-specific icon so you can tell at a gla
 
 When @code{agent-log-group-by-project} is non-@code{nil} (the default), the command first prompts for a project, then for a session within that project (@ref{Session browser options}).  Sessions are sorted most-recent-first using @code{agent-log-session-sort-key}.  If AI summaries have been generated for any sessions (@ref{Summary generation}), the summary replaces the quoted first message in the candidate display.
 
-Ordinary archive-wide commands exclude internal Codex subagent transcripts, including spawned workers, nested workers, and permission guardians.  This policy applies to the session browser, @code{agent-log-open-latest}, bulk synchronization, archive summarization, background summary sweeps, and AI search.  The transcript files are not deleted: an internal session can still be opened explicitly with @code{agent-log-open-file} or @code{agent-log-open-session}.
+Ordinary archive-wide commands use that canonical catalog, so Codex subagents, permission guardians, non-interactive execution threads, archived threads, and other rollouts omitted by native Resume do not appear as sessions.  This policy applies to the session browser, @code{agent-log-open-latest}, bulk synchronization, archive summarization, background summary sweeps, and AI search.  Reconciliation may retire obsolete Agent Log-generated Markdown for positively identified non-interactive rollouts, but it never deletes Codex source transcripts.
 
 Within a single browse run, source file size and modification-time metadata is cached per session.  This keeps flat browsing and modification-time sorting responsive even when the archive contains many sessions.
 
@@ -414,11 +416,11 @@ If the rendered directory does not yet exist, the command creates it.
 @findex agent-log-sync-sessions
 @findex agent-log-refresh
 
-By default, rendering is lazy: sessions are rendered to @samp{.md} files on first access via @code{agent-log-browse-sessions} or @code{agent-log-open-file}.  The package maintains an index file (@samp{_index.el}) in the rendered directory that maps session IDs to rendered file paths and JSONL file sizes.  When you access a session, the package compares the current JSONL file size and the rendered path implied by the current metadata against the indexed values; if either differs, the session is re-rendered.  This lets placeholder paths from newly-created sessions update once the session metadata or first user message provides a better date or title.
+By default, rendering is lazy: sessions are rendered to @samp{.md} files on first access via @code{agent-log-browse-sessions} or @code{agent-log-open-file}.  The package maintains an index file (@samp{_index.el}) in the rendered directory that maps session IDs to rendered file paths and JSONL file sizes.  Rendered ownership is checked using the backend, full session ID, and exact source path.  When you access a session, the package compares the current JSONL file size and canonical rendered path against the indexed values; if either differs, the session is re-rendered.
 
 Rendered output never contains NUL characters: any NUL that appears in conversation content (for example, in captured terminal output from a build tool) is replaced with the visible @samp{␀} symbol.  A single NUL byte would otherwise make Emacs visit the rendered file as binary, breaking display of non-ASCII characters and crashing integrations that serialize the buffer content as JSON@.
 
-The command @code{agent-log-sync-sessions} renders all ordinary, non-ignored sessions that are unrendered or stale.  It processes sessions one at a time using @code{run-with-timer} to avoid blocking Emacs.  A progress message reports how many sessions were rendered.
+The command @code{agent-log-sync-sessions} renders all ordinary, non-ignored sessions that are unrendered or stale.  It processes sessions one at a time using @code{run-with-timer} to avoid blocking Emacs, then commits the shared index once.  Only after every canonical artifact and index entry is synchronized does it reconcile duplicate and positively identified non-interactive generated Markdown.  Ambiguous or unmanaged files are preserved; retired generated files go to the operating system Trash.  The completion callback reports a structured success or failure result, including the stage that failed.
 
 The command @code{agent-log-refresh} re-renders the session displayed in the current buffer from its JSONL source.  This is useful if the rendered file appears stale or if you have changed display settings such as @code{agent-log-show-thinking} or @code{agent-log-show-tools} (@ref{Display of thinking and tool sections}).  The keybinding is @samp{g} in @code{agent-log-mode}.
 
@@ -537,7 +539,7 @@ When @code{gptel-plus} is available, the combined dollar cost of both stages is 
 
 @findex agent-log-resume-session
 
-The command @code{agent-log-resume-session} resumes the session displayed in the current buffer in the coding agent.  The command extracts the session ID from the buffer (either from the buffer-local variable or from the front-matter comment) and dispatches to the buffer's backend via the @code{agent-log--resume-session} generic function.  If a rendered Markdown file was opened directly rather than through @code{agent-log}, the command also reads the front-matter source path to recover the backend and source JSONL file before resuming.  For Claude Code sessions, this requires the @samp{claude-code} package and passes the session ID with the @samp{--resume} flag, starting in the session's project directory when possible.  When the project path stored in Claude's transcript or @samp{history.jsonl} no longer exists, the backend falls back to the encoded project directory under @samp{~/.claude/projects/} and uses the matching existing project directory.  The project directory is normalized with a trailing slash to match the format returned by @code{claude-code--directory}, ensuring that buffer names, concurrent session detection, and modeline display all work correctly.  For Codex sessions, this requires the @samp{codex} package and starts in the session's project directory when possible.  When @code{codex-terminal-backend} is @code{app-server} and the installed @samp{codex} package supports app-server resume-by-id, @samp{agent-log} opens the exact session through the native app-server renderer.  Otherwise it falls back to the Codex CLI resume subcommand, which uses the configured terminal backend.  The keybinding is @samp{r} in @code{agent-log-mode}.
+The command @code{agent-log-resume-session} resumes the session displayed in the current buffer in the coding agent.  The command extracts the session ID from the buffer (either from the buffer-local variable or from the front-matter comment) and dispatches to the buffer's backend via the @code{agent-log--resume-session} generic function.  If a rendered Markdown file was opened directly rather than through @code{agent-log}, the command also reads the front-matter source path to recover the backend and source JSONL file before resuming.  For Claude Code sessions, this requires the @samp{claude-code} package and passes the session ID with the @samp{--resume} flag, starting in the session's project directory when possible.  When the project path stored in Claude's transcript or @samp{history.jsonl} no longer exists, the backend falls back to the encoded project directory under @samp{~/.claude/projects/} and uses the matching existing project directory.  The project directory is normalized with a trailing slash to match the format returned by @code{claude-code--directory}, ensuring that buffer names, concurrent session detection, and modeline display all work correctly.  For Codex sessions, this requires the @samp{codex} package.  Agent Log first verifies the ID against the current canonical catalog, then passes both that ID and the catalog's exact transcript path to app-server @samp{thread/resume}.  It does not rescan rollouts or fall back to another same-ID file if the canonical path disappears.  The CLI backend uses @samp{codex resume} for the same catalog-validated ID@.  The keybinding is @samp{r} in @code{agent-log-mode}.
 
 @node Secret redaction
 @chapter Secret redaction
@@ -584,7 +586,7 @@ Neither layer is a substitute for preventing secrets from entering the transcrip
 @section Commands
 
 @findex agent-log-redact-rebuild-all
-@code{agent-log-redact-rebuild-all} deletes every rendered @samp{.md} file under @code{agent-log-rendered-directory}, clears the index, and re-runs @code{agent-log-sync-sessions} so every non-ignored session, including internal Codex transcripts, is re-rendered through the redactor.  Use after enabling redaction or after changing the pattern list.
+@code{agent-log-redact-rebuild-all} deletes every rendered @samp{.md} file under @code{agent-log-rendered-directory}, clears the index, and re-runs @code{agent-log-sync-sessions} so every non-ignored canonical session is re-rendered through the redactor.  Use after enabling redaction or after changing the pattern list.
 
 @findex agent-log-redact-existing-in-place
 @code{agent-log-redact-existing-in-place} is a faster alternative for the first-time migration.  It iterates every already-rendered @samp{.md} file, runs its contents through @code{agent-log-redact-text}, and rewrites only files whose content actually changed — no JSONL re-parsing.  Much faster than @code{agent-log-redact-rebuild-all} on large archives.  Sessions whose JSONL has grown since their last render are not refreshed by this command; run @code{agent-log-sync-sessions} afterward to pick up any new content through the advice-based redactor.
@@ -760,18 +762,9 @@ The encoded path replaces @samp{/}, @samp{.}, and space characters with @samp{-}
 @node Codex
 @subsection Codex
 
-The Codex backend reads from:
+The Codex backend obtains session identity from Codex app-server @samp{thread/list} and reads conversation content from the exact rollout path returned for each thread.  Rollouts normally live under @samp{~/.codex/sessions/YYYY/MM/DD/rollout-<date>-<uuid>.jsonl}, or under the equivalent @samp{sessions/} tree in the active account's resolved @samp{CODEX_HOME}.
 
-@enumerate
-@item
-@samp{~/.codex/history.jsonl}: a global index with one line per user message, containing the session ID, a Unix epoch timestamp, and the message text.
-@item
-@samp{~/.codex/sessions/YYYY/MM/DD/rollout-<date>-<uuid>.jsonl}: one file per session, organized by date in a nested directory tree.
-@end enumerate
-
-Each line in a Codex session file is an envelope @code{@{timestamp, type, payload@}}.  The @code{type} field determines how the entry is processed: @code{session_meta} entries provide session metadata (working directory, model, CLI version, and source); @code{response_item} entries carry the conversation content (user and assistant messages, function calls and their outputs, web searches, reasoning blocks); @code{event_msg} and @code{turn_context} entries are internal bookkeeping and are skipped during rendering.  The normalization step converts this envelope format to the canonical flat representation used by the rendering pipeline.  The backend preserves the @samp{source} metadata while discovering sessions so that ordinary archive-wide commands can exclude child sessions and permission guardians without discarding their transcripts.  Internal sessions remain available through explicit file or session-ID lookup, while @code{agent-log-open-current-session} also ignores them when resolving a top-level live terminal buffer (@ref{Session browsing}).
-
-Because Codex stores project and source metadata in each transcript rather than in @samp{history.jsonl}, the backend caches discovered session metadata in @samp{~/.codex/.agent-log-session-metadata-cache.el}.  Cache entries are reused while the transcript path, size, and modification time are unchanged, so archive-wide commands can list sessions without rereading every transcript prefix on each run.  If a transcript changes, only that session's metadata is refreshed from its @samp{session_meta} line.
+Each line in a Codex session file is an envelope @code{@{timestamp, type, payload@}}.  The @code{type} field determines how the entry is processed: @code{session_meta} entries provide session metadata (working directory, model, CLI version, and source); @code{response_item} entries carry the conversation content (user and assistant messages, function calls and their outputs, web searches, reasoning blocks); @code{event_msg} and @code{turn_context} entries are internal bookkeeping and are skipped during rendering.  The normalization step converts this envelope format to the canonical flat representation used by the rendering pipeline.  Agent Log paginates the native catalog, deduplicates by Codex thread ID, and uses the returned project, creation time, preview, and exact path rather than reconstructing identity from rollout metadata.
 
 @node Rendered directory structure
 @section Rendered directory structure
@@ -781,14 +774,14 @@ The rendered directory mirrors the project structure:
 @example
 ~/.claude/rendered/
   tango-wiki/
-    2026-02-04_14-06_fix-the-authentication-bug.md
-    2026-02-05_09-22_refactor-database-schema.md
+    2026-02-04_14-06_fix-the-authentication-bug--codex--019c....md
+    2026-02-05_09-22_refactor-database-schema--claude-code--8d3e....md
   dotfiles/
-    2026-02-22_11-56_redesign-agent-log-package.md
+    2026-02-22_11-56_redesign-agent-log-package--codex--019d....md
   _index.el
 @end example
 
-Each @samp{.md} file contains HTML-comment front matter (session ID, source path, rendered timestamp, JSONL size) followed by the full conversation rendered as Markdown.  The @samp{_index.el} file is a hash table mapping session IDs to metadata (rendered file path, JSONL size, and optionally a summary plus the conversation fingerprint and JSONL file state it describes).  Summary commands use that metadata to distinguish current summaries, sessions explicitly marked as having no conversation, older fingerprinted summaries that can be validated and upgraded without another LLM request, no-fingerprint summaries that must be refreshed once, and stale summaries that need to be regenerated.
+Each filename includes UTC creation time, a display slug, the backend, and the full session ID@.  Each @samp{.md} file contains HTML-comment front matter (session ID, backend, exact source path, rendered timestamp, JSONL size) followed by the full conversation rendered as Markdown.  The @samp{_index.el} file is a hash table mapping session IDs to metadata (rendered file path, JSONL size, and optionally a summary plus the conversation fingerprint and JSONL file state it describes).  Summary commands use that metadata to distinguish current summaries, sessions explicitly marked as having no conversation, older fingerprinted summaries that can be validated and upgraded without another LLM request, no-fingerprint summaries that must be refreshed once, and stale summaries that need to be regenerated.
 
 The maintenance command @code{agent-log-rendered-index-audit} reports those states separately, including source-present missing summaries, rendered-only historical entries whose original JSONL source is gone, stale index rows with no rendered file, remaining @samp{unknown} folder entries, and known test fixture rows.  @code{agent-log-clean-test-index-entries} removes known stale fixture IDs from the real rendered index when they have no existing rendered file.  @code{agent-log-recover-rendered-only-summaries} can generate summaries from rendered Markdown for historical entries whose JSONL source has disappeared; these summaries are marked with @code{:summary-source :rendered-markdown} and @code{:summary-recovered-from-rendered t} so they are not confused with canonical JSONL-backed summaries.
 

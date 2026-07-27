@@ -29,9 +29,9 @@
 ;; for reading sessions, parsing entries, and rendering conversations
 ;; from Codex's JSONL format.
 ;;
-;; Codex stores session data in `~/.codex/':
-;;   - `history.jsonl' — one line per user message: {session_id, ts, text}
-;;   - `sessions/YYYY/MM/DD/rollout-DATE-SESSION_ID.jsonl' — full transcripts
+;; Codex exposes the interactive session catalog through app-server
+;; `thread/list'.  Each catalog entry names the exact full transcript,
+;; normally under `CODEX_HOME/sessions/YYYY/MM/DD/'.
 ;;
 ;; Each transcript line is an envelope: {timestamp, type, payload}.
 ;; Payload types include session_meta, turn_context, event_msg, and
@@ -42,18 +42,28 @@
 ;;; Code:
 
 (require 'cl-lib)
+(require 'json)
 (require 'agent-log)
 
 (declare-function codex--start-subcommand "codex" (subcommand &optional args extra-args))
 (declare-function codex--app-server-launch-resume-session "codex-app-server" (session-id))
+(declare-function codex--app-server-send-resume "codex-app-server" (method thread))
+(declare-function codex--app-server-insert-status "codex-app-server" (text))
+(declare-function codex--cache-session-transcript "codex" (session-id file))
 (declare-function codex--buffer-p "codex" (buffer))
 (declare-function codex--buffer-directory-for "codex" (buffer))
+(declare-function agent-codex--effective-codex-home "agent-codex" ())
 (defvar agent-log-codex--instance)
 (defvar codex-terminal-backend)
+(defvar codex-program "codex")
 (defvar codex-event-hook nil
   "Hook run for Codex lifecycle events.")
 (defvar codex-start-hook nil
   "Hook run when a Codex session starts.")
+
+(defvar agent-log-codex--exact-resume-paths
+  (make-hash-table :test #'equal)
+  "Catalog transcript paths pending an Agent Log app-server resume.")
 
 (defvar-local agent-log-codex--buffer-session-id nil
   "Codex session ID last reported for the current buffer.")
@@ -77,6 +87,7 @@
       (or (seq "<"
                (or "environment_context"
                    "permissions"
+                   "recommended_plugins"
                    "turn_aborted"
                    "collaboration_mode"
                    "INSTRUCTIONS")
@@ -97,141 +108,215 @@
 (defconst agent-log-codex--session-start-match-window-ms (* 5 60 1000)
   "Maximum launch-time delta for matching a Codex process to a session.")
 
+(defcustom agent-log-codex-app-server-timeout 15
+  "Seconds to wait for a Codex app-server catalog response."
+  :type 'number
+  :group 'agent-log)
+
+(defconst agent-log-codex--thread-list-page-size 1000
+  "Number of canonical Codex threads requested per catalog page.")
+
+(defun agent-log-codex--effective-home (backend)
+  "Return the Codex home whose native registry BACKEND should mirror.
+When the user's account-aware Agent integration is loaded, use the
+same resolved account home it supplies to new Codex processes.
+Otherwise honor `CODEX_HOME' and finally BACKEND's configured home."
+  (file-name-as-directory
+   (expand-file-name
+    (or (and (fboundp 'agent-codex--effective-codex-home)
+             (agent-codex--effective-codex-home))
+        (getenv "CODEX_HOME")
+        (agent-log-backend-directory backend)))))
+
+(cl-defmethod agent-log--backend-source-directories
+  ((backend agent-log-codex))
+  "Return the effective Codex transcript root for BACKEND."
+  (list (expand-file-name "sessions"
+                          (agent-log-codex--effective-home backend))))
+
 ;;;;; Generic method implementations
 
 ;;;;;; Session discovery
 
 (cl-defmethod agent-log--read-sessions ((backend agent-log-codex))
-  "Parse `history.jsonl' and session files, return alist of sessions.
+  "Read Codex's canonical interactive thread catalog for BACKEND.
 Each value is a plist (:display :timestamp :project :file :file-dir
 :backend :source)."
-  (let* ((history-file (expand-file-name "history.jsonl"
-                                         (agent-log-backend-directory backend)))
-         (file-index (agent-log--build-session-file-index backend))
-         (history (make-hash-table :test #'equal))
-         (metadata-cache (agent-log-codex--read-metadata-cache backend))
-         metadata-cache-dirty
-         result)
-    ;; Parse history.jsonl to get first-message text and earliest timestamp.
-    (when (file-exists-p history-file)
-      (dolist (entry (agent-log--parse-jsonl-file history-file))
-        (let ((sid (plist-get entry :session_id))
-              (ts (plist-get entry :ts))
-              (text (plist-get entry :text)))
-          (when sid
-            (let ((existing (gethash sid history)))
-              (if existing
-                  ;; Keep earliest timestamp.
-                  (when (and (numberp ts)
-                             (< ts (plist-get existing :ts)))
-                    (puthash sid (list :ts ts
-                                      :text (plist-get existing :text))
-                             history))
-                (puthash sid (list :ts ts :text (or text "")) history)))))))
-    ;; For each session file, build metadata.
-    (maphash
-     (lambda (sid file)
-       (let* ((hist (gethash sid history))
-              (ts-sec (when hist (plist-get hist :ts)))
-              (ts-ms (when (numberp ts-sec) (* ts-sec 1000)))
-              (display (when hist (plist-get hist :text)))
-              (file-state (agent-log-codex--session-file-state file))
-              (session-meta
-               (or (agent-log-codex--metadata-cache-lookup
-                    metadata-cache sid file file-state)
-                   (let ((entry (agent-log-codex--metadata-cache-entry
-                                 file file-state)))
-                     (puthash sid entry metadata-cache)
-                     (setq metadata-cache-dirty t)
-                     entry)))
-              (cwd (or (plist-get session-meta :cwd) ""))
-              ;; Fall back to session_meta timestamp if history has none.
-              (ts-ms (or ts-ms
-                         (agent-log--iso-to-epoch-ms
-                          (plist-get session-meta :timestamp))))
-              (display (or display "")))
-         (push (list sid
-                     :display display
-                     :timestamp ts-ms
-                     :project cwd
-                     :file-dir (file-name-directory file)
-                     :file file
-                     :backend backend
-                     :source-file-state file-state
-                     :source (plist-get session-meta :source))
-               result)))
-     file-index)
-    (when metadata-cache-dirty
-      (agent-log-codex--write-metadata-cache backend metadata-cache))
-    (sort result (lambda (a b)
-                   (agent-log--timestamp>
-                    (plist-get (cdr a) :timestamp)
-                    (plist-get (cdr b) :timestamp))))))
+  (sort
+   (delq nil
+         (mapcar (lambda (thread)
+                   (agent-log-codex--thread-session backend thread))
+                 (agent-log-codex--thread-list backend)))
+   (lambda (a b)
+     (agent-log--timestamp>
+      (plist-get (cdr a) :timestamp)
+      (plist-get (cdr b) :timestamp)))))
 
-(defconst agent-log-codex--metadata-cache-file
-  ".agent-log-session-metadata-cache.el"
-  "Filename for the Codex session metadata cache.")
+(defun agent-log-codex--thread-session (backend thread)
+  "Convert canonical Codex THREAD into an Agent Log session for BACKEND."
+  (let ((session-id (alist-get 'id thread))
+        (file (alist-get 'path thread))
+        (created-at (alist-get 'createdAt thread)))
+    (when (and (stringp session-id)
+               (stringp file)
+               (not (string-empty-p file)))
+      (setq file (expand-file-name file))
+      (list session-id
+            :display (or (alist-get 'preview thread) "")
+            :timestamp (and (numberp created-at) (* created-at 1000))
+            :project (or (alist-get 'cwd thread) "")
+            :file-dir (file-name-directory file)
+            :file file
+            :backend backend
+            :source-file-state
+            (and (file-exists-p file)
+                 (agent-log-codex--session-file-state file))
+            :source (alist-get 'source thread)
+            :thread-source (alist-get 'threadSource thread)))))
 
-(defun agent-log-codex--metadata-cache-path (backend)
-  "Return BACKEND's Codex session metadata cache path."
-  (expand-file-name agent-log-codex--metadata-cache-file
-                    (agent-log-backend-directory backend)))
+(defun agent-log-codex--thread-list (backend)
+  "Return every canonical interactive Codex thread for BACKEND.
+This calls Codex's app-server `thread/list' with the same source and
+archive filters used by native Resume."
+  (let* ((home (agent-log-codex--effective-home backend))
+         (process-environment
+          (cons (concat "CODEX_HOME=" (directory-file-name home))
+                (cl-remove-if
+                 (lambda (entry)
+                   (string-prefix-p "CODEX_HOME=" entry))
+                 process-environment)))
+         (stderr-buffer (generate-new-buffer " *agent-log-codex-stderr*"))
+         (process
+          (make-process
+           :name "agent-log-codex-catalog"
+           :command (list codex-program "app-server" "--stdio")
+           :connection-type 'pipe
+           :coding 'utf-8-emacs
+           :stderr stderr-buffer
+           :noquery t
+           :filter #'agent-log-codex--catalog-process-filter))
+         (request-id 0)
+         (seen-ids (make-hash-table :test #'equal))
+         (seen-cursors (make-hash-table :test #'equal))
+         model-provider
+         cursor
+         threads)
+    (unwind-protect
+        (progn
+          (agent-log-codex--catalog-request
+           process (cl-incf request-id) "initialize"
+           '((clientInfo
+              (name . "agent-log")
+              (title . "Agent Log")
+              (version . "0.3.0"))))
+          (let* ((config-result
+                  (agent-log-codex--catalog-request
+                   process (cl-incf request-id) "config/read"
+                   `((cwd . ,(expand-file-name default-directory))
+                     (includeLayers . :json-false))))
+                 (config (alist-get 'config config-result)))
+            (setq model-provider (alist-get 'model_provider config)))
+          (let (done)
+            (while (not done)
+              (let* ((params
+                      `((limit . ,agent-log-codex--thread-list-page-size)
+                        (sortKey . "updated_at")
+                        (sortDirection . "desc")
+                        ,@(when (stringp model-provider)
+                            `((modelProviders
+                               . ,(vector model-provider))))
+                        (sourceKinds . ["cli" "vscode"])
+                        (archived . :json-false)
+                        (useStateDbOnly . :json-false)
+                        ,@(when cursor `((cursor . ,cursor)))))
+                     (result
+                      (agent-log-codex--catalog-request
+                       process (cl-incf request-id) "thread/list" params)))
+                (dolist (thread (append (alist-get 'data result) nil))
+                  (let ((id (alist-get 'id thread)))
+                    (unless (and (stringp id) (gethash id seen-ids))
+                      (when (stringp id)
+                        (puthash id t seen-ids))
+                      (setq threads (nconc threads (list thread))))))
+                (let ((next-cursor (alist-get 'nextCursor result)))
+                  (cond
+                   ((not (stringp next-cursor))
+                    (setq done t))
+                   ((gethash next-cursor seen-cursors)
+                    (error "Codex thread catalog repeated cursor %s"
+                           next-cursor))
+                   (t
+                    (puthash next-cursor t seen-cursors)
+                    (setq cursor next-cursor))))))
+          threads))
+      (agent-log-codex--stop-catalog-process process stderr-buffer))))
 
-(defun agent-log-codex--read-metadata-cache (backend)
-  "Read BACKEND's Codex session metadata cache."
-  (let ((file (agent-log-codex--metadata-cache-path backend)))
-    (condition-case err
-        (if (file-exists-p file)
-            (let ((obj (with-temp-buffer
-                         (let ((coding-system-for-read 'utf-8-emacs-unix))
-                           (insert-file-contents file))
-                         (read (current-buffer)))))
-              (if (hash-table-p obj)
-                  obj
-                (make-hash-table :test #'equal)))
-          (make-hash-table :test #'equal))
-      (error
-       (message "agent-log: failed to read Codex metadata cache: %s"
-                (error-message-string err))
-       (make-hash-table :test #'equal)))))
+(defun agent-log-codex--catalog-process-filter (process output)
+  "Accumulate and decode newline-delimited app-server OUTPUT from PROCESS."
+  (let ((pending (concat (or (process-get process 'pending-output) "")
+                         output))
+        line)
+    (while (string-match "\n" pending)
+      (setq line (substring pending 0 (match-beginning 0))
+            pending (substring pending (match-end 0)))
+      (unless (string-empty-p line)
+        (condition-case err
+            (process-put
+             process 'messages
+             (nconc (process-get process 'messages)
+                    (list
+                     (json-parse-string
+                      line :object-type 'alist :array-type 'list
+                      :null-object nil :false-object nil))))
+          (error
+           (process-put process 'protocol-error
+                        (error-message-string err))))))
+    (process-put process 'pending-output pending)))
 
-(defun agent-log-codex--write-metadata-cache (backend cache)
-  "Write BACKEND's Codex session metadata CACHE."
-  (let* ((file (agent-log-codex--metadata-cache-path backend))
-         (dir (file-name-directory file)))
-    (make-directory dir t)
-    (let ((tmp (make-temp-file (expand-file-name
-                                ".agent-log-session-metadata-cache-" dir)
-                               nil ".el")))
-      (condition-case err
-          (progn
-            (let ((coding-system-for-write 'utf-8-emacs-unix))
-              (with-temp-file tmp
-                (let ((print-level nil)
-                      (print-length nil))
-                  (prin1 cache (current-buffer))
-                  (insert "\n"))))
-            (rename-file tmp file t))
-        (error
-         (ignore-errors (delete-file tmp))
-         (message "agent-log: failed to write Codex metadata cache: %s"
-                  (error-message-string err)))))))
+(defun agent-log-codex--catalog-request (process id method params)
+  "Send METHOD with PARAMS and ID to catalog PROCESS, returning its result."
+  (process-send-string
+   process
+   (concat
+    (json-encode `((id . ,id) (method . ,method) (params . ,params)))
+    "\n"))
+  (let ((deadline (+ (float-time) agent-log-codex-app-server-timeout))
+        response)
+    (while (and (not response)
+                (process-live-p process)
+                (< (float-time) deadline))
+      (setq response
+            (seq-find (lambda (message)
+                        (equal (alist-get 'id message) id))
+                      (process-get process 'messages)))
+      (unless response
+        (accept-process-output process 0.05)))
+    (when-let* ((protocol-error (process-get process 'protocol-error)))
+      (error "Codex app-server returned malformed catalog data: %s"
+             protocol-error))
+    (unless response
+      (error "Codex app-server did not answer %s within %.1f seconds"
+             method agent-log-codex-app-server-timeout))
+    (when-let* ((rpc-error (alist-get 'error response)))
+      (error "Codex %s failed: %s"
+             method (or (alist-get 'message rpc-error) rpc-error)))
+    (alist-get 'result response)))
 
-(defun agent-log-codex--metadata-cache-lookup (cache sid file file-state)
-  "Return cached metadata for SID when FILE and FILE-STATE still match CACHE."
-  (when-let* ((entry (gethash sid cache))
-              ((equal (plist-get entry :file) (expand-file-name file)))
-              ((equal (plist-get entry :source-file-state) file-state)))
-    entry))
-
-(defun agent-log-codex--metadata-cache-entry (file file-state)
-  "Build a Codex metadata cache entry for FILE with FILE-STATE."
-  (let ((session-meta (agent-log-codex--read-session-meta file)))
-    (list :file (expand-file-name file)
-          :source-file-state file-state
-          :cwd (or (plist-get session-meta :cwd) "")
-          :timestamp (plist-get session-meta :timestamp)
-          :source (plist-get session-meta :source))))
+(defun agent-log-codex--stop-catalog-process (process stderr-buffer)
+  "Stop catalog PROCESS and dispose of its STDERR-BUFFER."
+  (when (process-live-p process)
+    (set-process-query-on-exit-flag process nil)
+    (delete-process process))
+  (when (buffer-live-p (process-buffer process))
+    (let ((kill-buffer-query-functions nil))
+      (kill-buffer (process-buffer process))))
+  (when (buffer-live-p stderr-buffer)
+    (when-let* ((stderr-process (get-buffer-process stderr-buffer)))
+      (set-process-query-on-exit-flag stderr-process nil)
+      (when (process-live-p stderr-process)
+        (delete-process stderr-process)))
+    (let ((kill-buffer-query-functions nil))
+      (kill-buffer stderr-buffer))))
 
 (defun agent-log-codex--session-file-state (file)
   "Return source file state for FILE."
@@ -241,8 +326,7 @@ Each value is a plist (:display :timestamp :project :file :file-dir
   "Build a hash table mapping session-id to JSONL file path.
 Scans the sessions directory tree."
   (let ((index (make-hash-table :test #'equal))
-        (sessions-dir (expand-file-name "sessions"
-                                        (agent-log-backend-directory backend))))
+        (sessions-dir (car (agent-log--backend-source-directories backend))))
     (when (file-directory-p sessions-dir)
       (dolist (file (directory-files-recursively sessions-dir "\\.jsonl\\'"))
         (when (string-match agent-log-codex--session-id-regexp file)
@@ -251,8 +335,7 @@ Scans the sessions directory tree."
 
 (cl-defmethod agent-log--find-session-file ((backend agent-log-codex) session-id)
   "Find the JSONL file for SESSION-ID under the sessions directory."
-  (let ((sessions-dir (expand-file-name "sessions"
-                                        (agent-log-backend-directory backend))))
+  (let ((sessions-dir (car (agent-log--backend-source-directories backend))))
     (when (file-directory-p sessions-dir)
       (cl-block nil
         (dolist (file (directory-files-recursively sessions-dir "\\.jsonl\\'"))
@@ -631,22 +714,73 @@ the same project and launch-time heuristic as
 
 ;;;;;; Resume session
 
-(cl-defmethod agent-log--resume-session ((_backend agent-log-codex) session-id)
+(defun agent-log-codex--exact-resume-advice (original session-id)
+  "Resume SESSION-ID at its exact Agent Log catalog path.
+ORIGINAL is Codex's ordinary ID-only app-server resume function.  Use
+it only for calls that did not originate in Agent Log."
+  (if-let* ((transcript
+             (gethash session-id agent-log-codex--exact-resume-paths)))
+      (progn
+        (remhash session-id agent-log-codex--exact-resume-paths)
+        (if (file-readable-p transcript)
+            (codex--app-server-send-resume
+             "thread/resume"
+             `((id . ,session-id) (path . ,transcript)))
+          (codex--app-server-insert-status
+           (format "Codex transcript disappeared before resume: %s"
+                   transcript))))
+    (funcall original session-id)))
+
+(defun agent-log-codex--install-exact-resume-advice ()
+  "Make Agent Log app-server resumes path-exact."
+  (when (and (fboundp 'codex--app-server-begin-resume-session-id)
+             (not
+              (advice-member-p
+               #'agent-log-codex--exact-resume-advice
+               'codex--app-server-begin-resume-session-id)))
+    (advice-add 'codex--app-server-begin-resume-session-id
+                :around #'agent-log-codex--exact-resume-advice)))
+
+(cl-defmethod agent-log--resume-session ((backend agent-log-codex) session-id)
   "Resume the Codex session SESSION-ID."
-  (unless (require 'codex nil t)
-    (user-error "Package `codex' is required but not available"))
-  (let* ((project-dir (or agent-log--session-project
-                          default-directory))
-         (default-directory (if (and project-dir
-                                     (file-directory-p project-dir))
-                                project-dir
-                              default-directory)))
-    (cl-letf (((symbol-function 'codex--directory)
-               (lambda () default-directory)))
-      (if (and (eq codex-terminal-backend 'app-server)
-               (fboundp 'codex--app-server-launch-resume-session))
-          (codex--app-server-launch-resume-session session-id)
-        (codex--start-subcommand "resume" nil (list session-id))))))
+  (let ((session (assoc session-id (agent-log--read-sessions backend))))
+    (unless session
+      (user-error
+       "Codex session %s is not in the canonical interactive thread catalog"
+       session-id))
+    (let ((transcript (plist-get (cdr session) :file)))
+      (setq agent-log--session-project
+            (or (plist-get (cdr session) :project)
+                agent-log--session-project))
+      (unless (require 'codex nil t)
+        (user-error "Package `codex' is required but not available"))
+      (unless (and (stringp transcript) (file-readable-p transcript))
+        (user-error "Canonical Codex transcript is not readable: %s"
+                    transcript))
+      (when (and (stringp transcript)
+                 (fboundp 'codex--cache-session-transcript))
+        (codex--cache-session-transcript session-id transcript))
+      (let* ((project-dir (or agent-log--session-project
+                              default-directory))
+             (default-directory (if (and project-dir
+                                         (file-directory-p project-dir))
+                                    project-dir
+                                  default-directory)))
+        (cl-letf (((symbol-function 'codex--directory)
+                   (lambda () default-directory)))
+          (if (and (eq codex-terminal-backend 'app-server)
+                   (fboundp 'codex--app-server-launch-resume-session))
+              (progn
+                (agent-log-codex--install-exact-resume-advice)
+                (puthash session-id transcript
+                         agent-log-codex--exact-resume-paths)
+                (condition-case err
+                    (codex--app-server-launch-resume-session session-id)
+                  (error
+                   (remhash session-id
+                            agent-log-codex--exact-resume-paths)
+                   (signal (car err) (cdr err)))))
+            (codex--start-subcommand "resume" nil (list session-id))))))))
 
 ;;;;;; Current-buffer session detection
 
@@ -743,6 +877,25 @@ timestamp is within `agent-log-codex--session-start-match-window-ms'."
   ((_backend agent-log-codex) session)
   "Return non-nil when Codex SESSION is not an internal subagent."
   (not (agent-log-codex--subagent-session-p session)))
+
+(cl-defmethod agent-log--source-user-visible-p
+  ((_backend agent-log-codex) source-file)
+  "Return nil when SOURCE-FILE is positively outside native Resume.
+Known subagent and exec rollouts are noninteractive.  Unknown future
+source kinds are retained conservatively."
+  (if-let* ((metadata (agent-log-codex--read-session-meta source-file)))
+      (not (agent-log-codex--session-meta-noninteractive-p metadata))
+    t))
+
+(defun agent-log-codex--session-meta-noninteractive-p (metadata)
+  "Return non-nil when METADATA marks a noninteractive Codex rollout."
+  (let ((source (plist-get metadata :source))
+        (thread-source (or (plist-get metadata :thread_source)
+                           (plist-get metadata :thread-source))))
+    (or (equal source "exec")
+        (and (listp source)
+             (plist-member source :subagent))
+        (equal thread-source "subagent"))))
 
 (defun agent-log-codex--nearest-session-by-timestamp
     (sessions target-timestamp-ms)
