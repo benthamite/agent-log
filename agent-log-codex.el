@@ -175,9 +175,13 @@ Each value is a plist (:display :timestamp :project :file :file-dir
             :thread-source (alist-get 'threadSource thread)))))
 
 (defun agent-log-codex--thread-list (backend)
-  "Return every canonical interactive Codex thread for BACKEND.
-This calls Codex's app-server `thread/list' with the same source and
-archive filters used by native Resume."
+  "Return every Codex thread that native Resume would offer for BACKEND.
+This sends `thread/list' with exactly the parameters
+`codex--app-server-begin-resume' sends, with two deliberate differences:
+no `cwd', because Agent Log lists every project rather than the current
+one, and cursor pagination, because Agent Log lists the whole catalog
+rather than one page.  Any additional filter would make Agent Log's list
+diverge from the list native Resume shows, so do not add one."
   (let* ((home (agent-log-codex--effective-home backend))
          (process-environment
           (cons (concat "CODEX_HOME=" (directory-file-name home))
@@ -198,7 +202,6 @@ archive filters used by native Resume."
          (request-id 0)
          (seen-ids (make-hash-table :test #'equal))
          (seen-cursors (make-hash-table :test #'equal))
-         model-provider
          cursor
          threads)
     (unwind-protect
@@ -209,25 +212,12 @@ archive filters used by native Resume."
               (name . "agent-log")
               (title . "Agent Log")
               (version . "0.3.0"))))
-          (let* ((config-result
-                  (agent-log-codex--catalog-request
-                   process (cl-incf request-id) "config/read"
-                   `((cwd . ,(expand-file-name default-directory))
-                     (includeLayers . :json-false))))
-                 (config (alist-get 'config config-result)))
-            (setq model-provider (alist-get 'model_provider config)))
           (let (done)
             (while (not done)
               (let* ((params
                       `((limit . ,agent-log-codex--thread-list-page-size)
                         (sortKey . "updated_at")
                         (sortDirection . "desc")
-                        ,@(when (stringp model-provider)
-                            `((modelProviders
-                               . ,(vector model-provider))))
-                        (sourceKinds . ["cli" "vscode"])
-                        (archived . :json-false)
-                        (useStateDbOnly . :json-false)
                         ,@(when cursor `((cursor . ,cursor)))))
                      (result
                       (agent-log-codex--catalog-request
@@ -807,7 +797,7 @@ the terminal process start time."
       (when-let* ((dir (codex--buffer-directory-for (current-buffer))))
         (let* ((process-start-ms (agent-log-codex--buffer-process-start-ms))
                (match (agent-log-codex--find-session-for-project
-                       dir sessions t process-start-ms)))
+                       dir sessions process-start-ms)))
           (plist-get (cdr match) :file)))
       (agent-log-codex--visible-session-file sessions)))
 
@@ -838,64 +828,32 @@ COMMAND is a process command list such as that returned by
     session-id))
 
 (defun agent-log-codex--find-session-for-project
-    (directory sessions &optional top-level-only target-timestamp-ms)
+    (directory sessions &optional target-timestamp-ms)
   "Find the latest session in SESSIONS whose project matches DIRECTORY.
 SESSIONS should be sorted newest-first (as from
 `agent-log--read-sessions').  DIRECTORY is compared against each
 session's :project field using both the expanded path and
-`file-truename'.  When TOP-LEVEL-ONLY is non-nil, ignore Codex
-subagent sessions, which inherit the parent's CWD but do not own a
-terminal buffer.  When TARGET-TIMESTAMP-MS is non-nil, return the
+`file-truename'.  When TARGET-TIMESTAMP-MS is non-nil, return the
 matching session whose timestamp is closest to it, provided the
 timestamp is within `agent-log-codex--session-start-match-window-ms'."
-  (let ((targets (agent-log-codex--directory-match-targets directory)))
-    (let ((matches
-           (cl-remove-if-not
-            (lambda (session)
-              (let ((project (plist-get (cdr session) :project)))
-                (and (stringp project)
-                     (not (string-empty-p project))
-                     (member (directory-file-name
-                              (expand-file-name project))
-                             targets)
-                     (or (not top-level-only)
-                         (not (agent-log-codex--subagent-session-p
-                               session))))))
-            sessions)))
-      (if (numberp target-timestamp-ms)
-          (agent-log-codex--nearest-session-by-timestamp
-           matches target-timestamp-ms)
-        (car matches)))))
+  (let* ((targets (agent-log-codex--directory-match-targets directory))
+         (matches
+          (cl-remove-if-not
+           (lambda (session)
+             (agent-log-codex--session-in-directory-p session targets))
+           sessions)))
+    (if (numberp target-timestamp-ms)
+        (agent-log-codex--nearest-session-by-timestamp
+         matches target-timestamp-ms)
+      (car matches))))
 
-(defun agent-log-codex--subagent-session-p (session)
-  "Return non-nil when SESSION metadata describes a Codex subagent."
-  (let ((source (plist-get (cdr session) :source)))
-    (and (listp source)
-         (plist-member source :subagent))))
-
-(cl-defmethod agent-log--session-user-visible-p
-  ((_backend agent-log-codex) session)
-  "Return non-nil when Codex SESSION is not an internal subagent."
-  (not (agent-log-codex--subagent-session-p session)))
-
-(cl-defmethod agent-log--source-user-visible-p
-  ((_backend agent-log-codex) source-file)
-  "Return nil when SOURCE-FILE is positively outside native Resume.
-Known subagent and exec rollouts are noninteractive.  Unknown future
-source kinds are retained conservatively."
-  (if-let* ((metadata (agent-log-codex--read-session-meta source-file)))
-      (not (agent-log-codex--session-meta-noninteractive-p metadata))
-    t))
-
-(defun agent-log-codex--session-meta-noninteractive-p (metadata)
-  "Return non-nil when METADATA marks a noninteractive Codex rollout."
-  (let ((source (plist-get metadata :source))
-        (thread-source (or (plist-get metadata :thread_source)
-                           (plist-get metadata :thread-source))))
-    (or (equal source "exec")
-        (and (listp source)
-             (plist-member source :subagent))
-        (equal thread-source "subagent"))))
+(defun agent-log-codex--session-in-directory-p (session targets)
+  "Return non-nil when SESSION's project is one of TARGETS."
+  (let ((project (plist-get (cdr session) :project)))
+    (and (stringp project)
+         (not (string-empty-p project))
+         (member (directory-file-name (expand-file-name project))
+                 targets))))
 
 (defun agent-log-codex--nearest-session-by-timestamp
     (sessions target-timestamp-ms)
@@ -927,8 +885,7 @@ source kinds are retained conservatively."
 (defun agent-log-codex--visible-session-file (sessions)
   "Return the transcript matching the visible Codex buffer text in SESSIONS."
   (when-let* ((dir (codex--buffer-directory-for (current-buffer)))
-              (candidates (agent-log-codex--project-top-level-sessions
-                           dir sessions))
+              (candidates (agent-log-codex--project-sessions dir sessions))
               (snippets (agent-log-codex--visible-session-snippets)))
     (cl-loop for snippet in snippets
              thereis
@@ -937,17 +894,12 @@ source kinds are retained conservatively."
                       when (agent-log-codex--file-contains-p file snippet)
                       return file))))
 
-(defun agent-log-codex--project-top-level-sessions (directory sessions)
-  "Return top-level SESSIONS whose project matches DIRECTORY."
+(defun agent-log-codex--project-sessions (directory sessions)
+  "Return the SESSIONS whose project matches DIRECTORY."
   (let ((targets (agent-log-codex--directory-match-targets directory)))
     (cl-remove-if-not
      (lambda (session)
-       (let ((project (plist-get (cdr session) :project)))
-         (and (stringp project)
-              (not (string-empty-p project))
-              (member (directory-file-name (expand-file-name project))
-                      targets)
-              (not (agent-log-codex--subagent-session-p session)))))
+       (agent-log-codex--session-in-directory-p session targets))
      sessions)))
 
 (defun agent-log-codex--visible-session-snippets ()
@@ -1003,27 +955,6 @@ source kinds are retained conservatively."
                  (file-truename (expand-file-name directory))))))
 
 ;;;;; Codex-specific helper functions
-
-(defconst agent-log-codex--session-meta-read-bytes 65536
-  "Bytes to read from a session file to capture the first line.
-The session_meta line includes the full system prompt and is
-typically 15-20KB.")
-
-(defun agent-log-codex--read-session-meta (file)
-  "Read the session_meta entry from the first line of FILE.
-Returns a plist with at least :id, :cwd, and :timestamp, or nil."
-  (condition-case nil
-      (with-temp-buffer
-        (insert-file-contents file nil 0
-                              agent-log-codex--session-meta-read-bytes)
-        (goto-char (point-min))
-        (when-let* ((eol (line-end-position))
-                    ((< eol (point-max))) ;; ensure we got a full line
-                    (line (buffer-substring-no-properties (point) eol))
-                    (parsed (agent-log--try-parse-json line))
-                    ((equal (plist-get parsed :type) "session_meta")))
-          (plist-get parsed :payload)))
-    (error nil)))
 
 (defun agent-log-codex--session-event-handler (message)
   "Record Codex session identity from hook MESSAGE.

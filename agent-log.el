@@ -180,20 +180,10 @@ Returns a plist with :project and :date.")
 Return nil if no matching session file can be identified."
   (:method ((_backend agent-log-backend)) nil))
 
-(cl-defgeneric agent-log--session-user-visible-p (backend session)
-  "Return non-nil when SESSION from BACKEND is an ordinary user session."
-  (:method ((_backend agent-log-backend) _session) t))
-
-(cl-defgeneric agent-log--source-user-visible-p (backend source-file)
-  "Return non-nil when SOURCE-FILE from BACKEND is user-visible.
-This is used only when reconciling generated artifacts that are absent
-from a backend's canonical catalog.  The default retains the artifact."
-  (:method ((_backend agent-log-backend) _source-file) t))
-
 (cl-defgeneric agent-log--backend-source-directories (backend)
   "Return source directories owned by BACKEND.
-Reconciliation only mutates rendered artifacts whose source resolves
-inside one of these directories."
+This identifies which backend a rendered artifact's recorded source
+belongs to."
   (:method ((backend agent-log-backend))
     (list (agent-log-backend-directory backend))))
 
@@ -278,24 +268,17 @@ source JSONL file's last modification time."
   :type '(choice (const :tag "Creation time" creation-time)
                  (const :tag "Modification time" modification-time)))
 
-(defun agent-log--read-all-sessions (&optional include-internal strict)
+(defun agent-log--read-all-sessions (&optional strict)
   "Return merged sessions from all active backends, sorted most-recent-first.
-Sessions whose project path matches `agent-log-ignored-project-regexps'
-or whose backend classifies them as internal are excluded.  When
-INCLUDE-INTERNAL is non-nil, include internal backend sessions.
-When STRICT is non-nil, signal if any backend catalog cannot be read
-instead of returning an incomplete catalog."
+Each backend reports exactly the sessions its own native resume command
+offers, so Agent Log applies no membership filter of its own beyond
+`agent-log-ignored-project-regexps'.  When STRICT is non-nil, signal if
+any backend catalog cannot be read instead of returning an incomplete
+catalog."
   (let ((all '()))
     (dolist (backend (agent-log--active-backend-instances))
       (condition-case err
-          (let ((sessions (agent-log--read-sessions backend)))
-            (unless include-internal
-              (setq sessions
-                    (seq-filter
-                     (lambda (session)
-                       (agent-log--session-user-visible-p backend session))
-                     sessions)))
-            (setq all (nconc all sessions)))
+          (setq all (nconc all (agent-log--read-sessions backend)))
         (error
          (if strict
              (signal (car err) (cdr err))
@@ -862,16 +845,14 @@ active backends (e.g. Claude Code or Codex)."
     (agent-log-open-file file)))
 
 ;;;###autoload
-(defun agent-log-sync-sessions (&optional callback include-internal)
+(defun agent-log-sync-sessions (&optional callback)
   "Render all unrendered or stale sessions.
 Uses timers to avoid blocking Emacs.  When CALLBACK is non-nil,
 call it exactly once with a terminal result plist.  Successful results
-have `:ok' non-nil and include the reconciliation `:plan'.  Failed
-results have `:ok' nil, a `:stage', and either `:failures' or `:error'.
-When INCLUDE-INTERNAL is non-nil, also render internal backend sessions."
+have `:ok' non-nil.  Failed results have `:ok' nil, a `:stage', and
+either `:failures' or `:error'."
   (interactive)
-  (let* ((backends (agent-log--active-backend-instances))
-         (sessions (agent-log--read-all-sessions include-internal t))
+  (let* ((sessions (agent-log--read-all-sessions t))
          (index (agent-log--read-index-strict))
          (_validated (agent-log--validate-render-sync-plan sessions))
          (pending (agent-log--pending-sessions sessions index))
@@ -891,17 +872,9 @@ When INCLUDE-INTERNAL is non-nil, also render internal backend sessions."
                      (failures
                       (list :ok nil :stage 'render
                             :failures (nreverse failures)))
-                     (t
-                      (condition-case err
-                          (list
-                           :ok t
-                           :plan
-                           (agent-log--reconcile-rendered-files
-                            sessions backends))
-                        (error
-                         (list :ok nil :stage 'reconcile :error err)))))))
+                     (t (list :ok t)))))
               (if (plist-get result :ok)
-                  (message "Session sync and reconciliation complete")
+                  (message "Session sync complete")
                 (message
                  "Session sync failed during %s: %s"
                  (plist-get result :stage)
@@ -1502,9 +1475,8 @@ from disk."
   "Ensure SESSION-ID has an up-to-date rendered .md file.
 METADATA is a plist with :file, :timestamp, :project, :display.
 When INDEX is non-nil, use and update that hash table.  When
-DEFER-INDEX-WRITE is non-nil, do not write INDEX or retire the old
-artifact; archive sync commits the shared index once and reconciles
-duplicates afterward.
+DEFER-INDEX-WRITE is non-nil, merge into INDEX without writing it;
+archive sync commits the shared index once at the end.
 Returns the path to the rendered file."
   (let* ((index (or index (agent-log--read-index)))
          (index-entry (gethash session-id index))
@@ -1557,8 +1529,7 @@ Returns the path to the rendered file."
              (list :file (car result) :jsonl-size (cdr result)))
           (agent-log--index-update-props
            session-id (list :file (car result) :jsonl-size (cdr result))))
-        (when (and (not defer-index-write)
-                   rendered-path
+        (when (and rendered-path
                    (file-exists-p rendered-path)
                    (not (string= (expand-file-name rendered-path)
                                  (expand-file-name (car result))))
@@ -1667,177 +1638,10 @@ SESSION-ID, BACKEND, and SOURCE-FILE together define that identity."
       (error "Refusing to trash unmanaged rendered path: %s" file))
     (move-file-to-trash file)))
 
-(defun agent-log--sanitize-index-file-ownership (index)
-  "Clear stale or wrong-owner rendered pointers in INDEX.
-Keep summaries and all unrelated metadata.  Return the number of
-entries changed."
-  (let ((changed 0))
-    (maphash
-     (lambda (session-id entry)
-       (when-let* ((file (plist-get entry :file)))
-         (unless
-             (and (file-exists-p file)
-                  (equal
-                   (agent-log--rendered-file-session-id file)
-                   session-id))
-           (setq entry (copy-sequence entry))
-           (cl-remf entry :file)
-           (cl-remf entry :jsonl-size)
-           (puthash session-id entry index)
-           (cl-incf changed))))
-     index)
-    changed))
-
-(defun agent-log--backend-with-key (key backends)
-  "Return the member of BACKENDS whose backend key is KEY."
-  (seq-find (lambda (backend)
-              (eq (agent-log-backend-key backend) key))
-            backends))
-
 (defun agent-log--same-path-p (a b)
   "Return non-nil when path strings A and B name the same lexical path."
   (and (stringp a) (stringp b)
        (string= (expand-file-name a) (expand-file-name b))))
-
-(defun agent-log--plan-rendered-reconciliation (sessions backends index)
-  "Return a non-mutating reconciliation plan.
-SESSIONS is the complete canonical catalog, BACKENDS identifies source
-ownership, and INDEX is a strictly parsed rendered index.  The plan
-retires only duplicates of a freshly synchronized canonical artifact
-and artifacts positively identified as internal.  Ambiguous historical
-artifacts are preserved."
-  (let ((canonical (make-hash-table :test #'equal))
-        (groups (make-hash-table :test #'equal))
-        (owners-by-id (make-hash-table :test #'equal))
-        trash
-        remove-index
-        conflicts
-        (unknown 0)
-        (preserved 0))
-    (dolist (session sessions)
-      (when-let* ((backend (plist-get (cdr session) :backend))
-                  (owner (cons (agent-log-backend-key backend)
-                               (car session))))
-        (puthash owner session canonical)
-        (cl-pushnew owner (gethash (car session) owners-by-id)
-                    :test #'equal)))
-    (when (file-directory-p agent-log-rendered-directory)
-      (dolist (file
-               (directory-files-recursively
-                agent-log-rendered-directory "\\.md\\'"))
-        (if-let* ((front-matter (agent-log--rendered-front-matter file))
-                  (owner (agent-log--rendered-owner-key
-                          front-matter backends)))
-            (progn
-              (push (list :file file :front-matter front-matter)
-                    (gethash owner groups))
-              (cl-pushnew owner (gethash (cdr owner) owners-by-id)
-                          :test #'equal))
-          (cl-incf unknown))))
-    ;; The legacy index is keyed by bare ID.  A cross-backend duplicate
-    ;; cannot be reconciled safely until that index is migrated.
-    (maphash
-     (lambda (session-id owners)
-       (when (> (length owners) 1)
-         (push (format "Session ID %s belongs to multiple backends: %S"
-                       session-id (mapcar #'car owners))
-               conflicts)))
-     owners-by-id)
-    (maphash
-     (lambda (owner session)
-       (unless (or (gethash owner groups)
-                   (not
-                    (file-readable-p
-                     (or (plist-get (cdr session) :file) ""))))
-         (push (format "Canonical session %s has no rendered artifact"
-                       (cdr owner))
-               conflicts)))
-     canonical)
-    (maphash
-     (lambda (owner artifacts)
-       (let* ((session-id (cdr owner))
-              (backend (agent-log--backend-with-key (car owner) backends))
-              (session (gethash owner canonical))
-              (files (mapcar (lambda (artifact)
-                               (plist-get artifact :file))
-                             artifacts)))
-         (cond
-          (session
-           (if (not
-                (file-readable-p
-                 (or (plist-get (cdr session) :file) "")))
-               (cl-incf preserved (length files))
-             (let* ((desired
-                     (agent-log--rendered-filepath session-id (cdr session)))
-                    (entry (gethash session-id index))
-                    (indexed-file (plist-get entry :file)))
-               (if (and (seq-some
-                         (lambda (file)
-                           (agent-log--same-path-p file desired))
-                         files)
-                        (file-exists-p desired)
-                        (agent-log--rendered-matches-session-p
-                         desired session-id backend
-                         (plist-get (cdr session) :file))
-                        (agent-log--same-path-p indexed-file desired))
-                   (dolist (file files)
-                     (unless (agent-log--same-path-p file desired)
-                       (push file trash)))
-                 (push
-                  (format
-                   "Canonical session %s is not synchronized at %s"
-                   session-id desired)
-                  conflicts)))))
-          ((and backend
-                (seq-every-p
-                 (lambda (artifact)
-                   (let ((source
-                          (plist-get (plist-get artifact :front-matter)
-                                     :source)))
-                     (and (stringp source)
-                          (file-exists-p source)
-                          (not (agent-log--source-user-visible-p
-                                backend source)))))
-                 artifacts))
-           (setq trash (nconc files trash))
-           (cl-pushnew session-id remove-index :test #'equal))
-          (t
-           (cl-incf preserved (length files))))))
-     groups)
-    (list :trash (delete-dups (nreverse trash))
-          :remove-index (nreverse remove-index)
-          :conflicts (nreverse conflicts)
-          :unknown unknown
-          :preserved preserved)))
-
-(defun agent-log--reconcile-rendered-files (sessions backends)
-  "Safely reconcile rendered artifacts with canonical SESSIONS.
-BACKENDS identifies source ownership.  Planning is non-mutating and any
-conflict aborts the entire operation.  Index removals are merged into a
-fresh strict read before duplicate files are moved to Trash, so failure
-can leave only recoverable extra copies."
-  (let* ((index (agent-log--read-index-strict))
-         (plan (agent-log--plan-rendered-reconciliation
-                sessions backends index))
-         (conflicts (plist-get plan :conflicts))
-         (remove-index (plist-get plan :remove-index))
-         (trash (plist-get plan :trash)))
-    (when conflicts
-      (error "Rendered reconciliation aborted: %s"
-             (string-join conflicts "; ")))
-    (let ((fresh-index (agent-log--read-index-strict))
-          changed)
-      (when (> (agent-log--sanitize-index-file-ownership fresh-index) 0)
-        (setq changed t))
-      (dolist (session-id remove-index)
-        (when (gethash session-id fresh-index)
-          (remhash session-id fresh-index)
-          (setq changed t)))
-      (when changed
-        (agent-log--write-index fresh-index)))
-    (dolist (file trash)
-      (agent-log--trash-rendered-file file))
-    plan))
 
 (defun agent-log--open-rendered (session-id metadata)
   "Open the rendered .md file for SESSION-ID.
