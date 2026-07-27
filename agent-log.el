@@ -1562,10 +1562,6 @@ files Agent Log does not manage."
               (list :session session-id :backend backend :source source)))))
     (error nil)))
 
-(defun agent-log--rendered-file-session-id (file)
-  "Return the session ID recorded in rendered Markdown FILE."
-  (plist-get (agent-log--rendered-front-matter file) :session))
-
 (defun agent-log--path-under-directory-p (file directory)
   "Return non-nil when FILE is under DIRECTORY.
 Existing paths are compared by their true names so symlinks cannot
