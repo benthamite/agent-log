@@ -699,7 +699,8 @@ the same project and launch-time heuristic as
     (with-current-buffer buffer
       (when-let* ((backend agent-log-codex--instance)
                   (file (agent-log-codex--buffer-session-file
-                         backend (agent-log--read-sessions backend))))
+                         backend
+                         (lambda () (agent-log--read-sessions backend)))))
         (agent-log--session-id-from-file backend file)))))
 
 ;;;;;; Resume session
@@ -787,19 +788,31 @@ fresh sessions, fall back to matching a top-level session whose recorded
 CWD matches the buffer's directory and whose session timestamp is near
 the terminal process start time."
   (agent-log-codex--buffer-session-file
-   backend (agent-log--read-sessions backend)))
+   backend (lambda () (agent-log--read-sessions backend))))
 
-(defun agent-log-codex--buffer-session-file (backend sessions)
-  "Return the JSONL file for current Codex buffer using BACKEND and SESSIONS."
-  (or (agent-log-codex--recorded-buffer-session-file backend)
-      (when-let* ((sid (agent-log-codex--buffer-resumed-session-id)))
-        (agent-log--find-session-file backend sid))
-      (when-let* ((dir (codex--buffer-directory-for (current-buffer))))
-        (let* ((process-start-ms (agent-log-codex--buffer-process-start-ms))
-               (match (agent-log-codex--find-session-for-project
-                       dir sessions process-start-ms)))
-          (plist-get (cdr match) :file)))
-      (agent-log-codex--visible-session-file sessions)))
+(defun agent-log-codex--buffer-session-file (backend read-sessions)
+  "Return the JSONL file for current Codex buffer using BACKEND.
+READ-SESSIONS is either a function of no arguments returning the session
+catalog, or the catalog itself.  A function is called at most once, and
+only when the buffer's own records cannot name the session, because
+reading the catalog starts a Codex app-server process."
+  (let ((catalog 'unread))
+    (cl-flet ((sessions ()
+                (when (eq catalog 'unread)
+                  (setq catalog (if (functionp read-sessions)
+                                    (funcall read-sessions)
+                                  read-sessions)))
+                catalog))
+      (or (agent-log-codex--recorded-buffer-session-file backend)
+          (when-let* ((sid (agent-log-codex--buffer-resumed-session-id)))
+            (agent-log--find-session-file backend sid))
+          (when-let* ((dir (codex--buffer-directory-for (current-buffer))))
+            (let* ((process-start-ms
+                    (agent-log-codex--buffer-process-start-ms))
+                   (match (agent-log-codex--find-session-for-project
+                           dir (sessions) process-start-ms)))
+              (plist-get (cdr match) :file)))
+          (agent-log-codex--visible-session-file (sessions))))))
 
 (defun agent-log-codex--recorded-buffer-session-file (backend)
   "Return the current buffer's recorded transcript file for BACKEND."

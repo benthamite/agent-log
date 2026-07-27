@@ -1229,7 +1229,8 @@ SUMMARY defaults to ONELINE."
   (let* ((agent-log-rendered-directory "/tmp/rendered")
          (metadata (list :timestamp 1700000000000
                          :project "/home/user/my-app"
-                         :display "Fix the bug"))
+                         :display "Fix the bug"
+                         :backend agent-log-test--claude-backend))
          (result (agent-log--rendered-filepath "session-1" metadata)))
     (should (string-match-p "/tmp/rendered/my-app/" result))
     (should (string-match-p
@@ -1241,7 +1242,8 @@ SUMMARY defaults to ONELINE."
   (let* ((agent-log-rendered-directory "/tmp/rendered")
          (metadata (list :timestamp nil
                          :project "/project"
-                         :display "test")))
+                         :display "test"
+                         :backend agent-log-test--claude-backend)))
     (let ((result (agent-log--rendered-filepath "s1" metadata)))
       (should (string-match-p
                "unknown_test--claude-code--s1\\.md" result)))))
@@ -1251,7 +1253,8 @@ SUMMARY defaults to ONELINE."
   (let* ((agent-log-rendered-directory "/tmp/rendered")
          (metadata (list :timestamp 1700000000000
                          :project "/project"
-                         :display "")))
+                         :display ""
+                         :backend agent-log-test--claude-backend)))
     (let ((result (agent-log--rendered-filepath "s1" metadata)))
       (should (string-match-p
                "untitled--claude-code--s1\\.md" result)))))
@@ -3702,6 +3705,28 @@ archived threads must survive."
                 ((symbol-function 'codex--buffer-directory-for)
                  (lambda (_buffer)
                    (error "heuristic lookup should not run"))))
+        (should (equal (agent-log--current-buffer-session-file
+                        agent-log-test--codex-backend)
+                       file))))))
+
+(ert-deftest agent-log-test-codex-current-buffer-session-file/catalog-is-lazy ()
+  "A buffer that names its own session never reads the Codex catalog.
+Reading the catalog starts an app-server process, so it must not run
+when the buffer already knows which session it holds."
+  (let ((sid "019df82b-8607-7231-a491-e57316e4fa02")
+        (file "/tmp/resumed.jsonl"))
+    (with-temp-buffer
+      (cl-letf (((symbol-function 'agent-log-codex--buffer-resumed-session-id)
+                 (lambda () sid))
+                ((symbol-function 'agent-log--find-session-file)
+                 (lambda (_backend session-id)
+                   (and (equal session-id sid) file)))
+                ((symbol-function 'agent-log--read-sessions)
+                 (lambda (&rest _)
+                   (ert-fail "catalog must not be read")))
+                ((symbol-function 'codex--buffer-directory-for)
+                 (lambda (_buffer)
+                   (ert-fail "heuristic lookup should not run"))))
         (should (equal (agent-log--current-buffer-session-file
                         agent-log-test--codex-backend)
                        file))))))
