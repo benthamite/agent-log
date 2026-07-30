@@ -1,0 +1,151 @@
+;;; agent-log-agent.el --- Bridge to the agent live-session package -*- lexical-binding: t -*-
+
+;; Author: Pablo Stafforini
+;; Maintainer: Pablo Stafforini
+
+;; This file is not part of GNU Emacs
+
+;; This program is free software; you can redistribute it and/or
+;; modify it under the terms of the GNU General Public License as
+;; published by the Free Software Foundation, either version 3 of the
+;; License, or (at your option) any later version.
+
+;; This program is distributed in the hope that it will be useful, but
+;; WITHOUT ANY WARRANTY; without even the implied warranty of
+;; MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+;; General Public License for more details.
+
+;; You should have received a copy of the GNU General Public License
+;; along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+;;; Commentary:
+
+;; Optional integration between Agent Log, which owns the durable
+;; session archive, and the `agent' package, which owns live session
+;; control.  Loaded from agent-log.el only when the `agent' feature is
+;; present, so neither package requires the other.  Every Agent Log
+;; reference to `agent' lives here, and only public `agent' API is
+;; used: `agent-session', `agent-session-id', `agent-session-backend',
+;; `agent-session-buffers', `agent-session-display-state',
+;; `agent-backend', `agent-session-create', and `agent-start-session'.
+;; Agent Log backend keys equal agent backend symbols, so no mapping is
+;; needed.
+
+;;; Code:
+
+(require 'cl-lib)
+(require 'agent-log)
+(require 'agent)
+
+(declare-function agent-log-claude--session-project-directory
+                  "agent-log-claude" (session-id))
+(declare-function agent-log-codex--prepare-resume
+                  "agent-log-codex" (backend session-id))
+
+;;;; Live-session identity
+
+(defun agent-log-agent--session-info (backend-key session-id)
+  "Return live info for SESSION-ID under BACKEND-KEY, or nil.
+The result is a plist (:buffer BUFFER :state STATE) built from the
+agent package's authoritative session identity and display state."
+  (cl-loop for buffer in (agent-session-buffers)
+           for session = (agent-session buffer)
+           when (and session
+                     (eq (agent-session-backend session) backend-key)
+                     (equal (agent-session-id session) session-id))
+           return (list :buffer buffer
+                        :state (agent-session-display-state buffer))))
+
+(setq agent-log-live-session-info-function #'agent-log-agent--session-info)
+
+(cl-defmethod agent-log--current-buffer-session-file :around
+  ((backend agent-log-backend))
+  "Resolve the transcript from the agent-recorded native session id.
+Fall back to BACKEND's own heuristics when the current buffer is not an
+agent session, its id is not yet known, or the id's transcript is not
+on disk."
+  (or (when-let* ((session (agent-session (current-buffer)))
+                  (id (agent-session-id session))
+                  ((eq (agent-session-backend session)
+                       (agent-log-backend-key backend))))
+        (agent-log--find-session-file backend id))
+      (cl-call-next-method)))
+
+(cl-defmethod agent-log--active-session-ids :around
+  ((backend agent-log-backend))
+  "Report live session ids from the agent package's registry.
+Agent tracks every live buffer of the backends it registers, so its
+answer replaces BACKEND's standalone heuristics whenever agent
+registers the same backend key; ids agent has not learned yet are
+simply absent until the backend reports them."
+  (let ((key (agent-log-backend-key backend)))
+    (if (agent-backend key)
+        (delete-dups
+         (cl-loop for buffer in (agent-session-buffers)
+                  for session = (agent-session buffer)
+                  when (and session
+                            (eq (agent-session-backend session) key)
+                            (agent-session-id session))
+                  collect (agent-session-id session)))
+      (cl-call-next-method))))
+
+;;;; Resume routing
+
+(with-eval-after-load 'agent-log-claude
+  (cl-defmethod agent-log--resume-session :around
+    ((_backend agent-log-claude) session-id)
+    "Prefer the live buffer, then the agent dispatcher, then the direct path."
+    (cond
+     ((agent-log-agent--switch-to-live 'claude-code session-id))
+     ((agent-backend 'claude-code)
+      (agent-log-agent--resume
+       'claude-code
+       (agent-log-claude--session-project-directory session-id)
+       session-id))
+     (t (cl-call-next-method)))))
+
+(with-eval-after-load 'agent-log-codex
+  (cl-defmethod agent-log--resume-session :around
+    ((backend agent-log-codex) session-id)
+    "Prefer the live buffer, then the agent dispatcher, then the direct path.
+The catalog validation, transcript caching, and app-server exact-path
+registration from `agent-log-codex--prepare-resume' apply on the agent
+path too, because `codex-start-session' reaches the same resume entry
+point the exact-path advice covers."
+    (cond
+     ((agent-log-agent--switch-to-live 'codex session-id))
+     ((agent-backend 'codex)
+      (agent-log-agent--resume
+       'codex
+       (agent-log-codex--prepare-resume backend session-id)
+       session-id))
+     (t (cl-call-next-method)))))
+
+(defun agent-log-agent--switch-to-live (backend-key session-id)
+  "Switch to SESSION-ID's live buffer; return non-nil when it was live.
+BACKEND-KEY names the backend whose live sessions are searched.  This
+is the duplicate guard: resuming a session that already has a live
+buffer would start a second process on the same conversation."
+  (when-let* ((live (agent-log-agent--session-info backend-key session-id))
+              (buffer (plist-get live :buffer)))
+    (pop-to-buffer buffer)
+    (message "Session %s is already live (%s); switched to its buffer"
+             session-id (plist-get live :state))
+    t))
+
+(defun agent-log-agent--resume (backend-key directory session-id)
+  "Resume SESSION-ID through `agent-start-session'.
+BACKEND-KEY names the agent backend and DIRECTORY the project
+directory, or nil for the backend's ambient default.  Routing through
+the agent dispatcher preserves account handling, lifecycle
+registration, teardown, and state tracking for the resumed session."
+  (agent-start-session
+   (agent-session-create
+    :backend backend-key
+    :directory (and directory
+                    (file-name-as-directory
+                     (abbreviate-file-name directory))))
+   :resume-id session-id))
+
+(provide 'agent-log-agent)
+;;; agent-log-agent.el ends here

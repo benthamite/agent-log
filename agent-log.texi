@@ -33,6 +33,7 @@ This manual describes the features and customization options for the @samp{agent
 * Installation::
 * User options::
 * Commands::
+* Agent integration::
 * Secret redaction::
 * @code{agent-log-mode}::
 * How it works::
@@ -541,7 +542,29 @@ When @code{gptel-plus} is available, the combined dollar cost of both stages is 
 
 @findex agent-log-resume-session
 
-The command @code{agent-log-resume-session} resumes the session displayed in the current buffer in the coding agent.  The command extracts the session ID from the buffer (either from the buffer-local variable or from the front-matter comment) and dispatches to the buffer's backend via the @code{agent-log--resume-session} generic function.  If a rendered Markdown file was opened directly rather than through @code{agent-log}, the command also reads the front-matter source path to recover the backend and source JSONL file before resuming.  For Claude Code sessions, this requires the @samp{claude-code} package and passes the session ID with the @samp{--resume} flag, starting in the session's project directory when possible.  When the project path stored in Claude's transcript or @samp{history.jsonl} no longer exists, the backend falls back to the encoded project directory under @samp{~/.claude/projects/} and uses the matching existing project directory.  The project directory is normalized with a trailing slash to match the format returned by @code{claude-code--directory}, ensuring that buffer names, concurrent session detection, and modeline display all work correctly.  For Codex sessions, this requires the @samp{codex} package.  Agent Log first verifies the ID against the current canonical catalog, then passes both that ID and the catalog's exact transcript path to app-server @samp{thread/resume}.  It does not rescan rollouts or fall back to another same-ID file if the canonical path disappears.  The CLI backend uses @samp{codex resume} for the same catalog-validated ID@.  The keybinding is @samp{r} in @code{agent-log-mode}.
+The command @code{agent-log-resume-session} resumes the session displayed in the current buffer in the coding agent.  The command extracts the session ID from the buffer (either from the buffer-local variable or from the front-matter comment) and dispatches to the buffer's backend via the @code{agent-log--resume-session} generic function.  If a rendered Markdown file was opened directly rather than through @code{agent-log}, the command also reads the front-matter source path to recover the backend and source JSONL file before resuming.  For Claude Code sessions, this requires the @samp{claude-code} package and passes the session ID with the @samp{--resume} flag, starting in the session's project directory when possible.  When the project path stored in Claude's transcript or @samp{history.jsonl} no longer exists, the backend falls back to the encoded project directory under @samp{~/.claude/projects/} and uses the matching existing project directory.  The project directory is normalized with a trailing slash to match the format returned by @code{claude-code--directory}, ensuring that buffer names, concurrent session detection, and modeline display all work correctly.  For Codex sessions, this requires the @samp{codex} package.  Agent Log first verifies the ID against the current canonical catalog, then passes both that ID and the catalog's exact transcript path to app-server @samp{thread/resume}.  It does not rescan rollouts or fall back to another same-ID file if the canonical path disappears.  The CLI backend uses @samp{codex resume} for the same catalog-validated ID@.  The keybinding is @samp{r} in @code{agent-log-mode}.  When the @ref{Agent integration, , agent integration} is active, resuming additionally behaves as described there: live sessions are switched to rather than duplicated, and new resumes are routed through the @samp{agent} dispatcher.
+
+@node Agent integration
+@chapter Agent integration
+
+Agent Log owns the durable archive; the optional @uref{https://github.com/benthamite/agent, agent} package owns live session control (buffers, accounts, lifecycle state, teardown).  The bridge module @samp{agent-log-agent.el} connects the two when both are loaded: @samp{agent-log.el} requires it from @code{with-eval-after-load} on the @samp{agent} feature, so loading Agent Log alone never loads or requires @samp{agent}, and Agent Log remains fully functional standalone.  The bridge uses only public @samp{agent} API and adds @samp{:around} methods to existing Agent Log generics, so removing it restores standalone behavior exactly.
+
+With the bridge active:
+
+@itemize
+@item
+Opening the current session's log resolves the transcript from the buffer's authoritative native session id, which @samp{agent} maintains from the Claude status line and Codex hook events.  The standalone heuristics (visible-text transcript matching, newest project JSONL, @samp{history.jsonl} project match, Codex process and launch-time matching) remain as fallbacks for buffers whose id is not yet known.
+@item
+The session browser tags sessions that are currently live with their state — @samp{[busy]}, @samp{[waiting]}, @samp{[background-waiting]}, or @samp{[unknown]} — in the @code{agent-log-live-state} face, via the @code{agent-log-live-session-info-function} extension point.  Selecting a session still opens the rendered log; liveness only annotates.
+@item
+Resuming a session that is already live switches to its existing buffer, with a message naming its state, instead of starting a duplicate process on the same conversation.
+@item
+Resuming an inactive session is routed through @code{agent-start-session}, so the resumed process gets @samp{agent}'s account handling, lifecycle registration, teardown, and state tracking.  Codex resumes keep the catalog validation and exact-transcript-path behavior described in @ref{Session resumption}.
+@item
+Live-session id listing (used to protect running sessions from background summarization) comes from @samp{agent}'s session registry instead of backend heuristics, which for Codex also avoids reading the thread catalog.
+@end itemize
+
+Browsing history stays lazy in both directions: nothing in the bridge runs at load or menu-construction time, and the @samp{agent} transients never read the historical catalog.  On the @samp{agent} side, the shared @code{agent-history} command (bound to @samp{l} in @code{agent-menu}) opens @code{agent-log-menu} on demand.
 
 @node Secret redaction
 @chapter Secret redaction

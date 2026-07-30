@@ -734,6 +734,33 @@ it only for calls that did not originate in Agent Log."
 
 (cl-defmethod agent-log--resume-session ((backend agent-log-codex) session-id)
   "Resume the Codex session SESSION-ID."
+  (agent-log-codex--prepare-resume backend session-id)
+  (let* ((project-dir (or agent-log--session-project
+                          default-directory))
+         (default-directory (if (and project-dir
+                                     (file-directory-p project-dir))
+                                project-dir
+                              default-directory)))
+    (cl-letf (((symbol-function 'codex--directory)
+               (lambda () default-directory)))
+      (if (and (eq codex-terminal-backend 'app-server)
+               (fboundp 'codex--app-server-launch-resume-session))
+          (condition-case err
+              (codex--app-server-launch-resume-session session-id)
+            (error
+             (remhash session-id agent-log-codex--exact-resume-paths)
+             (signal (car err) (cdr err))))
+        (codex--start-subcommand "resume" nil (list session-id))))))
+
+(defun agent-log-codex--prepare-resume (backend session-id)
+  "Validate SESSION-ID against the canonical catalog of BACKEND and prepare.
+Record the session's project in `agent-log--session-project', cache the
+canonical transcript with the codex package, and, when the effective
+`codex-terminal-backend' is `app-server', register the transcript so
+the resume is path-exact.  Return the project directory recorded in the
+catalog, or nil when it names no usable directory.  Signal a
+`user-error' when SESSION-ID is not in the catalog, the codex package
+is unavailable, or the transcript is unreadable."
   (let ((session (assoc session-id (agent-log--read-sessions backend))))
     (unless session
       (user-error
@@ -748,30 +775,18 @@ it only for calls that did not originate in Agent Log."
       (unless (and (stringp transcript) (file-readable-p transcript))
         (user-error "Canonical Codex transcript is not readable: %s"
                     transcript))
-      (when (and (stringp transcript)
-                 (fboundp 'codex--cache-session-transcript))
+      (when (fboundp 'codex--cache-session-transcript)
         (codex--cache-session-transcript session-id transcript))
-      (let* ((project-dir (or agent-log--session-project
-                              default-directory))
-             (default-directory (if (and project-dir
-                                         (file-directory-p project-dir))
-                                    project-dir
-                                  default-directory)))
-        (cl-letf (((symbol-function 'codex--directory)
-                   (lambda () default-directory)))
-          (if (and (eq codex-terminal-backend 'app-server)
-                   (fboundp 'codex--app-server-launch-resume-session))
-              (progn
-                (agent-log-codex--install-exact-resume-advice)
-                (puthash session-id transcript
-                         agent-log-codex--exact-resume-paths)
-                (condition-case err
-                    (codex--app-server-launch-resume-session session-id)
-                  (error
-                   (remhash session-id
-                            agent-log-codex--exact-resume-paths)
-                   (signal (car err) (cdr err)))))
-            (codex--start-subcommand "resume" nil (list session-id))))))))
+      (when (and (eq codex-terminal-backend 'app-server)
+                 (fboundp 'codex--app-server-launch-resume-session))
+        (agent-log-codex--install-exact-resume-advice)
+        (puthash session-id transcript
+                 agent-log-codex--exact-resume-paths))
+      (when (and agent-log--session-project
+                 (stringp agent-log--session-project)
+                 (not (string-empty-p agent-log--session-project))
+                 (file-directory-p agent-log--session-project))
+        agent-log--session-project))))
 
 ;;;;;; Current-buffer session detection
 

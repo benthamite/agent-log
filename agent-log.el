@@ -215,6 +215,21 @@ installed tools by checking for their config directories."
   :type '(choice (const :tag "Auto-detect installed" auto)
                  (repeat :tag "Explicit list" symbol)))
 
+(defvar agent-log-live-session-info-function nil
+  "Function reporting whether a historical session is currently live.
+When non-nil, called with BACKEND-KEY (a backend key symbol such as
+`claude-code' or `codex') and SESSION-ID (a string).  Returns a plist
+\(:buffer BUFFER :state STATE) when that session is running in a live
+buffer, where STATE is a symbol such as `busy', `waiting',
+`background-waiting', or `unknown'; nil otherwise.  Installed by the
+optional agent integration in `agent-log-agent.el'; nil means no live
+information is available.")
+
+(defface agent-log-live-state
+  '((t :inherit success :weight bold))
+  "Face for the live-state tag on sessions in the browser."
+  :group 'agent-log)
+
 ;;;;;; Backend registry
 
 (defvar agent-log--backend-registry (make-hash-table :test #'eq)
@@ -1740,6 +1755,14 @@ Projects are sorted by most recent session timestamp."
               (meta (cdr session))
               (backend (plist-get meta :backend))
               (icon (if backend (agent-log--backend-icon backend) ""))
+              (live (when (and agent-log-live-session-info-function backend)
+                      (funcall agent-log-live-session-info-function
+                               (agent-log-backend-key backend) session-id)))
+              (live-tag (if live
+                            (propertize
+                             (format "[%s] " (plist-get live :state))
+                             'face 'agent-log-live-state)
+                          ""))
               (ts (plist-get meta :timestamp))
               (date (agent-log--format-epoch-ms ts))
               (project (agent-log--short-project (plist-get meta :project)))
@@ -1757,7 +1780,7 @@ Projects are sorted by most recent session timestamp."
                                 (concat "\"" (agent-log--truncate-string
                                               display (- summary-width 2))
                                         "\"")))))
-              (label (concat icon " " body)))
+              (label (concat icon " " live-tag body)))
          (cons label (cons session-id meta))))
      sessions)))
 
@@ -4572,6 +4595,9 @@ dollar cost of the scope request."
     ("-u" agent-log-toggle-live-update)
     ("-g" agent-log-toggle-group-by-project)
     ("-m" agent-log-cycle-session-sort-key)]])
+
+(with-eval-after-load 'agent
+  (require 'agent-log-agent))
 
 (provide 'agent-log)
 ;;; agent-log.el ends here

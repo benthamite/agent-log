@@ -4461,5 +4461,153 @@ display time."
         (should (re-search-forward
                  "^> \\*\\*Summary\\*\\*: Test summary text\\." nil t))))))
 
+;;;;; Live-session annotation
+
+(ert-deftest agent-log-test-build-candidates/annotates-live-sessions ()
+  "Tag live sessions with their state from the live-info function."
+  (let* ((backend agent-log-claude--instance)
+         (sessions
+          `(("live-1" :display "hello" :timestamp 1700000000000
+             :project "/tmp/p" :file "/tmp/live-1.jsonl" :backend ,backend)
+            ("dead-1" :display "bye" :timestamp 1700000000000
+             :project "/tmp/p" :file "/tmp/dead-1.jsonl" :backend ,backend)))
+         (agent-log-live-session-info-function
+          (lambda (key id)
+            (when (and (eq key 'claude-code) (equal id "live-1"))
+              (list :buffer (current-buffer) :state 'busy)))))
+    (cl-letf (((symbol-function 'agent-log--read-index)
+               (lambda () (make-hash-table :test #'equal)))
+              ((symbol-function 'agent-log--session-size-label)
+               (lambda (_meta) "1k")))
+      (let* ((candidates (agent-log--build-candidates sessions))
+             (live-label (car (nth 0 candidates)))
+             (dead-label (car (nth 1 candidates))))
+        (should (string-match-p "\\[busy\\]" live-label))
+        (should-not (string-match-p "\\[" dead-label))))))
+
+;;;;; Agent bridge
+
+(require 'agent-log-agent nil t)
+
+(defmacro agent-log-test--with-agent-session (id &rest body)
+  "Run BODY in a fake live agent session buffer carrying ID.
+Anaphorically bind `buf' to that buffer.  Skip the test when the
+optional agent bridge is not loadable, as on CI without the sibling
+agent checkout.  Stub `agent-backend' so the bridge treats every
+backend as registered by agent."
+  (declare (indent 1))
+  `(progn
+     (skip-unless (featurep 'agent-log-agent))
+     (let ((buf (generate-new-buffer " *agent-log-agent-test*")))
+       (unwind-protect
+           (progn
+             (with-current-buffer buf
+               (setq-local agent--session
+                           (agent-session-create
+                            :backend 'claude-code
+                            :directory "~/project/"
+                            :id ,id)))
+             (cl-letf (((symbol-function 'agent-session-buffers)
+                        (lambda () (list buf)))
+                       ((symbol-function 'agent-session-display-state)
+                        (lambda (&rest _) 'waiting))
+                       ((symbol-function 'agent-backend)
+                        (lambda (_key) t)))
+               ,@body))
+         (kill-buffer buf)))))
+
+(ert-deftest agent-log-test-agent-bridge/session-info ()
+  "Report the live buffer and state for a matching session."
+  (agent-log-test--with-agent-session "sid-1"
+    (let ((info (agent-log-agent--session-info 'claude-code "sid-1")))
+      (should (eq (plist-get info :state) 'waiting))
+      (should (buffer-live-p (plist-get info :buffer))))
+    (should-not (agent-log-agent--session-info 'claude-code "other"))
+    (should-not (agent-log-agent--session-info 'codex "sid-1"))))
+
+(ert-deftest agent-log-test-agent-bridge/current-buffer-session-file ()
+  "Resolve the transcript from the agent-recorded id."
+  (agent-log-test--with-agent-session "sid-1"
+    (with-current-buffer buf
+      (cl-letf (((symbol-function 'agent-log--find-session-file)
+                 (lambda (_backend id)
+                   (when (equal id "sid-1") "/tmp/sid-1.jsonl"))))
+        (should (equal (agent-log--current-buffer-session-file
+                        agent-log-claude--instance)
+                       "/tmp/sid-1.jsonl"))))))
+
+(ert-deftest agent-log-test-agent-bridge/current-buffer-falls-back-without-id ()
+  "Fall back to the backend heuristics when agent knows no id."
+  (agent-log-test--with-agent-session nil
+    (with-current-buffer buf
+      (let (heuristics-ran)
+        (cl-letf (((symbol-function 'agent-log--find-session-file)
+                   (lambda (_backend _id) "/tmp/wrong.jsonl"))
+                  ((symbol-function 'claude-code--extract-directory-from-buffer-name)
+                   (lambda (_name)
+                     (setq heuristics-ran t)
+                     "/nonexistent-agent-log-test/"))
+                  ((symbol-function 'agent-log--read-sessions)
+                   (lambda (_backend) nil)))
+          (should-not (agent-log--current-buffer-session-file
+                       agent-log-claude--instance))
+          (should heuristics-ran))))))
+
+(ert-deftest agent-log-test-agent-bridge/active-session-ids ()
+  "Report live ids from agent's session structs when agent is loaded."
+  (agent-log-test--with-agent-session "sid-1"
+    (should (equal (agent-log--active-session-ids
+                    agent-log-claude--instance)
+                   '("sid-1")))))
+
+(ert-deftest agent-log-test-agent-bridge/resume-live-switches ()
+  "Switch to the live buffer instead of resuming a duplicate."
+  (agent-log-test--with-agent-session "sid-1"
+    (let (started shown)
+      (cl-letf (((symbol-function 'agent-start-session)
+                 (lambda (&rest args) (setq started args)))
+                ((symbol-function 'pop-to-buffer)
+                 (lambda (b &rest _) (setq shown b))))
+        (agent-log--resume-session agent-log-claude--instance "sid-1")
+        (should (eq shown buf))
+        (should-not started)))))
+
+(ert-deftest agent-log-test-agent-bridge/resume-inactive-routes-through-agent ()
+  "Route the resume of an inactive session through `agent-start-session'."
+  (agent-log-test--with-agent-session "other-id"
+    (let (started)
+      (cl-letf (((symbol-function 'agent-start-session)
+                 (lambda (session &rest options)
+                   (setq started (cons session options))
+                   (generate-new-buffer " *stub-live*")))
+                ((symbol-function 'agent-log-claude--session-project-directory)
+                 (lambda (_id) "/tmp/project/")))
+        (agent-log--resume-session agent-log-claude--instance "sid-9")
+        (should started)
+        (let ((session (car started)))
+          (should (eq (agent-session-backend session) 'claude-code))
+          (should (equal (agent-session-directory session) "/tmp/project/")))
+        (should (equal (plist-get (cdr started) :resume-id) "sid-9"))))))
+
+(ert-deftest agent-log-test-agent-bridge/resume-without-agent-backend-falls-back ()
+  "Run the direct resume path when agent does not register the backend."
+  (skip-unless (featurep 'agent-log-agent))
+  (let (direct
+        (real-require (symbol-function 'require)))
+    (cl-letf (((symbol-function 'agent-backend) (lambda (_key) nil))
+              ((symbol-function 'agent-log-agent--session-info)
+               (lambda (&rest _) nil))
+              ((symbol-function 'require)
+               (lambda (feature &optional filename noerror)
+                 (if (eq feature 'claude-code)
+                     t
+                   (funcall real-require feature filename noerror))))
+              ((symbol-function 'claude-code--start)
+               (lambda (&rest args) (setq direct (or args '(nil)))))
+              ((symbol-function 'agent-log-claude--session-project-directory)
+               (lambda (_id) nil)))
+      (agent-log--resume-session agent-log-claude--instance "sid-9")
+      (should direct))))
+
 (provide 'agent-log-test)
 ;;; agent-log-test.el ends here
