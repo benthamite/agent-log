@@ -3245,9 +3245,7 @@ session."
       (set-file-times latest-file (seconds-to-time 200))
       (with-temp-buffer
         (insert "⏺ " line "\n")
-        (cl-letf (((symbol-function 'agent-log-claude--read-status-file)
-                   (lambda () nil))
-                  ((symbol-function 'claude-code--extract-directory-from-buffer-name)
+        (cl-letf (((symbol-function 'claude-code--extract-directory-from-buffer-name)
                    (lambda (_buffer-name) dir))
                   ((symbol-function 'agent-log-claude--find-project-session-dir)
                    (lambda (_directory) session-dir)))
@@ -3280,9 +3278,7 @@ session."
       (set-file-times latest-file (seconds-to-time 200))
       (with-temp-buffer
         (insert line-a "\n" line-b "\n")
-        (cl-letf (((symbol-function 'agent-log-claude--read-status-file)
-                   (lambda () nil))
-                  ((symbol-function 'claude-code--extract-directory-from-buffer-name)
+        (cl-letf (((symbol-function 'claude-code--extract-directory-from-buffer-name)
                    (lambda (_buffer-name) dir))
                   ((symbol-function 'agent-log-claude--find-project-session-dir)
                    (lambda (_directory) session-dir)))
@@ -3307,9 +3303,7 @@ session."
       (with-temp-buffer
         (insert "⏵⏵ auto mode on (shift+tab to cycle) · ← for agents\n")
         (insert "⏺ " line "\n")
-        (cl-letf (((symbol-function 'agent-log-claude--read-status-file)
-                   (lambda () nil))
-                  ((symbol-function 'claude-code--extract-directory-from-buffer-name)
+        (cl-letf (((symbol-function 'claude-code--extract-directory-from-buffer-name)
                    (lambda (_buffer-name) dir))
                   ((symbol-function 'agent-log-claude--find-project-session-dir)
                    (lambda (_directory) session-dir)))
@@ -3840,38 +3834,11 @@ when the buffer already knows which session it holds."
       (kill-buffer buf1)
       (kill-buffer buf2))))
 
-(ert-deftest agent-log-test-claude-active-session-ids/unbound-status ()
-  "Skips live Claude buffers without bound extras status data."
-  (let ((buf1 (generate-new-buffer "claude-1"))
-        (buf2 (generate-new-buffer "claude-2"))
-        (status-bound (boundp 'claude-code-extras--status-data))
-        (status-value (when (boundp 'claude-code-extras--status-data)
-                        claude-code-extras--status-data)))
-    (unwind-protect
-        (progn
-          (makunbound 'claude-code-extras--status-data)
-          (with-current-buffer buf1
-            (setq-local claude-code-extras--status-data
-                        '(:session_id "claude-session")))
-          (cl-letf (((symbol-function 'require)
-                     (lambda (feature &rest _)
-                       (eq feature 'claude-code)))
-                    ((symbol-function 'buffer-list)
-                     (lambda () (list buf1 buf2)))
-                    ((symbol-function 'claude-code--buffer-p)
-                     (lambda (buffer) (memq buffer (list buf1 buf2))))
-                    ((symbol-function 'get-buffer-process)
-                     (lambda (_buffer) 'process))
-                    ((symbol-function 'process-live-p)
-                     (lambda (_process) t)))
-            (should (equal (agent-log--active-session-ids
-                            agent-log-test--claude-backend)
-                           '("claude-session")))))
-      (if status-bound
-          (setq claude-code-extras--status-data status-value)
-        (makunbound 'claude-code-extras--status-data))
-      (kill-buffer buf1)
-      (kill-buffer buf2))))
+(ert-deftest agent-log-test-claude-active-session-ids/standalone-nil ()
+  "Reports no live Claude ids without the agent integration."
+  (cl-letf (((symbol-function 'agent-backend) (lambda (_key) nil)))
+    (should-not (agent-log--active-session-ids
+                 agent-log-test--claude-backend))))
 
 ;;;;;; Entry normalization
 

@@ -38,7 +38,6 @@
 ;;;;; Soft dependency: claude-code
 
 (defvar claude-code-event-hook)
-(defvar claude-code-extras--status-data)
 (declare-function claude-code--start "claude-code")
 (declare-function claude-code--directory "claude-code")
 (declare-function claude-code--buffer-p "claude-code")
@@ -64,9 +63,6 @@
           "teammate-message")
       (or ">" " "))
   "Regexp matching system-generated XML tags in Claude Code user entries.")
-
-(defconst agent-log-claude--status-directory "/tmp/claude-code-status/"
-  "Directory where Claude Code writes per-buffer JSON status files.")
 
 ;;;;; Generic method implementations
 
@@ -302,25 +298,10 @@ Tool-use and thinking blocks are ignored."
 
 (cl-defmethod agent-log--active-session-ids ((_backend agent-log-claude))
   "Return a list of session IDs for live Claude Code sessions.
-Requires `claude-code' and `claude-code-extras' for session ID
-extraction.  Returns nil if either is unavailable."
-  (when (require 'claude-code nil t)
-    (let (ids)
-      (dolist (buf (buffer-list))
-        (when (and (buffer-live-p buf)
-                   (claude-code--buffer-p buf)
-                   (when-let* ((proc (get-buffer-process buf)))
-                     (process-live-p proc)))
-          (when-let* ((data (agent-log-claude--buffer-status-data buf))
-                      (sid (plist-get data :session_id)))
-            (push sid ids))))
-      (delete-dups ids))))
-
-(defun agent-log-claude--buffer-status-data (buffer)
-  "Return Claude Code extras status data for BUFFER, if bound."
-  (with-current-buffer buffer
-    (when (boundp 'claude-code-extras--status-data)
-      claude-code-extras--status-data)))
+Standalone Agent Log has no reliable live-identity source for Claude
+Code, so this returns nil; the optional agent integration in
+`agent-log-agent.el' overrides it with the authoritative answer."
+  nil)
 
 ;;;;;; Resume session
 
@@ -438,42 +419,14 @@ Try both the expanded path and its `file-truename'."
           (setq latest f latest-time mtime))))
     latest))
 
-(defun agent-log-claude--read-status-file ()
-  "Read the status file for the Claude session in the current buffer.
-Return a plist with :session_id and :transcript_path, or nil.
-The status file is written by Claude Code to
-`agent-log-claude--status-directory', keyed by sanitized buffer name."
-  (when-let* ((file (agent-log-claude--status-file-for-buffer))
-              ((file-exists-p file)))
-    (condition-case nil
-        (let* ((json (json-parse-string
-                      (with-temp-buffer
-                        (insert-file-contents file)
-                        (buffer-string))
-                      :object-type 'plist))
-               (sid (plist-get json :session_id))
-               (path (plist-get json :transcript_path)))
-          (when (and (stringp sid) (not (string-empty-p sid)))
-            (list :session_id sid :transcript_path path)))
-      (error nil))))
-
 (defun agent-log-claude--session-id-from-buffer ()
   "Return the session ID for the Claude session in the current buffer.
-Read it from the status file that Claude Code writes to
-`agent-log-claude--status-directory', keyed by sanitized buffer name."
-  (plist-get (agent-log-claude--read-status-file) :session_id))
-
-(defun agent-log-claude--status-file-for-buffer ()
-  "Return the status file path for the current buffer."
-  (expand-file-name
-   (concat (agent-log-claude--sanitize-buffer-name) ".json")
-   agent-log-claude--status-directory))
-
-(defun agent-log-claude--sanitize-buffer-name ()
-  "Sanitize the current buffer name for use as a filename.
-Replace every non-alphanumeric, non-underscore, non-hyphen
-character with an underscore."
-  (replace-regexp-in-string "[^a-zA-Z0-9_-]" "_" (buffer-name)))
+Resolve the buffer's session file — through the agent integration when
+available, otherwise the standalone heuristics — and derive the id from
+its file name."
+  (when-let* ((backend (agent-log--get-backend 'claude-code))
+              (file (agent-log--current-buffer-session-file backend)))
+    (agent-log--session-id-from-file backend file)))
 
 (defun agent-log-claude--find-session-for-project (directory sessions)
   "Find the latest session in SESSIONS whose project matches DIRECTORY.
@@ -599,23 +552,19 @@ session-end actions when `:type' is \"Stop\", according to
 
 (cl-defmethod agent-log--current-buffer-session-file ((backend agent-log-claude))
   "Return the JSONL file for the Claude Code session in the current buffer.
-BACKEND is the Claude Code backend instance.  Identify the exact
-session via the status file when possible; otherwise fall back to
-the most recent JSONL in the project directory, then to a session
-in `history.jsonl' whose project matches the buffer directory."
+BACKEND is the Claude Code backend instance.  Match visible terminal
+text against project transcripts, then fall back to the most recent
+JSONL in the project directory, then to a session in `history.jsonl'
+whose project matches the buffer directory.  The optional agent
+integration short-circuits these heuristics with the authoritative
+session id."
   (let* ((dir (claude-code--extract-directory-from-buffer-name (buffer-name)))
-         (status (agent-log-claude--read-status-file))
-         (transcript (plist-get status :transcript_path))
-         (session-id (plist-get status :session_id))
          (session-dir (and dir (agent-log-claude--find-project-session-dir dir))))
-    (or (and transcript (file-exists-p transcript) transcript)
-        (and session-id session-dir
-             (let ((f (expand-file-name (concat session-id ".jsonl") session-dir)))
-               (and (file-exists-p f) f)))
-        (and session-dir (agent-log-claude--visible-session-file session-dir))
+    (or (and session-dir (agent-log-claude--visible-session-file session-dir))
         (and session-dir (agent-log-claude--find-latest-jsonl session-dir))
-        (when-let* ((match (agent-log-claude--find-session-for-project
-                            dir (agent-log--read-sessions backend))))
+        (when-let* ((match (and dir
+                                (agent-log-claude--find-session-for-project
+                                 dir (agent-log--read-sessions backend)))))
           (plist-get (cdr match) :file)))))
 
 (defun agent-log-claude--visible-session-file (directory)
