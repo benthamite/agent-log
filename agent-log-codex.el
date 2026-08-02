@@ -670,13 +670,20 @@ Tool-use, tool-result, and thinking blocks are ignored."
 
 ;;;;;; Active sessions
 
-(cl-defmethod agent-log--active-session-ids ((backend agent-log-codex))
+(cl-defmethod agent-log--active-session-ids
+  ((backend agent-log-codex) &optional sessions)
   "Return a list of session IDs for live Codex sessions.
 Active Codex terminal buffers are matched to transcript files using
 the same project and launch-time heuristic as
-`agent-log--current-buffer-session-file'."
+`agent-log--current-buffer-session-file'.  Reuse SESSIONS when given."
   (when (require 'codex nil t)
-    (let ((sessions (agent-log--read-sessions backend))
+    (let ((sessions
+           (if sessions
+               (seq-filter
+                (lambda (session)
+                  (eq (plist-get (cdr session) :backend) backend))
+                sessions)
+             (agent-log--read-sessions backend)))
           ids)
       (dolist (buffer (buffer-list))
         (when-let* (((codex--buffer-p buffer))

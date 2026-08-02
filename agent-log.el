@@ -165,8 +165,10 @@ Returns a plist with :project and :date.")
   "Return non-nil if LINE may contain summary-relevant text for BACKEND."
   (:method ((_backend agent-log-backend) _line) t))
 
-(cl-defgeneric agent-log--active-session-ids (backend)
-  "Return a list of session IDs for live sessions under BACKEND.")
+(cl-defgeneric agent-log--active-session-ids (backend &optional sessions)
+  "Return live session IDs for BACKEND.
+When SESSIONS is non-nil, reuse that session catalog for any lookup
+needed to identify live sessions.")
 
 (cl-defgeneric agent-log--resume-session (backend session-id)
   "Resume the session SESSION-ID in the coding agent for BACKEND.")
@@ -2780,7 +2782,8 @@ Returns (SUMMARY . ONELINE) or nil."
   "Return sessions from SESSIONS needing a summary per INDEX.
 Sessions with a live agent process are excluded by session ID."
   (let ((active-ids (cl-loop for backend in (agent-log--active-backend-instances)
-                             append (agent-log--active-session-ids backend))))
+                             append (agent-log--active-session-ids
+                                     backend sessions))))
     (seq-filter
      (lambda (session)
        (let* ((sid (car session))

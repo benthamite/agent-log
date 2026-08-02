@@ -296,7 +296,8 @@ Tool-use and thinking blocks are ignored."
 
 ;;;;;; Active sessions
 
-(cl-defmethod agent-log--active-session-ids ((_backend agent-log-claude))
+(cl-defmethod agent-log--active-session-ids
+  ((_backend agent-log-claude) &optional _sessions)
   "Return a list of session IDs for live Claude Code sessions.
 Standalone Agent Log has no reliable live-identity source for Claude
 Code, so this returns nil; the optional agent integration in

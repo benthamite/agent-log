@@ -1718,6 +1718,21 @@ SUMMARY defaults to ONELINE."
         (index (make-hash-table :test #'equal)))
     (should (= (length (agent-log--sessions-needing-summary sessions index)) 2))))
 
+(ert-deftest agent-log-test-sessions-needing-summary/reuses-session-catalog ()
+  "Passes the existing catalog to live-session detection."
+  (let* ((backend agent-log-test--codex-backend)
+         (sessions (list (list "s1" :file "/a.jsonl" :backend backend)))
+         (index (make-hash-table :test #'equal))
+         received)
+    (cl-letf (((symbol-function 'agent-log--active-backend-instances)
+               (lambda () (list backend)))
+              ((symbol-function 'agent-log--active-session-ids)
+               (lambda (_backend &optional catalog)
+                 (setq received catalog)
+                 nil)))
+      (agent-log--sessions-needing-summary sessions index))
+    (should (eq received sessions))))
+
 (ert-deftest agent-log-test-sessions-needing-summary/some-summarized ()
   "Excludes sessions with current summaries."
   (agent-log-test--with-temp-dir
@@ -3670,7 +3685,7 @@ archived threads must survive."
                            t
                          (funcall original-require feature nil t))))
                     ((symbol-function 'agent-log--active-session-ids)
-                     (lambda (_backend) nil))
+                     (lambda (_backend &optional _sessions) nil))
                     ((symbol-function 'codex--app-server-launch-resume-session)
                      (lambda (actual-id) (setq launched actual-id))))
             (agent-log-browse-sessions)

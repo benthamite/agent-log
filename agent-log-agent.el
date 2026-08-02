@@ -72,7 +72,7 @@ on disk."
       (cl-call-next-method)))
 
 (cl-defmethod agent-log--active-session-ids :around
-  ((backend agent-log-backend))
+  ((backend agent-log-backend) &optional _sessions)
   "Report live session ids from the agent package's registry.
 Agent tracks every live buffer of the backends it registers, so its
 answer replaces BACKEND's standalone heuristics whenever agent
