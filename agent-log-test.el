@@ -4524,6 +4524,41 @@ display time."
         (should (string-match-p "\\[busy\\]" (car (nth 0 candidates))))
         (should-not (string-match-p "\\[" (car (nth 1 candidates))))))))
 
+(defun agent-log-test--date-column (label)
+  "Return the display column where LABEL's date column starts."
+  (let ((pos (string-match "[0-9]\\{4\\}-[0-9]\\{2\\}-[0-9]\\{2\\} " label)))
+    (should pos)
+    (string-width (substring label 0 pos))))
+
+(ert-deftest agent-log-test-build-candidates/aligns-columns-across-live-tags ()
+  "Keep every column aligned whether or not a row carries a live tag.
+The live-state tag is a column like any other, so it must occupy the
+same width on every row and must be charged against the summary budget."
+  (let* ((backend agent-log-claude--instance)
+         (display (make-string 400 ?x))
+         (sessions
+          `(("busy-1" :display ,display :timestamp 1700000000000
+             :project "/tmp/p" :file "/tmp/busy-1.jsonl" :backend ,backend)
+            ("waiting-1" :display ,display :timestamp 1700000000000
+             :project "/tmp/p" :file "/tmp/waiting-1.jsonl" :backend ,backend)
+            ("dead-1" :display ,display :timestamp 1700000000000
+             :project "/tmp/p" :file "/tmp/dead-1.jsonl" :backend ,backend)))
+         (table (make-hash-table :test #'equal))
+         (agent-log-live-session-info-table-function (lambda () table)))
+    (puthash '(claude-code . "busy-1")
+             (list :buffer (current-buffer) :state 'busy) table)
+    (puthash '(claude-code . "waiting-1")
+             (list :buffer (current-buffer) :state 'waiting) table)
+    (cl-letf (((symbol-function 'agent-log--read-index)
+               (lambda () (make-hash-table :test #'equal)))
+              ((symbol-function 'agent-log--session-size-label)
+               (lambda (_meta) "1k")))
+      (let* ((labels (mapcar #'car (agent-log--build-candidates sessions)))
+             (columns (mapcar #'agent-log-test--date-column labels))
+             (widths (mapcar #'string-width labels)))
+        (should (equal columns (make-list 3 (car columns))))
+        (should (equal widths (make-list 3 (car widths))))))))
+
 ;;;;; Agent bridge
 
 (require 'agent-log-agent nil t)

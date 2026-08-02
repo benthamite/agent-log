@@ -1749,60 +1749,92 @@ Projects are sorted by most recent session timestamp."
 (defun agent-log--build-candidates (sessions)
   "Build an alist of (display-string . (session-id . metadata)) from SESSIONS."
   (let* ((index (agent-log--read-index))
-         (bulk-live-info-p
-          (functionp agent-log-live-session-info-table-function))
-         (live-info-table
-          (when bulk-live-info-p
-            (funcall agent-log-live-session-info-table-function)))
+         (live-states (agent-log--session-live-states sessions))
+         (live-width (agent-log--max-live-tag-width live-states))
          (proj-width (agent-log--max-project-width sessions))
          (size-width (agent-log--max-session-size-width sessions))
          ;; Icon column: SVG renders as 1 char, text fallback is typically 2.
          (icon-width (if (image-type-available-p 'svg) 1 2))
-         ;; icon + gap + date + project + size + inter-column gaps
-         (fixed-cols (+ icon-width 1 16 2 proj-width 2 size-width 2))
+         ;; icon + gap + live tag + date + project + size + inter-column gaps
+         (fixed-cols (+ icon-width 1 live-width 16 2 proj-width 2 size-width 2))
          ;; Ensure the summary column is wide enough to be useful even
          ;; in narrow frames; below ~20 chars summaries become unreadable.
          (summary-width (max 20 (- (frame-width) fixed-cols 1)))
          (fmt (format "%%s  %%-%ds  %%%ds  %%s" proj-width size-width)))
+    (cl-loop
+     for session in sessions
+     for live in live-states
+     collect
+     (let* ((session-id (car session))
+            (meta (cdr session))
+            (backend (plist-get meta :backend))
+            (icon (if backend (agent-log--backend-icon backend) ""))
+            (live-tag (agent-log--live-tag live live-width))
+            (ts (plist-get meta :timestamp))
+            (date (agent-log--format-epoch-ms ts))
+            (project (agent-log--short-project (plist-get meta :project)))
+            (size (agent-log--session-size-label meta))
+            (index-entry (gethash session-id index))
+            (oneline (when index-entry
+                       (plist-get index-entry :summary-oneline)))
+            (body (if oneline
+                      (format fmt date project size
+                              (agent-log--truncate-string
+                               oneline summary-width))
+                    (let ((display (agent-log--normalize-whitespace
+                                    (plist-get meta :display))))
+                      (format fmt date project size
+                              (concat "\"" (agent-log--truncate-string
+                                            display (- summary-width 2))
+                                      "\"")))))
+            (label (concat icon " " live-tag body)))
+       (cons label (cons session-id meta))))))
+
+(defun agent-log--session-live-states (sessions)
+  "Return the live-state plist for each session in SESSIONS, nil when not live.
+Prefer `agent-log-live-session-info-table-function', which reports every
+live session in one snapshot, and fall back to the single-session
+`agent-log-live-session-info-function' only when no snapshot function is
+installed.  Resolving every session here keeps the snapshot to one call
+and lets the caller size the live-tag column before formatting rows."
+  (let* ((bulk-live-info-p
+          (functionp agent-log-live-session-info-table-function))
+         (live-info-table
+          (when bulk-live-info-p
+            (funcall agent-log-live-session-info-table-function))))
     (mapcar
      (lambda (session)
-       (let* ((session-id (car session))
-              (meta (cdr session))
-              (backend (plist-get meta :backend))
-              (icon (if backend (agent-log--backend-icon backend) ""))
-              (live
-               (when backend
-                 (let ((key (cons (agent-log-backend-key backend) session-id)))
-                   (if bulk-live-info-p
-                       (gethash key live-info-table)
-                     (when agent-log-live-session-info-function
-                       (funcall agent-log-live-session-info-function
-                                (car key) (cdr key)))))))
-              (live-tag (if live
-                            (propertize
-                             (format "[%s] " (plist-get live :state))
-                             'face 'agent-log-live-state)
-                          ""))
-              (ts (plist-get meta :timestamp))
-              (date (agent-log--format-epoch-ms ts))
-              (project (agent-log--short-project (plist-get meta :project)))
-              (size (agent-log--session-size-label meta))
-              (index-entry (gethash session-id index))
-              (oneline (when index-entry
-                         (plist-get index-entry :summary-oneline)))
-              (body (if oneline
-                        (format fmt date project size
-                                (agent-log--truncate-string
-                                 oneline summary-width))
-                      (let ((display (agent-log--normalize-whitespace
-                                       (plist-get meta :display))))
-                        (format fmt date project size
-                                (concat "\"" (agent-log--truncate-string
-                                              display (- summary-width 2))
-                                        "\"")))))
-              (label (concat icon " " live-tag body)))
-         (cons label (cons session-id meta))))
+       (when-let* ((backend (plist-get (cdr session) :backend))
+                   (key (cons (agent-log-backend-key backend) (car session))))
+         (if bulk-live-info-p
+             (gethash key live-info-table)
+           (when agent-log-live-session-info-function
+             (funcall agent-log-live-session-info-function
+                      (car key) (cdr key))))))
      sessions)))
+
+(defun agent-log--max-live-tag-width (live-states)
+  "Return the display width of the live-tag column for LIVE-STATES.
+The width covers the widest tag plus its trailing separator, and is zero
+when no session is live, so archives without live sessions keep the
+layout they had before the column existed."
+  (let ((max-w 0))
+    (dolist (live live-states max-w)
+      (when live
+        (let ((w (1+ (string-width (agent-log--live-tag-text live)))))
+          (when (> w max-w) (setq max-w w)))))))
+
+(defun agent-log--live-tag (live width)
+  "Return LIVE's tag padded to WIDTH display columns.
+LIVE is nil for a session that is not running, which yields WIDTH spaces
+so every row's remaining columns start at the same place."
+  (let ((text (if live (agent-log--live-tag-text live) "")))
+    (concat (propertize text 'face 'agent-log-live-state)
+            (make-string (- width (string-width text)) ?\s))))
+
+(defun agent-log--live-tag-text (live)
+  "Return the bracketed state label for LIVE."
+  (format "[%s]" (plist-get live :state)))
 
 (defun agent-log--max-project-width (sessions)
   "Return the maximum display width of project names in SESSIONS."
