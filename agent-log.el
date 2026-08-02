@@ -432,6 +432,15 @@ When non-nil, `agent-log-browse-sessions' first prompts for a
 project, then for a session within that project."
   :type 'boolean)
 
+(defcustom agent-log-project-column-max-width 24
+  "Maximum display width of the project column in the session browser.
+Longer project names are abbreviated with an ellipsis, so that a few
+unusually long project directories do not pad every row and crowd out
+the summary column.  Set to nil to always size the column to the longest
+project name on display."
+  :type '(choice (const :tag "No maximum" nil)
+                 (integer :tag "Columns")))
+
 (defcustom agent-log-slug-max-length 50
   "Maximum length of the slug portion of rendered filenames."
   :type 'integer)
@@ -1760,7 +1769,7 @@ Projects are sorted by most recent session timestamp."
          ;; Ensure the summary column is wide enough to be useful even
          ;; in narrow frames; below ~20 chars summaries become unreadable.
          (summary-width (max 20 (- (frame-width) fixed-cols 1)))
-         (fmt (format "%%s  %%-%ds  %%%ds  %%s" proj-width size-width)))
+         (fmt (format "%%s  %%s  %%%ds  %%s" size-width)))
     (cl-loop
      for session in sessions
      for live in live-states
@@ -1772,7 +1781,8 @@ Projects are sorted by most recent session timestamp."
             (live-tag (agent-log--live-tag live live-width))
             (ts (plist-get meta :timestamp))
             (date (agent-log--format-epoch-ms ts))
-            (project (agent-log--short-project (plist-get meta :project)))
+            (project (agent-log--project-field
+                      (plist-get meta :project) proj-width))
             (size (agent-log--session-size-label meta))
             (index-entry (gethash session-id index))
             (oneline (when index-entry
@@ -1789,6 +1799,13 @@ Projects are sorted by most recent session timestamp."
                                       "\"")))))
             (label (concat icon " " live-tag body)))
        (cons label (cons session-id meta))))))
+
+(defun agent-log--project-field (project width)
+  "Return PROJECT's browser label padded or abbreviated to WIDTH columns.
+Padding and abbreviation both work in display columns, so the columns
+after this one line up even for names that are wider than they are long."
+  (truncate-string-to-width
+   (agent-log--short-project project) width 0 ?\s t))
 
 (defun agent-log--session-live-states (sessions)
   "Return the live-state plist for each session in SESSIONS, nil when not live.
@@ -1837,13 +1854,18 @@ so every row's remaining columns start at the same place."
   (format "[%s]" (plist-get live :state)))
 
 (defun agent-log--max-project-width (sessions)
-  "Return the maximum display width of project names in SESSIONS."
+  "Return the display width of the project column for SESSIONS.
+This is the width of the longest project name, bounded by
+`agent-log-project-column-max-width' when that is non-nil."
   (let ((max-w 0))
-    (dolist (session sessions max-w)
+    (dolist (session sessions)
       (let* ((project (agent-log--short-project
                        (plist-get (cdr session) :project)))
              (w (string-width project)))
-        (when (> w max-w) (setq max-w w))))))
+        (when (> w max-w) (setq max-w w))))
+    (if agent-log-project-column-max-width
+        (min max-w agent-log-project-column-max-width)
+      max-w)))
 
 (defun agent-log--max-session-size-width (sessions)
   "Return the maximum display width of session size labels in SESSIONS."

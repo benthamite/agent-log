@@ -296,6 +296,7 @@ Increase these values if you find that truncated tool content is hiding informat
 @vindex agent-log-group-by-project
 @vindex agent-log-session-sort-key
 @vindex agent-log-ignored-project-regexps
+@vindex agent-log-project-column-max-width
 @vindex agent-log-slug-max-length
 
 The user option @code{agent-log-group-by-project} controls whether @code{agent-log-browse-sessions} groups sessions by project (@ref{Session browsing}).  When non-@code{nil} (the default), the command first prompts for a project, then for a session within that project.  When @code{nil}, all sessions are presented in a single flat list.  The grouped view is more convenient when you have many sessions across several projects; the flat view is useful for quickly finding a recent session regardless of project.
@@ -303,6 +304,8 @@ The user option @code{agent-log-group-by-project} controls whether @code{agent-l
 The user option @code{agent-log-session-sort-key} controls which timestamp defines “most recent” in the session browser.  The default, @code{creation-time}, sorts by the backend's recorded session timestamp.  Set it to @code{modification-time} to sort by the source JSONL file's last modification time instead, so resumed or appended sessions rise to the top.
 
 The user option @code{agent-log-ignored-project-regexps} is a list of regular expressions; any session whose working directory matches one of them is omitted from the browser, @code{agent-log-open-latest}, and AI search.  The default excludes sessions run under the system temporary directory (@samp{/tmp} and @samp{/private/tmp}), which is where throwaway scratch sessions accumulate — for example when repeatedly launching a coding agent in disposable directories to test it.  Ignored sessions are not deleted: they remain on disk and can still be opened directly with @code{agent-log-open-file} or @code{agent-log-open-session}.  Add your own patterns to hide other transient or uninteresting locations.
+
+The user option @code{agent-log-project-column-max-width} bounds the width of the project column in the session browser.  The column is normally as wide as the longest project name on display, which means a single unusually long project directory pads every other row and leaves less space for the summary.  Names wider than this option are abbreviated with an ellipsis instead.  The default value is @code{24}; set it to @code{nil} to always show every project name in full.
 
 The user option @code{agent-log-slug-max-length} sets the maximum length of the slug portion of rendered filenames.  The slug is derived from the first user message and appears after the UTC date in the filename.  The backend and full session ID follow the slug so repeated opening text cannot collapse distinct sessions (e.g., @samp{2026-02-22_11-56_redesign-agent-log-package--codex--019c...md}).  The default value is @code{50}.
 
@@ -392,7 +395,7 @@ Every archive-wide command reads that same catalog, so what the session browser,
 
 Within a single browse run, source file size and modification-time metadata is cached per session.  This keeps flat browsing and modification-time sorting responsive even when the archive contains many sessions.  Checks for live sessions reuse the catalog that is already in hand instead of asking the backend for its session list a second time.  Live-state annotations use one snapshot of the agent package's session registry for the entire picker, rather than rescanning live buffers for each historical row.
 
-Each project is labelled by the shortest trailing portion of its working directory that uniquely identifies it.  A project whose final directory component is unique is shown by that component alone (for example, @samp{my-project}); when several projects share a final component, each label grows one parent directory at a time until it is distinct (for example, @samp{8.1.0-dev/elpaca/sources/codex} versus @samp{8.3.0-dev/elpaca/sources/codex}).  This keeps labels short while guaranteeing that two distinct project directories never collapse to the same entry.
+Each project is labelled by the shortest trailing portion of its working directory that uniquely identifies it.  A project whose final directory component is unique is shown by that component alone (for example, @samp{my-project}); when several projects share a final component, each label grows one parent directory at a time until it is distinct (for example, @samp{8.1.0-dev/elpaca/sources/codex} versus @samp{8.3.0-dev/elpaca/sources/codex}).  This keeps labels short while guaranteeing that two distinct project directories never collapse to the same entry.  Labels that are still wider than @code{agent-log-project-column-max-width} are abbreviated in the browser (@ref{Session browser options}).
 
 Selecting a session lazily renders it to a @samp{.md} file if needed, then opens the rendered buffer in @code{agent-log-mode} (@ref{@code{agent-log-mode}}).
 

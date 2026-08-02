@@ -4559,6 +4559,53 @@ same width on every row and must be charged against the summary budget."
         (should (equal columns (make-list 3 (car columns))))
         (should (equal widths (make-list 3 (car widths))))))))
 
+(defun agent-log-test--project-sessions (&rest projects)
+  "Return one browser session per project directory in PROJECTS."
+  (let ((backend agent-log-claude--instance)
+        (n 0))
+    (mapcar (lambda (project)
+              (list (format "s%d" (cl-incf n))
+                    :display "hello" :timestamp 1700000000000
+                    :project project
+                    :file (format "/tmp/s%d.jsonl" n)
+                    :backend backend))
+            projects)))
+
+(ert-deftest agent-log-test-build-candidates/caps-project-column-width ()
+  "Bound the project column so one long name does not pad every row."
+  (let ((sessions (agent-log-test--project-sessions
+                   "/tmp/short"
+                   (concat "/tmp/" (make-string 40 ?z))))
+        (agent-log-project-column-max-width 10)
+        (agent-log-live-session-info-table-function nil)
+        (agent-log-live-session-info-function nil))
+    (cl-letf (((symbol-function 'agent-log--read-index)
+               (lambda () (make-hash-table :test #'equal)))
+              ((symbol-function 'agent-log--session-size-label)
+               (lambda (_meta) "1k")))
+      (let ((labels (mapcar #'car (agent-log--build-candidates sessions))))
+        (should (equal (mapcar #'string-width labels)
+                       (make-list 2 (string-width (car labels)))))
+        (should (string-match-p "…" (nth 1 labels)))
+        (should-not (string-match-p (make-string 11 ?z) (nth 1 labels)))))))
+
+(ert-deftest agent-log-test-build-candidates/uncapped-project-column-width ()
+  "Size the project column to the longest name when no maximum is set."
+  (let ((sessions (agent-log-test--project-sessions
+                   "/tmp/short"
+                   (concat "/tmp/" (make-string 40 ?z))))
+        (agent-log-project-column-max-width nil)
+        (agent-log-live-session-info-table-function nil)
+        (agent-log-live-session-info-function nil))
+    (cl-letf (((symbol-function 'agent-log--read-index)
+               (lambda () (make-hash-table :test #'equal)))
+              ((symbol-function 'agent-log--session-size-label)
+               (lambda (_meta) "1k")))
+      (let ((labels (mapcar #'car (agent-log--build-candidates sessions))))
+        (should (string-match-p (make-string 40 ?z) (nth 1 labels)))
+        (should (equal (mapcar #'string-width labels)
+                       (make-list 2 (string-width (car labels)))))))))
+
 ;;;;; Agent bridge
 
 (require 'agent-log-agent nil t)
