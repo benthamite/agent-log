@@ -227,6 +227,14 @@ buffer, where STATE is a symbol such as `busy', `waiting',
 optional agent integration in `agent-log-agent.el'; nil means no live
 information is available.")
 
+(defvar agent-log-live-session-info-table-function nil
+  "Function returning a snapshot of every currently live session.
+When non-nil, called without arguments and returns an equal-tested hash
+table keyed by (BACKEND-KEY . SESSION-ID).  Values use the same
+\(:buffer BUFFER :state STATE) plist as
+`agent-log-live-session-info-function'.  An installed function is
+authoritative even when it returns an empty table.")
+
 (defface agent-log-live-state
   '((t :inherit success :weight bold))
   "Face for the live-state tag on sessions in the browser."
@@ -1741,6 +1749,11 @@ Projects are sorted by most recent session timestamp."
 (defun agent-log--build-candidates (sessions)
   "Build an alist of (display-string . (session-id . metadata)) from SESSIONS."
   (let* ((index (agent-log--read-index))
+         (bulk-live-info-p
+          (functionp agent-log-live-session-info-table-function))
+         (live-info-table
+          (when bulk-live-info-p
+            (funcall agent-log-live-session-info-table-function)))
          (proj-width (agent-log--max-project-width sessions))
          (size-width (agent-log--max-session-size-width sessions))
          ;; Icon column: SVG renders as 1 char, text fallback is typically 2.
@@ -1757,9 +1770,14 @@ Projects are sorted by most recent session timestamp."
               (meta (cdr session))
               (backend (plist-get meta :backend))
               (icon (if backend (agent-log--backend-icon backend) ""))
-              (live (when (and agent-log-live-session-info-function backend)
-                      (funcall agent-log-live-session-info-function
-                               (agent-log-backend-key backend) session-id)))
+              (live
+               (when backend
+                 (let ((key (cons (agent-log-backend-key backend) session-id)))
+                   (if bulk-live-info-p
+                       (gethash key live-info-table)
+                     (when agent-log-live-session-info-function
+                       (funcall agent-log-live-session-info-function
+                                (car key) (cdr key)))))))
               (live-tag (if live
                             (propertize
                              (format "[%s] " (plist-get live :state))

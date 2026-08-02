@@ -56,7 +56,21 @@ agent package's authoritative session identity and display state."
            return (list :buffer buffer
                         :state (agent-session-display-state buffer))))
 
-(setq agent-log-live-session-info-function #'agent-log-agent--session-info)
+(defun agent-log-agent--session-info-table ()
+  "Return an equal-tested table describing every live agent session."
+  (let ((table (make-hash-table :test #'equal)))
+    (dolist (buffer (agent-session-buffers) table)
+      (when-let* ((session (agent-session buffer))
+                  (backend-key (agent-session-backend session))
+                  (session-id (agent-session-id session)))
+        (puthash (cons backend-key session-id)
+                 (list :buffer buffer
+                       :state (agent-session-display-state buffer))
+                 table)))))
+
+(setq agent-log-live-session-info-function #'agent-log-agent--session-info
+      agent-log-live-session-info-table-function
+      #'agent-log-agent--session-info-table)
 
 (cl-defmethod agent-log--current-buffer-session-file :around
   ((backend agent-log-backend))

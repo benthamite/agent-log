@@ -4480,6 +4480,7 @@ display time."
              :project "/tmp/p" :file "/tmp/live-1.jsonl" :backend ,backend)
             ("dead-1" :display "bye" :timestamp 1700000000000
              :project "/tmp/p" :file "/tmp/dead-1.jsonl" :backend ,backend)))
+         (agent-log-live-session-info-table-function nil)
          (agent-log-live-session-info-function
           (lambda (key id)
             (when (and (eq key 'claude-code) (equal id "live-1"))
@@ -4493,6 +4494,35 @@ display time."
              (dead-label (car (nth 1 candidates))))
         (should (string-match-p "\\[busy\\]" live-label))
         (should-not (string-match-p "\\[" dead-label))))))
+
+(ert-deftest agent-log-test-build-candidates/snapshots-live-sessions-once ()
+  "Use one bulk live-state snapshot for every browser candidate."
+  (let* ((backend agent-log-claude--instance)
+         (sessions
+          `(("live-1" :display "hello" :timestamp 1700000000000
+             :project "/tmp/p" :file "/tmp/live-1.jsonl" :backend ,backend)
+            ("dead-1" :display "bye" :timestamp 1700000000000
+             :project "/tmp/p" :file "/tmp/dead-1.jsonl" :backend ,backend)))
+         (table (make-hash-table :test #'equal))
+         (calls 0)
+         (agent-log-live-session-info-table-function
+          (lambda ()
+            (cl-incf calls)
+            table))
+         (agent-log-live-session-info-function
+          (lambda (&rest _)
+            (ert-fail "Point lookup ran despite installed bulk snapshot"))))
+    (puthash '(claude-code . "live-1")
+             (list :buffer (current-buffer) :state 'busy)
+             table)
+    (cl-letf (((symbol-function 'agent-log--read-index)
+               (lambda () (make-hash-table :test #'equal)))
+              ((symbol-function 'agent-log--session-size-label)
+               (lambda (_meta) "1k")))
+      (let ((candidates (agent-log--build-candidates sessions)))
+        (should (= calls 1))
+        (should (string-match-p "\\[busy\\]" (car (nth 0 candidates))))
+        (should-not (string-match-p "\\[" (car (nth 1 candidates))))))))
 
 ;;;;; Agent bridge
 
@@ -4533,6 +4563,15 @@ backend as registered by agent."
       (should (buffer-live-p (plist-get info :buffer))))
     (should-not (agent-log-agent--session-info 'claude-code "other"))
     (should-not (agent-log-agent--session-info 'codex "sid-1"))))
+
+(ert-deftest agent-log-test-agent-bridge/session-info-table ()
+  "Snapshot live session identities and states in one registry pass."
+  (agent-log-test--with-agent-session "sid-1"
+    (let* ((table (agent-log-agent--session-info-table))
+           (info (gethash '(claude-code . "sid-1") table)))
+      (should (eq (hash-table-test table) 'equal))
+      (should (eq (plist-get info :state) 'waiting))
+      (should (eq (plist-get info :buffer) buf)))))
 
 (ert-deftest agent-log-test-agent-bridge/current-buffer-session-file ()
   "Resolve the transcript from the agent-recorded id."
