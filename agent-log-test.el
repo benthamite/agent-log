@@ -3382,9 +3382,7 @@ session."
                      1778025600000)))))))
 
 (ert-deftest agent-log-test-codex-thread-list/matches-native-wire-contract ()
-  "Sends only what native Resume sends, plus pagination, from the active home.
-Any extra membership filter here would make Agent Log's session list
-diverge from the list Codex's own Resume chooser shows."
+  "Uses native Resume's indexed listing contract from the active home."
   (let* ((backend
           (agent-log--make-codex
            :name "Codex" :key 'codex :directory "/unused/.codex"))
@@ -3419,14 +3417,43 @@ diverge from the list Codex's own Resume chooser shows."
     (let ((first-page (nth 2 (nth 1 calls)))
           (second-page (nth 2 (nth 2 calls))))
       (should (equal (mapcar #'car first-page)
-                     '(limit sortKey sortDirection)))
+                     '(limit sortKey sortDirection useStateDbOnly)))
       (should (equal (alist-get 'sortKey first-page) "updated_at"))
       (should (equal (alist-get 'sortDirection first-page) "desc"))
+      (should (eq (alist-get 'useStateDbOnly first-page) t))
       (should (equal (mapcar #'car second-page)
-                     '(limit sortKey sortDirection cursor)))
+                     '(limit sortKey sortDirection useStateDbOnly cursor)))
+      (should (eq (alist-get 'useStateDbOnly second-page) t))
       (should (equal (alist-get 'cursor second-page) "page-2")))
     (should (member "CODEX_HOME=/tmp/active-codex-home"
                     spawned-environment))))
+
+(ert-deftest agent-log-test-codex-thread-list/repairs-empty-index ()
+  "Falls back to rollout repair when Codex's state database is empty."
+  (let ((backend
+         (agent-log--make-codex
+          :name "Codex" :key 'codex :directory "/unused/.codex"))
+        calls)
+    (cl-letf (((symbol-function 'agent-log-codex--effective-home)
+               (lambda (_backend) "/tmp/active-codex-home/"))
+              ((symbol-function 'make-process)
+               (lambda (&rest _args) 'fake-process))
+              ((symbol-function 'agent-log-codex--stop-catalog-process)
+               (lambda (&rest _args) nil))
+              ((symbol-function 'agent-log-codex--catalog-request)
+               (lambda (_process _request-id method params)
+                 (pcase method
+                   ("initialize" nil)
+                   ("thread/list"
+                    (push (alist-get 'useStateDbOnly params) calls)
+                    (if (eq (alist-get 'useStateDbOnly params) t)
+                        '((data . []) (nextCursor . nil))
+                      '((data . [((id . "repaired"))])
+                        (nextCursor . nil))))))))
+      (should (equal (mapcar (lambda (thread) (alist-get 'id thread))
+                             (agent-log-codex--thread-list backend))
+                     '("repaired"))))
+    (should (equal (nreverse calls) '(t :json-false)))))
 
 (ert-deftest agent-log-test-codex-thread-list/keeps-every-native-thread ()
   "Threads native Resume would list are never filtered out by Agent Log.

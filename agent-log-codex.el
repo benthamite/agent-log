@@ -176,12 +176,10 @@ Each value is a plist (:display :timestamp :project :file :file-dir
 
 (defun agent-log-codex--thread-list (backend)
   "Return every Codex thread that native Resume would offer for BACKEND.
-This sends `thread/list' with exactly the parameters
-`codex--app-server-begin-resume' sends, with two deliberate differences:
-no `cwd', because Agent Log lists every project rather than the current
-one, and cursor pagination, because Agent Log lists the whole catalog
-rather than one page.  Any additional filter would make Agent Log's list
-diverge from the list native Resume shows, so do not add one."
+Read indexed state first, as native Resume does, and fall back to the
+rollout scan-and-repair path when the initial indexed page is empty.
+Agent Log omits `cwd', because it lists every project, and follows every
+cursor because it lists the whole catalog rather than one page."
   (let* ((home (agent-log-codex--effective-home backend))
          (process-environment
           (cons (concat "CODEX_HOME=" (directory-file-name home))
@@ -202,6 +200,8 @@ diverge from the list native Resume shows, so do not add one."
          (request-id 0)
          (seen-ids (make-hash-table :test #'equal))
          (seen-cursors (make-hash-table :test #'equal))
+         (state-db-only t)
+         (first-page t)
          cursor
          threads)
     (unwind-protect
@@ -218,26 +218,34 @@ diverge from the list native Resume shows, so do not add one."
                       `((limit . ,agent-log-codex--thread-list-page-size)
                         (sortKey . "updated_at")
                         (sortDirection . "desc")
+                        (useStateDbOnly . ,(if state-db-only
+                                               t
+                                             :json-false))
                         ,@(when cursor `((cursor . ,cursor)))))
                      (result
                       (agent-log-codex--catalog-request
-                       process (cl-incf request-id) "thread/list" params)))
-                (dolist (thread (append (alist-get 'data result) nil))
-                  (let ((id (alist-get 'id thread)))
-                    (unless (and (stringp id) (gethash id seen-ids))
-                      (when (stringp id)
-                        (puthash id t seen-ids))
-                      (setq threads (nconc threads (list thread))))))
-                (let ((next-cursor (alist-get 'nextCursor result)))
-                  (cond
-                   ((not (stringp next-cursor))
-                    (setq done t))
-                   ((gethash next-cursor seen-cursors)
-                    (error "Codex thread catalog repeated cursor %s"
-                           next-cursor))
-                   (t
-                    (puthash next-cursor t seen-cursors)
-                    (setq cursor next-cursor))))))
+                       process (cl-incf request-id) "thread/list" params))
+                     (page (append (alist-get 'data result) nil)))
+                (if (and first-page state-db-only (null page))
+                    (setq state-db-only nil
+                          cursor nil)
+                  (setq first-page nil)
+                  (dolist (thread page)
+                    (let ((id (alist-get 'id thread)))
+                      (unless (and (stringp id) (gethash id seen-ids))
+                        (when (stringp id)
+                          (puthash id t seen-ids))
+                        (setq threads (nconc threads (list thread))))))
+                  (let ((next-cursor (alist-get 'nextCursor result)))
+                    (cond
+                     ((not (stringp next-cursor))
+                      (setq done t))
+                     ((gethash next-cursor seen-cursors)
+                      (error "Codex thread catalog repeated cursor %s"
+                             next-cursor))
+                     (t
+                      (puthash next-cursor t seen-cursors)
+                      (setq cursor next-cursor)))))))
           threads))
       (agent-log-codex--stop-catalog-process process stderr-buffer))))
 
