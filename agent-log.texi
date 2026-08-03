@@ -550,7 +550,7 @@ The command @code{agent-log-resume-session} resumes the session displayed in the
 @node Agent integration
 @chapter Agent integration
 
-Agent Log owns the durable archive; the optional @uref{https://github.com/benthamite/agent, agent} package owns live session control (buffers, accounts, lifecycle state, teardown).  The bridge module @samp{agent-log-agent.el} connects the two when both are loaded: @samp{agent-log.el} requires it from @code{with-eval-after-load} on the @samp{agent} feature, so loading Agent Log alone never loads or requires @samp{agent}, and Agent Log remains fully functional standalone.  The bridge uses only public @samp{agent} API and adds @samp{:around} methods to existing Agent Log generics, so removing it restores standalone behavior exactly.
+Agent Log owns the durable archive; the optional @uref{https://github.com/benthamite/agent, agent} package owns live session control (buffers, accounts, lifecycle state, teardown).  The bridge module @samp{agent-log-agent.el} connects the two when both are loaded, regardless of load order: @samp{agent-log.el} requires it only after both the @samp{agent} and @samp{agent-log} features are available, so loading Agent Log alone never loads or requires @samp{agent}, and Agent Log remains fully functional standalone.  The bridge uses only public @samp{agent} API and adds @samp{:around} methods to existing Agent Log generics, so removing it restores standalone behavior exactly.
 
 With the bridge active:
 

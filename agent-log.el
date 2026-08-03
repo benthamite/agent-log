@@ -4672,7 +4672,8 @@ dollar cost of the scope request."
     ("-m" agent-log-cycle-session-sort-key)]])
 
 (with-eval-after-load 'agent
-  (require 'agent-log-agent))
+  (with-eval-after-load 'agent-log
+    (require 'agent-log-agent)))
 
 (provide 'agent-log)
 ;;; agent-log.el ends here

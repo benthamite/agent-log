@@ -10,15 +10,21 @@ LOAD_PATH := -L $(CURDIR) \
              -L $(ELPACA_REPOS)cond-let \
              -L $(ELPACA_REPOS)compat
 
-.PHONY: test compile clean
+.PHONY: test test-load-order compile clean
 
-test:
+test: test-load-order
 	$(EMACS) -Q --batch $(LOAD_PATH) \
 	  -l agent-log.el \
 	  -l agent-log-claude.el \
 	  -l agent-log-codex.el \
 	  -l agent-log-test.el \
 	  -f ert-run-tests-batch-and-exit
+
+test-load-order:
+	$(EMACS) -Q --batch $(LOAD_PATH) \
+	  --eval "(progn (require 'agent) (require 'agent-log) (unless (and (featurep 'agent) (featurep 'agent-log) (featurep 'agent-log-agent)) (error \"Agent Log bridge features are not loaded\")))"
+	$(EMACS) -Q --batch $(LOAD_PATH) \
+	  --eval "(progn (require 'agent-log) (when (or (featurep 'agent) (featurep 'agent-log-agent)) (error \"Agent Log bridge loaded eagerly\")) (require 'agent) (unless (and (featurep 'agent) (featurep 'agent-log) (featurep 'agent-log-agent)) (error \"Agent Log bridge features are not loaded\")))"
 
 compile:
 	$(EMACS) -Q --batch $(LOAD_PATH) \
