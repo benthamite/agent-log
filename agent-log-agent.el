@@ -28,9 +28,11 @@
 ;; used: `agent-session', `agent-session-id', `agent-session-backend',
 ;; `agent-session-buffers', `agent-session-display-state',
 ;; `agent-backend', `agent-session-create', `agent-start-session', and
-;; the `agent-session-annotation-function' rendering hook.
-;; Agent Log backend keys equal agent backend symbols, so no mapping is
-;; needed.
+;; the `agent-session-annotation-function' rendering hook.  That hook
+;; holds one function rather than a list, and loading this file claims
+;; it outright, so the last integration loaded is the one that
+;; annotates the switcher.  Agent Log backend keys equal agent backend
+;; symbols, so no mapping is needed.
 
 ;;; Code:
 
@@ -75,18 +77,6 @@ agent package's authoritative session identity and display state."
 
 ;;;; Switcher annotations
 
-(defcustom agent-log-oneline-refresh-idle-delay 5
-  "Seconds of idleness before refreshing the session one-line cache.
-The session switcher reads that cache, so it never waits on the index
-file.  The cost of a shorter delay is one `file-attributes' call per
-firing; the cost of a longer one is that a summary written moments ago
-shows up later."
-  :type 'number
-  :group 'agent-log)
-
-(defvar agent-log-agent--oneline-refresh-timer nil
-  "Idle timer refreshing the session one-line summary cache.")
-
 (defun agent-log-agent--session-annotation (buffer)
   "Return the stored one-line summary of BUFFER's session, or nil.
 Live sessions are summarized by the background sweep, which does not
@@ -99,10 +89,46 @@ session too new to have been summarized has no annotation at all."
 (setq agent-session-annotation-function
       #'agent-log-agent--session-annotation)
 
-(unless (timerp agent-log-agent--oneline-refresh-timer)
-  (setq agent-log-agent--oneline-refresh-timer
-        (run-with-idle-timer agent-log-oneline-refresh-idle-delay t
-                             #'agent-log-refresh-session-onelines)))
+(defvar agent-log-agent--oneline-refresh-timer nil
+  "Idle timer refreshing the session one-line summary cache.")
+
+(defvar agent-log-oneline-refresh-idle-delay)
+
+(defun agent-log-agent--oneline-refresh-enabled-p ()
+  "Return non-nil when the one-line cache should be refreshed on idle."
+  (and (numberp agent-log-oneline-refresh-idle-delay)
+       (> agent-log-oneline-refresh-idle-delay 0)))
+
+(defun agent-log-agent--update-oneline-refresh-timer (&rest _)
+  "Install or cancel the session one-line cache refresh timer."
+  (when (timerp agent-log-agent--oneline-refresh-timer)
+    (cancel-timer agent-log-agent--oneline-refresh-timer))
+  (setq agent-log-agent--oneline-refresh-timer nil)
+  (when (agent-log-agent--oneline-refresh-enabled-p)
+    (setq agent-log-agent--oneline-refresh-timer
+          (run-with-idle-timer agent-log-oneline-refresh-idle-delay t
+                               #'agent-log-refresh-session-onelines))))
+
+(defcustom agent-log-oneline-refresh-idle-delay 5
+  "Seconds of idleness before refreshing the session one-line cache.
+The session switcher reads that cache, so it never waits on the index
+file.  A firing whose index is unchanged costs one `file-attributes'
+call; a firing whose index has changed rereads and reparses the whole
+index, which takes roughly 90 ms on a 6 MB archive.  A shorter delay
+therefore pays that reparse sooner after each write, and a longer one
+keeps a summary written moments ago out of the switcher for longer.
+
+Set this option to nil, or to a number that is not positive, to stop
+refreshing on idle; the switcher then shows whatever the cache last
+held."
+  :type '(choice (const :tag "Disable idle refresh" nil)
+                 (number :tag "Seconds"))
+  :group 'agent-log
+  :set (lambda (sym val)
+         (set-default sym val)
+         (agent-log-agent--update-oneline-refresh-timer)))
+
+(agent-log-agent--update-oneline-refresh-timer)
 
 (cl-defmethod agent-log--current-buffer-session-file :around
   ((backend agent-log-backend))
