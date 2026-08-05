@@ -508,10 +508,22 @@ When nil, defaults to `gptel-model'."
     (cancel-timer agent-log--auto-summary-sweep-timer))
   (setq agent-log--auto-summary-sweep-timer nil)
   (when (agent-log--auto-summary-sweep-enabled-p)
+    (agent-log--schedule-auto-summary-sweep)))
+
+(defun agent-log--schedule-auto-summary-sweep ()
+  "Schedule the next automatic summary backlog sweep."
+  (when (agent-log--auto-summary-sweep-enabled-p)
     (setq agent-log--auto-summary-sweep-timer
           (run-at-time agent-log-auto-summarize-sweep-interval
-                       agent-log-auto-summarize-sweep-interval
-                       #'agent-log--auto-summary-sweep))))
+                       nil
+                       #'agent-log--auto-summary-sweep-timer-fired))))
+
+(defun agent-log--auto-summary-sweep-timer-fired ()
+  "Run an automatic summary sweep and schedule the next one."
+  (setq agent-log--auto-summary-sweep-timer nil)
+  (unwind-protect
+      (agent-log--auto-summary-sweep)
+    (agent-log--schedule-auto-summary-sweep)))
 
 (defun agent-log--auto-summary-sweep-enabled-p ()
   "Return non-nil when automatic backlog sweeps should be scheduled."
@@ -1703,6 +1715,7 @@ METADATA is a plist with :file, :timestamp, :project, :display."
 
 (defun agent-log--browse-flat (sessions)
   "Present all SESSIONS in a single `completing-read'."
+  (agent-log--maybe-start-auto-summary-sweep-for-sessions sessions)
   (let* ((candidates (agent-log--build-candidates sessions))
          (selected (agent-log--completing-read "Session: " candidates))
          (value (alist-get selected candidates nil nil #'equal))
@@ -1715,13 +1728,24 @@ METADATA is a plist with :file, :timestamp, :project, :display."
   (let* ((grouped (agent-log--group-by-project sessions))
          (project-names (mapcar #'car grouped))
          (project (agent-log--completing-read "Project: " project-names))
-         (project-sessions (alist-get project grouped nil nil #'equal))
-         (candidates (agent-log--build-candidates project-sessions))
-         (selected (agent-log--completing-read "Session: " candidates))
-         (value (alist-get selected candidates nil nil #'equal))
-         (session-id (car value))
-         (metadata (cdr value)))
-    (agent-log--open-rendered session-id metadata)))
+         (project-sessions (alist-get project grouped nil nil #'equal)))
+    (agent-log--maybe-start-auto-summary-sweep-for-sessions project-sessions)
+    (let* ((candidates (agent-log--build-candidates project-sessions))
+           (selected (agent-log--completing-read "Session: " candidates))
+           (value (alist-get selected candidates nil nil #'equal))
+           (session-id (car value))
+           (metadata (cdr value)))
+      (agent-log--open-rendered session-id metadata))))
+
+(defun agent-log--maybe-start-auto-summary-sweep-for-sessions (sessions)
+  "Start a background summary sweep if SESSIONS include missing summaries."
+  (when (agent-log--sessions-missing-usable-summary-p sessions)
+    (agent-log--maybe-start-auto-summary-sweep sessions)))
+
+(defun agent-log--sessions-missing-usable-summary-p (sessions)
+  "Return non-nil if any session in SESSIONS lacks a usable summary."
+  (let ((index (agent-log--read-index)))
+    (not (null (agent-log--sessions-needing-summary sessions index)))))
 
 (defun agent-log--completing-read (prompt collection)
   "Read from COLLECTION with PROMPT, preserving display order."
@@ -3281,20 +3305,36 @@ not call it as a fallback."
              (not agent-log--summarize-blocked-reason))
     (agent-log--spawn-summary-worker (car session))))
 
-(defun agent-log--auto-summary-sweep ()
-  "Start a background worker that summarizes a bounded pending backlog."
+(defun agent-log--auto-summary-sweep (&optional session-ids)
+  "Start a background worker that summarizes a bounded pending backlog.
+When SESSION-IDS is non-nil, the worker prioritizes those sessions."
   (when (agent-log--auto-summarize-ready-p)
     (agent-log--spawn-summary-sweep-worker
-     agent-log-auto-summarize-sweep-limit)))
+     agent-log-auto-summarize-sweep-limit
+     session-ids)))
 
-(defun agent-log--maybe-start-auto-summary-sweep ()
-  "Start a background summary sweep if automatic backlog work is idle."
+(defun agent-log--maybe-start-auto-summary-sweep (&optional sessions)
+  "Start a background summary sweep if automatic backlog work is idle.
+When SESSIONS is non-nil, prioritize pending summaries from that
+session set instead of spending the sweep limit on the whole archive."
   (when (agent-log--auto-summary-sweep-enabled-p)
     (agent-log--ensure-auto-summary-sweep-timer)
     (when (and (agent-log--auto-summarize-ready-p)
                (not (agent-log--summary-sweep-worker-active-p)))
-      (agent-log--auto-summary-sweep)
-      t)))
+      (let ((session-ids
+             (and sessions
+                  (agent-log--pending-summary-session-ids sessions))))
+        (when (or (null sessions) session-ids)
+          (agent-log--auto-summary-sweep session-ids)
+          t)))))
+
+(defun agent-log--pending-summary-session-ids (sessions)
+  "Return pending summary session IDs from SESSIONS in display order."
+  (let ((index (agent-log--read-index)))
+    (mapcar #'car
+            (seq-take
+             (agent-log--sessions-needing-summary sessions index)
+             agent-log-auto-summarize-sweep-limit))))
 
 (defun agent-log--summary-sweep-worker-active-p ()
   "Return non-nil when a background summary sweep worker is active."
@@ -3356,11 +3396,14 @@ that identify the session which just stopped producing output."
            (delete-file state-file))
          (signal (car err) (cdr err)))))))
 
-(defun agent-log--spawn-summary-sweep-worker (limit)
-  "Start a background summary backlog worker for up to LIMIT sessions."
+(defun agent-log--spawn-summary-sweep-worker (limit &optional session-ids)
+  "Start a background summary backlog worker for up to LIMIT sessions.
+When SESSION-IDS is non-nil, prioritize those sessions."
   (let ((key :sweep))
     (unless (gethash key agent-log--summary-workers)
-      (let ((state-file (agent-log--summary-sweep-worker-state-file limit)))
+      (let ((state-file
+             (agent-log--summary-sweep-worker-state-file
+              limit session-ids)))
         (condition-case err
             (let ((process
                    (make-process
@@ -3374,7 +3417,9 @@ that identify the session which just stopped producing output."
                                  key proc event)))))
               (puthash key (cons process state-file)
                        agent-log--summary-workers)
-              (message "agent-log: summarizing pending sessions in background"))
+              (message
+               "agent-log: summarizing %s pending sessions in background"
+               (if session-ids "selected" "archive")))
           (error
            (when (file-exists-p state-file)
              (delete-file state-file))
@@ -3390,10 +3435,11 @@ that identify the session which just stopped producing output."
   (agent-log--summary-worker-state-file-for-form
    `(agent-log--batch-summarize-session ,session-id)))
 
-(defun agent-log--summary-sweep-worker-state-file (limit)
-  "Write and return a private batch state file for a pending sweep."
+(defun agent-log--summary-sweep-worker-state-file (limit &optional session-ids)
+  "Write and return a private batch state file for a pending sweep.
+When SESSION-IDS is non-nil, write a targeted sweep form."
   (agent-log--summary-worker-state-file-for-form
-   `(agent-log--batch-summarize-pending ,limit)))
+   `(agent-log--batch-summarize-pending ,limit ',session-ids)))
 
 (defun agent-log--summary-worker-state-file-for-form (form)
   "Write and return a private batch state file that evaluates FORM."
@@ -3518,16 +3564,23 @@ that identify the session which just stopped producing output."
             (kill-emacs 1)))
       (user-error "No session found for %s" session-id))))
 
-(defun agent-log--batch-summarize-pending (limit)
-  "Summarize up to LIMIT pending sessions and wait for completion."
+(defun agent-log--batch-summarize-pending (limit &optional session-ids)
+  "Summarize up to LIMIT pending sessions and wait for completion.
+When SESSION-IDS is non-nil, restrict the pending set to those
+sessions in the given order."
   (unless (require 'gptel nil t)
     (user-error "Package `gptel' is required for summary generation"))
   (let ((agent-log-auto-summarize-sessions t)
         (agent-log--summarize-active nil)
         (agent-log--summarize-blocked-reason nil))
     (let* ((sessions (agent-log--read-all-sessions))
+           (target-sessions
+            (if session-ids
+                (agent-log--sessions-for-ids sessions session-ids)
+              sessions))
            (index (agent-log--read-index))
-           (pending (agent-log--sessions-needing-summary sessions index))
+           (pending (agent-log--sessions-needing-summary
+                     target-sessions index))
            (limit (max 1 (or limit 1)))
            (batch (seq-take pending limit)))
       (if (null batch)
@@ -3546,6 +3599,16 @@ that identify the session which just stopped producing output."
           (accept-process-output nil 1))
         (when agent-log--summarize-blocked-reason
           (kill-emacs 1))))))
+
+(defun agent-log--sessions-for-ids (sessions session-ids)
+  "Return SESSIONS matching SESSION-IDS, preserving SESSION-IDS order."
+  (let ((by-id (make-hash-table :test #'equal)))
+    (dolist (session sessions)
+      (puthash (car session) session by-id))
+    (delq nil
+          (mapcar (lambda (session-id)
+                    (gethash session-id by-id))
+                  session-ids))))
 
 (defun agent-log--find-session-by-id (session-id)
   "Return the session metadata entry for SESSION-ID, or nil."
@@ -4417,7 +4480,8 @@ clickable links to the matching logs."
       (when (zerop summarized)
         (user-error "%s" (agent-log--search-no-summaries-message metadata)))
       (when (> unsummarized 0)
-        (setq sweep-started (agent-log--maybe-start-auto-summary-sweep))
+        (setq sweep-started
+              (agent-log--maybe-start-auto-summary-sweep sessions))
         (unless (y-or-n-p
                  (agent-log--search-unsummarized-prompt
                   unsummarized sweep-started))

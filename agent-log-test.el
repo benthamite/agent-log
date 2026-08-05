@@ -2331,13 +2331,34 @@ rereading every transcript."
                        (setq new-timer (list time repeat function args)))))
             (agent-log--ensure-auto-summary-sweep-timer)
             (should (equal new-timer
-                           (list 900 900
-                                 #'agent-log--auto-summary-sweep nil)))
+                           (list 900 nil
+                                 #'agent-log--auto-summary-sweep-timer-fired
+                                 nil)))
             (should (equal agent-log--auto-summary-sweep-timer
                            new-timer))
             (should-not (memq old-timer timer-list))))
       (when (timerp old-timer)
         (cancel-timer old-timer)))))
+
+(ert-deftest agent-log-test-auto-summary-sweep-timer/fired-reschedules ()
+  "Reschedules automatic sweeps after the current one fires."
+  (let ((agent-log-auto-summarize-sessions t)
+        (agent-log-auto-summarize-sweep-interval 900)
+        (agent-log--auto-summary-sweep-timer 'old)
+        fired
+        scheduled)
+    (cl-letf (((symbol-function 'agent-log--auto-summary-sweep)
+               (lambda () (setq fired t)))
+              ((symbol-function 'run-at-time)
+               (lambda (time repeat function &rest args)
+                 (setq scheduled (list time repeat function args)))))
+      (agent-log--auto-summary-sweep-timer-fired)
+      (should fired)
+      (should (equal scheduled
+                     (list 900 nil
+                           #'agent-log--auto-summary-sweep-timer-fired
+                           nil)))
+      (should (equal agent-log--auto-summary-sweep-timer scheduled)))))
 
 (ert-deftest agent-log-test-auto-summary-sweep/skips-duplicate-worker ()
   "Automatic backlog sweeps do not start overlapping sweep workers."
@@ -2373,6 +2394,32 @@ rereading every transcript."
       (agent-log--batch-summarize-pending 2)
       (should (eq (car captured) #'agent-log--summarize-next))
       (should (= (length (cadr captured)) 2))
+      (should (= (nth 3 captured) 2)))))
+
+(ert-deftest agent-log-test-batch-summarize-pending/targets-session-ids ()
+  "Batch backlog workers can prioritize a concrete set of session IDs."
+  (let* ((sessions (list (list "s1") (list "s2") (list "s3")))
+         (index (make-hash-table :test #'equal))
+         (orig-require (symbol-function 'require))
+         captured)
+    (cl-letf (((symbol-function 'require)
+               (lambda (feature &optional filename noerror)
+                 (if (eq feature 'gptel)
+                     t
+                   (funcall orig-require feature filename noerror))))
+              ((symbol-function 'agent-log--read-all-sessions)
+               (lambda () sessions))
+              ((symbol-function 'agent-log--read-index)
+               (lambda () index))
+              ((symbol-function 'agent-log--active-backend-instances)
+               (lambda () nil))
+              ((symbol-function 'run-with-timer)
+               (lambda (_secs _repeat fn &rest args)
+                 (setq captured (cons fn args))
+                 (setq agent-log--summarize-active nil))))
+      (agent-log--batch-summarize-pending 5 '("s3" "s1"))
+      (should (eq (car captured) #'agent-log--summarize-next))
+      (should (equal (mapcar #'car (cadr captured)) '("s3" "s1")))
       (should (= (nth 3 captured) 2)))))
 
 (ert-deftest agent-log-test-update-session-end-hook/adds-codex-hook ()
@@ -2533,7 +2580,8 @@ session."
            (agent-log--auto-summary-sweep-timer timer)
            prompt
            requested
-           kicked-limit)
+           kicked-limit
+           kicked-ids)
       (puthash "s1" (agent-log-test--summary-entry (cdr s1) "A") index)
       (unwind-protect
           (cl-letf (((symbol-function 'require)
@@ -2548,8 +2596,9 @@ session."
                     ((symbol-function 'agent-log--read-index)
                      (lambda () index))
                     ((symbol-function 'agent-log--spawn-summary-sweep-worker)
-                     (lambda (limit)
-                       (setq kicked-limit limit)))
+                     (lambda (limit &optional session-ids)
+                       (setq kicked-limit limit
+                             kicked-ids session-ids)))
                     ((symbol-function 'agent-log--resolve-search-scope-backend-and-model)
                      (lambda () (cons nil "test-model")))
                     ((symbol-function 'y-or-n-p)
@@ -2562,6 +2611,7 @@ session."
             (agent-log-search "anything")
             (should requested)
             (should (= kicked-limit 7))
+            (should (equal kicked-ids '("s2")))
             (should (string-match-p "lack usable summaries" prompt))
             (should (string-match-p "background summary sweep" prompt))
             (should-not (string-match-p "lack current summaries" prompt)))
@@ -3191,6 +3241,59 @@ session."
       (should (assq 'cycle-sort-function (cdr meta))))))
 
 ;;;;; Completion candidates
+
+(ert-deftest agent-log-test-browse-sessions/kicks-sweep-for-missing-summary ()
+  "Grouped browsing starts a background sweep for raw unsummarized candidates."
+  (agent-log-test--with-temp-dir
+    (let* ((jsonl-path (agent-log-test--write-file
+                        "session.jsonl"
+                        "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"hello\"}}\n"))
+           (session (list "s1"
+                          :file jsonl-path
+                          :timestamp 1700000000000
+                          :project "/tmp/project"
+                          :display "Hello"))
+           (sessions (list session))
+           (index (make-hash-table :test #'equal))
+           (agent-log-group-by-project t)
+           (agent-log-auto-summarize-sessions t)
+           (agent-log-auto-summarize-sweep-interval 900)
+           (agent-log-auto-summarize-sweep-limit 7)
+           (agent-log--summary-workers (make-hash-table :test #'equal))
+           (agent-log--summarize-active nil)
+           (agent-log--summarize-blocked-reason nil)
+           (orig-require (symbol-function 'require))
+           kicked-limit
+           kicked-ids
+           opened)
+      (cl-letf (((symbol-function 'require)
+                 (lambda (feature &optional filename noerror)
+                   (if (eq feature 'gptel)
+                       t
+                     (funcall orig-require feature filename noerror))))
+                ((symbol-function 'agent-log--active-backend-instances)
+                 (lambda () nil))
+                ((symbol-function 'agent-log--read-all-sessions)
+                 (lambda () sessions))
+                ((symbol-function 'agent-log--read-index)
+                 (lambda () index))
+                ((symbol-function 'run-at-time)
+                 (lambda (&rest args) (cons 'timer args)))
+                ((symbol-function 'agent-log--spawn-summary-sweep-worker)
+                 (lambda (limit &optional session-ids)
+                   (setq kicked-limit limit
+                         kicked-ids session-ids)))
+                ((symbol-function 'agent-log--completing-read)
+                 (lambda (_prompt collection)
+                   (if (consp (car collection))
+                       (caar collection)
+                     (car collection))))
+                ((symbol-function 'agent-log--open-rendered)
+                 (lambda (session-id _metadata) (setq opened session-id))))
+        (agent-log-browse-sessions)
+        (should (= kicked-limit 7))
+        (should (equal kicked-ids '("s1")))
+        (should (equal opened "s1"))))))
 
 (ert-deftest agent-log-test-build-candidates/includes-session-size ()
   "Includes a human-readable session file size column."
