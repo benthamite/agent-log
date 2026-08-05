@@ -10,15 +10,23 @@ LOAD_PATH := -L $(CURDIR) \
              -L $(ELPACA_REPOS)cond-let \
              -L $(ELPACA_REPOS)compat
 
-.PHONY: test test-load-order compile clean
+.PHONY: test test-load-order test-bridge compile clean
 
-test: test-load-order
+test: test-load-order test-bridge
 	$(EMACS) -Q --batch $(LOAD_PATH) \
 	  --eval '(setq load-prefer-newer t)' \
 	  -l agent-log.el \
 	  -l agent-log-claude.el \
 	  -l agent-log-codex.el \
 	  -l agent-log-test.el \
+	  -f ert-run-tests-batch-and-exit
+
+# Separate from `test' because it is the one suite that requires the
+# `agent' package; agent-log-test.el stays loadable without it.
+test-bridge:
+	$(EMACS) -Q --batch $(LOAD_PATH) \
+	  --eval '(setq load-prefer-newer t)' \
+	  -l agent-log-agent-test.el \
 	  -f ert-run-tests-batch-and-exit
 
 test-load-order:
