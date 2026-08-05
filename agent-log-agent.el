@@ -92,6 +92,12 @@ session too new to have been summarized has no annotation at all."
 (defvar agent-log-agent--oneline-refresh-timer nil
   "Idle timer refreshing the session one-line summary cache.")
 
+;; Declared here because the two functions below read the option while
+;; the `defcustom' that defines it comes after them, and they have to:
+;; its `:set' runs when the option is declared, so the function it
+;; calls must already exist.  Without this declaration those reads are
+;; free variable references, which `byte-compile-error-on-warn' turns
+;; into a build failure.
 (defvar agent-log-oneline-refresh-idle-delay)
 
 (defun agent-log-agent--oneline-refresh-enabled-p ()
@@ -124,11 +130,14 @@ held."
   :type '(choice (const :tag "Disable idle refresh" nil)
                  (number :tag "Seconds"))
   :group 'agent-log
+  ;; This `:set' is also what installs the timer at load, so no
+  ;; separate installation call follows: declaring an option runs its
+  ;; `:set', with the value the user's init already gave it when there
+  ;; is one, and reloading this file runs it again, cancelling the
+  ;; previous timer first.
   :set (lambda (sym val)
          (set-default sym val)
          (agent-log-agent--update-oneline-refresh-timer)))
-
-(agent-log-agent--update-oneline-refresh-timer)
 
 (cl-defmethod agent-log--current-buffer-session-file :around
   ((backend agent-log-backend))
