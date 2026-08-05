@@ -1187,7 +1187,7 @@ Read the in-memory cache filled by
 callers on interactive paths pay nothing for the answer.  A session
 with no conversation to summarize returns nil rather than the stored
 sentinel, and so does a session the cache has not seen."
-  (when (and agent-log--session-oneline-cache (stringp session-id))
+  (when agent-log--session-oneline-cache
     (let ((oneline (gethash session-id agent-log--session-oneline-cache)))
       (and (stringp oneline)
            (not (equal oneline agent-log--no-conversation-sentinel))
@@ -1197,8 +1197,10 @@ sentinel, and so does a session the cache has not seen."
   "Rebuild the one-line summary cache from the rendered index.
 Do nothing when the index file's size and modification time are
 unchanged since the last rebuild, unless FORCE is non-nil, and nothing
-when the index file does not exist.  Return non-nil when the cache was
-rebuilt."
+when the index file does not exist.  Signal on a corrupt index, before
+the cache and its recorded file state change, so corruption cannot
+empty a good cache and then record itself as a successful rebuild.
+Return non-nil when the cache was rebuilt."
   (when-let* ((state (agent-log--index-file-state)))
     (when (or force
               (not (equal state agent-log--session-oneline-cache-state)))
@@ -1206,7 +1208,7 @@ rebuilt."
         (maphash (lambda (session-id entry)
                    (when-let* ((oneline (plist-get entry :summary-oneline)))
                      (puthash session-id oneline cache)))
-                 (agent-log--read-index))
+                 (agent-log--read-index-strict))
         (setq agent-log--session-oneline-cache cache
               agent-log--session-oneline-cache-state state)
         t))))

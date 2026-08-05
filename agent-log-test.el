@@ -652,6 +652,9 @@ would announce the emptiness instead of staying quiet about it."
           (agent-log--session-oneline-cache-state nil))
       (agent-log-test--write-oneline-index
        (list (cons "s1" agent-log--no-conversation-sentinel)))
+      ;; Guard the premise: a nil or empty sentinel would make this
+      ;; test pass whatever the sentinel check did.
+      (should (> (length agent-log--no-conversation-sentinel) 0))
       (agent-log-refresh-session-onelines)
       (should-not (agent-log-session-oneline "s1")))))
 
@@ -668,8 +671,8 @@ would announce the emptiness instead of staying quiet about it."
           (agent-log--session-oneline-cache-state nil)
           (reads 0))
       (agent-log-test--write-oneline-index '(("s1" . "Fix the parser")))
-      (let ((real (symbol-function 'agent-log--read-index)))
-        (cl-letf (((symbol-function 'agent-log--read-index)
+      (let ((real (symbol-function 'agent-log--read-index-strict)))
+        (cl-letf (((symbol-function 'agent-log--read-index-strict)
                    (lambda () (cl-incf reads) (funcall real))))
           (should (agent-log-refresh-session-onelines))
           (should-not (agent-log-refresh-session-onelines))
@@ -690,6 +693,42 @@ would announce the emptiness instead of staying quiet about it."
       (should (agent-log-refresh-session-onelines))
       (should (equal (agent-log-session-oneline "s1")
                      "Fix the parser and the printer")))))
+
+(ert-deftest agent-log-test-refresh-onelines/drops-removed-entries ()
+  "Forget the one-liners of sessions the index no longer lists.
+Rebuilding into a fresh table is what makes this true; merging into the
+existing cache would leave a departed session's summary behind, to be
+shown against whatever later claims its id."
+  (agent-log-test--with-temp-dir
+    (let ((agent-log-rendered-directory agent-log-test--dir)
+          (agent-log--session-oneline-cache nil)
+          (agent-log--session-oneline-cache-state nil))
+      (agent-log-test--write-oneline-index
+       '(("s1" . "Fix the parser") ("s2" . "Ship the release")))
+      (agent-log-refresh-session-onelines)
+      (should (equal (agent-log-session-oneline "s2") "Ship the release"))
+      (agent-log-test--write-oneline-index '(("s1" . "Fix the parser")))
+      (should (agent-log-refresh-session-onelines))
+      (should (equal (agent-log-session-oneline "s1") "Fix the parser"))
+      (should-not (agent-log-session-oneline "s2")))))
+
+(ert-deftest agent-log-test-refresh-onelines/corrupt-index-signals ()
+  "Signal on a corrupt index rather than emptying a good cache.
+Reading corruption as an empty index would blank every annotation, and
+recording the corrupt file's state alongside it would keep any later
+refresh from noticing until the file changed again."
+  (agent-log-test--with-temp-dir
+    (let* ((agent-log-rendered-directory agent-log-test--dir)
+           (cache (make-hash-table :test #'equal))
+           (agent-log--session-oneline-cache cache)
+           (agent-log--session-oneline-cache-state nil))
+      (puthash "s1" "Fix the parser" cache)
+      (with-temp-file (agent-log--index-file)
+        (insert "(not a hash table)\n"))
+      (should-error (agent-log-refresh-session-onelines))
+      (should (eq agent-log--session-oneline-cache cache))
+      (should (equal (agent-log-session-oneline "s1") "Fix the parser"))
+      (should-not agent-log--session-oneline-cache-state))))
 
 (ert-deftest agent-log-test-refresh-onelines/missing-index-keeps-cache ()
   "Leave the cache alone when the index file does not exist."
