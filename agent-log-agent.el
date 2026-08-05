@@ -27,7 +27,8 @@
 ;; reference to `agent' lives here, and only public `agent' API is
 ;; used: `agent-session', `agent-session-id', `agent-session-backend',
 ;; `agent-session-buffers', `agent-session-display-state',
-;; `agent-backend', `agent-session-create', and `agent-start-session'.
+;; `agent-backend', `agent-session-create', `agent-start-session', and
+;; the `agent-session-annotation-function' rendering hook.
 ;; Agent Log backend keys equal agent backend symbols, so no mapping is
 ;; needed.
 
@@ -71,6 +72,37 @@ agent package's authoritative session identity and display state."
 (setq agent-log-live-session-info-function #'agent-log-agent--session-info
       agent-log-live-session-info-table-function
       #'agent-log-agent--session-info-table)
+
+;;;; Switcher annotations
+
+(defcustom agent-log-oneline-refresh-idle-delay 5
+  "Seconds of idleness before refreshing the session one-line cache.
+The session switcher reads that cache, so it never waits on the index
+file.  The cost of a shorter delay is one `file-attributes' call per
+firing; the cost of a longer one is that a summary written moments ago
+shows up later."
+  :type 'number
+  :group 'agent-log)
+
+(defvar agent-log-agent--oneline-refresh-timer nil
+  "Idle timer refreshing the session one-line summary cache.")
+
+(defun agent-log-agent--session-annotation (buffer)
+  "Return the stored one-line summary of BUFFER's session, or nil.
+Live sessions are summarized by the background sweep, which does not
+know they are live, so the text can lag the conversation by hours.  A
+session too new to have been summarized has no annotation at all."
+  (when-let* ((session (agent-session buffer))
+              (session-id (agent-session-id session)))
+    (agent-log-session-oneline session-id)))
+
+(setq agent-session-annotation-function
+      #'agent-log-agent--session-annotation)
+
+(unless (timerp agent-log-agent--oneline-refresh-timer)
+  (setq agent-log-agent--oneline-refresh-timer
+        (run-with-idle-timer agent-log-oneline-refresh-idle-delay t
+                             #'agent-log-refresh-session-onelines)))
 
 (cl-defmethod agent-log--current-buffer-session-file :around
   ((backend agent-log-backend))

@@ -22,7 +22,7 @@ test: test-load-order
 
 test-load-order:
 	$(EMACS) -Q --batch $(LOAD_PATH) \
-	  --eval "(progn (require 'agent) (require 'agent-log) (unless (and (featurep 'agent) (featurep 'agent-log) (featurep 'agent-log-agent)) (error \"Agent Log bridge features are not loaded\")))"
+	  --eval "(progn (require 'agent) (require 'agent-log) (unless (and (featurep 'agent) (featurep 'agent-log) (featurep 'agent-log-agent)) (error \"Agent Log bridge features are not loaded\")) (unless (eq agent-session-annotation-function #'agent-log-agent--session-annotation) (error \"Agent Log bridge did not install the switcher annotation function\")))"
 	$(EMACS) -Q --batch $(LOAD_PATH) \
 	  --eval "(progn (require 'agent-log) (when (or (featurep 'agent) (featurep 'agent-log-agent)) (error \"Agent Log bridge loaded eagerly\")) (require 'agent) (unless (and (featurep 'agent) (featurep 'agent-log) (featurep 'agent-log-agent)) (error \"Agent Log bridge features are not loaded\")))"
 
