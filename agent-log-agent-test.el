@@ -71,5 +71,21 @@ than an error."
   (should (memq #'agent-log-agent--session-annotation
                 agent-session-annotation-functions)))
 
+(ert-deftest agent-log-agent-test-annotation/keeps-another-provider ()
+  "Leave an annotation function already on the hook in place.
+Loading this file with someone else's function installed is the
+ordinary case of Agent Log loading after a user's init, and claiming
+the hook rather than joining it would drop that function silently.
+The source file is loaded again for real rather than its installation
+form copied here, so that returning the bridge to `setq' fails this
+test.  It is named with its `.el' extension on purpose: a byte-compiled
+copy left in the directory is what `locate-library' would answer with,
+and this test would then pass against whatever that stale file said."
+  (let ((agent-session-annotation-functions (list #'ignore)))
+    (load (locate-file "agent-log-agent.el" load-path) nil t)
+    (should (memq #'ignore agent-session-annotation-functions))
+    (should (memq #'agent-log-agent--session-annotation
+                  agent-session-annotation-functions))))
+
 (provide 'agent-log-agent-test)
 ;;; agent-log-agent-test.el ends here
