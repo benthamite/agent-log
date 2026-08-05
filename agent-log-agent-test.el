@@ -68,8 +68,8 @@ than an error."
 
 (ert-deftest agent-log-agent-test-annotation/is-installed ()
   "Install the annotation provider into the rendering hook of `agent'."
-  (should (eq agent-session-annotation-function
-              #'agent-log-agent--session-annotation)))
+  (should (memq #'agent-log-agent--session-annotation
+                agent-session-annotation-functions)))
 
 (provide 'agent-log-agent-test)
 ;;; agent-log-agent-test.el ends here

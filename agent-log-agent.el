@@ -28,11 +28,11 @@
 ;; used: `agent-session', `agent-session-id', `agent-session-backend',
 ;; `agent-session-buffers', `agent-session-display-state',
 ;; `agent-backend', `agent-session-create', `agent-start-session', and
-;; the `agent-session-annotation-function' rendering hook.  That hook
-;; holds one function rather than a list, and loading this file claims
-;; it outright, so the last integration loaded is the one that
-;; annotates the switcher.  Agent Log backend keys equal agent backend
-;; symbols, so no mapping is needed.
+;; the `agent-session-annotation-functions' rendering hook.  Loading
+;; this file adds its own annotation function to that hook, leaving any
+;; other integration's in place; the switcher takes the first non-nil
+;; answer.  Agent Log backend keys equal agent backend symbols, so no
+;; mapping is needed.
 
 ;;; Code:
 
@@ -86,8 +86,8 @@ session too new to have been summarized has no annotation at all."
               (session-id (agent-session-id session)))
     (agent-log-session-oneline session-id)))
 
-(setq agent-session-annotation-function
-      #'agent-log-agent--session-annotation)
+(add-hook 'agent-session-annotation-functions
+          #'agent-log-agent--session-annotation)
 
 (defvar agent-log-agent--oneline-refresh-timer nil
   "Idle timer refreshing the session one-line summary cache.")
