@@ -3,3 +3,4 @@
 /docs/logs/
 /CLAUDE.md
 /AGENTS.md
+*.elc

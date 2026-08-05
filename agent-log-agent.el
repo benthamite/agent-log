@@ -27,9 +27,12 @@
 ;; reference to `agent' lives here, and only public `agent' API is
 ;; used: `agent-session', `agent-session-id', `agent-session-backend',
 ;; `agent-session-buffers', `agent-session-display-state',
-;; `agent-backend', `agent-session-create', and `agent-start-session'.
-;; Agent Log backend keys equal agent backend symbols, so no mapping is
-;; needed.
+;; `agent-backend', `agent-session-create', `agent-start-session', and
+;; the `agent-session-annotation-functions' rendering hook.  Loading
+;; this file adds its own annotation function to that hook, leaving any
+;; other integration's in place; the switcher takes the first non-nil
+;; answer.  Agent Log backend keys equal agent backend symbols, so no
+;; mapping is needed.
 
 ;;; Code:
 
@@ -71,6 +74,70 @@ agent package's authoritative session identity and display state."
 (setq agent-log-live-session-info-function #'agent-log-agent--session-info
       agent-log-live-session-info-table-function
       #'agent-log-agent--session-info-table)
+
+;;;; Switcher annotations
+
+(defun agent-log-agent--session-annotation (buffer)
+  "Return the stored one-line summary of BUFFER's session, or nil.
+Live sessions are summarized by the background sweep, which does not
+know they are live, so the text can lag the conversation by hours.  A
+session too new to have been summarized has no annotation at all."
+  (when-let* ((session (agent-session buffer))
+              (session-id (agent-session-id session)))
+    (agent-log-session-oneline session-id)))
+
+(add-hook 'agent-session-annotation-functions
+          #'agent-log-agent--session-annotation)
+
+(defvar agent-log-agent--oneline-refresh-timer nil
+  "Idle timer refreshing the session one-line summary cache.")
+
+;; Declared here because the two functions below read the option while
+;; the `defcustom' that defines it comes after them, and they have to:
+;; its `:set' runs when the option is declared, so the function it
+;; calls must already exist.  Without this declaration those reads are
+;; free variable references, which `byte-compile-error-on-warn' turns
+;; into a build failure.
+(defvar agent-log-oneline-refresh-idle-delay)
+
+(defun agent-log-agent--oneline-refresh-enabled-p ()
+  "Return non-nil when the one-line cache should be refreshed on idle."
+  (and (numberp agent-log-oneline-refresh-idle-delay)
+       (> agent-log-oneline-refresh-idle-delay 0)))
+
+(defun agent-log-agent--update-oneline-refresh-timer (&rest _)
+  "Install or cancel the session one-line cache refresh timer."
+  (when (timerp agent-log-agent--oneline-refresh-timer)
+    (cancel-timer agent-log-agent--oneline-refresh-timer))
+  (setq agent-log-agent--oneline-refresh-timer nil)
+  (when (agent-log-agent--oneline-refresh-enabled-p)
+    (setq agent-log-agent--oneline-refresh-timer
+          (run-with-idle-timer agent-log-oneline-refresh-idle-delay t
+                               #'agent-log-refresh-session-onelines))))
+
+(defcustom agent-log-oneline-refresh-idle-delay 5
+  "Seconds of idleness before refreshing the session one-line cache.
+The session switcher reads that cache, so it never waits on the index
+file.  A firing whose index is unchanged costs one `file-attributes'
+call; a firing whose index has changed rereads and reparses the whole
+index, which takes roughly 90 ms on a 6 MB archive.  A shorter delay
+therefore pays that reparse sooner after each write, and a longer one
+keeps a summary written moments ago out of the switcher for longer.
+
+Set this option to nil, or to a number that is not positive, to stop
+refreshing on idle; the switcher then shows whatever the cache last
+held."
+  :type '(choice (const :tag "Disable idle refresh" nil)
+                 (number :tag "Seconds"))
+  :group 'agent-log
+  ;; This `:set' is also what installs the timer at load, so no
+  ;; separate installation call follows: declaring an option runs its
+  ;; `:set', with the value the user's init already gave it when there
+  ;; is one, and reloading this file runs it again, cancelling the
+  ;; previous timer first.
+  :set (lambda (sym val)
+         (set-default sym val)
+         (agent-log-agent--update-oneline-refresh-timer)))
 
 (cl-defmethod agent-log--current-buffer-session-file :around
   ((backend agent-log-backend))

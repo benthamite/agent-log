@@ -1161,6 +1161,58 @@ ensuring concurrent operations do not clobber each other."
   (agent-log--index-update-props
    session-id (list :file rendered-path :jsonl-size jsonl-size)))
 
+;;;;; Session one-liners
+
+(defvar agent-log--session-oneline-cache nil
+  "Hash table mapping a session id to its stored one-line summary.
+Nil until `agent-log-refresh-session-onelines' first fills it.  Holds
+only the one-line summaries, not whole index entries, so consumers that
+want a label do not carry the entire index in memory.")
+
+(defvar agent-log--session-oneline-cache-state nil
+  "File state the one-line summary cache was built from.
+A cons (SIZE . MTIME) of the index file, or nil when the cache has
+never been filled.")
+
+(defun agent-log--index-file-state ()
+  "Return (SIZE . MTIME) for the index file, or nil when it is absent."
+  (when-let* ((attributes (file-attributes (agent-log--index-file))))
+    (cons (file-attribute-size attributes)
+          (file-attribute-modification-time attributes))))
+
+(defun agent-log-session-oneline (session-id)
+  "Return the stored one-line summary for SESSION-ID, or nil.
+Read the in-memory cache filled by
+`agent-log-refresh-session-onelines' and never touch the disk, so
+callers on interactive paths pay nothing for the answer.  A session
+with no conversation to summarize returns nil rather than the stored
+sentinel, and so does a session the cache has not seen."
+  (when agent-log--session-oneline-cache
+    (let ((oneline (gethash session-id agent-log--session-oneline-cache)))
+      (and (stringp oneline)
+           (not (equal oneline agent-log--no-conversation-sentinel))
+           oneline))))
+
+(defun agent-log-refresh-session-onelines (&optional force)
+  "Rebuild the one-line summary cache from the rendered index.
+Do nothing when the index file's size and modification time are
+unchanged since the last rebuild, unless FORCE is non-nil, and nothing
+when the index file does not exist.  Signal on a corrupt index, before
+the cache and its recorded file state change, so corruption cannot
+empty a good cache and then record itself as a successful rebuild.
+Return non-nil when the cache was rebuilt."
+  (when-let* ((state (agent-log--index-file-state)))
+    (when (or force
+              (not (equal state agent-log--session-oneline-cache-state)))
+      (let ((cache (make-hash-table :test #'equal)))
+        (maphash (lambda (session-id entry)
+                   (when-let* ((oneline (plist-get entry :summary-oneline)))
+                     (puthash session-id oneline cache)))
+                 (agent-log--read-index-strict))
+        (setq agent-log--session-oneline-cache cache
+              agent-log--session-oneline-cache-state state)
+        t))))
+
 ;;;###autoload
 (defun agent-log-repair-rendered-index ()
   "Repair rendered index entries that point into the unknown project.
