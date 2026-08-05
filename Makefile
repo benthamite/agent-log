@@ -31,6 +31,7 @@ test-load-order:
 
 compile:
 	$(EMACS) -Q --batch $(LOAD_PATH) \
+	  --eval '(setq load-prefer-newer t)' \
 	  --eval '(setq byte-compile-error-on-warn t)' \
 	  -f batch-byte-compile agent-log.el agent-log-claude.el agent-log-codex.el agent-log-redact.el agent-log-agent.el
 
