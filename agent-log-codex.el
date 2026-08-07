@@ -177,11 +177,56 @@ Each value is a plist (:display :timestamp :project :file :file-dir
 (defun agent-log-codex--thread-list (backend)
   "Return every Codex thread that native Resume would offer for BACKEND.
 Read indexed state first, as native Resume does, and fall back to the
-rollout scan-and-repair path when the initial indexed page is empty.
-Agent Log omits `cwd', because it lists every project, and follows every
-cursor because it lists the whole catalog rather than one page."
+rollout scan-and-repair path when that index turns out to be stale."
   (let* ((home (agent-log-codex--effective-home backend))
-         (process-environment
+         (indexed (agent-log-codex--home-threads home t)))
+    (if (agent-log-codex--index-covers-rollouts-p home indexed)
+        indexed
+      (agent-log-codex--home-threads home nil))))
+
+(defun agent-log-codex--index-covers-rollouts-p (home threads)
+  "Return non-nil when THREADS is a current index of HOME's rollouts.
+Codex indexes a thread when its session closes, so a session whose
+process was killed rather than closed leaves its rollout on disk but out
+of the index.  Treat an empty catalog, or one that omits the newest
+rollout on disk, as stale and therefore worth repairing."
+  (and threads
+       (let ((newest (agent-log-codex--newest-rollout-id home)))
+         (or (null newest)
+             (seq-some (lambda (thread) (equal (alist-get 'id thread) newest))
+                       threads)))))
+
+(defun agent-log-codex--newest-rollout-id (home)
+  "Return the session id of the newest rollout recorded under HOME, or nil.
+Rollouts sit in a date-partitioned tree under names that begin with the
+session timestamp, so the newest is reached by descending the
+greatest-named directory at each level rather than by scanning the whole
+tree, which holds every session the user has ever run."
+  (when-let* ((day (agent-log-codex--newest-numbered-directory
+                    (expand-file-name "sessions" home) 3))
+              (rollout (car (last (directory-files day nil "\\.jsonl\\'")))))
+    (when (string-match agent-log-codex--session-id-regexp rollout)
+      (match-string 1 rollout))))
+
+(defun agent-log-codex--newest-numbered-directory (root depth)
+  "Return the greatest-named directory DEPTH numbered levels under ROOT.
+Return nil unless every level has a numbered subdirectory."
+  (let ((dir (and (file-directory-p root) root)))
+    (while (and dir (> depth 0))
+      (setq dir (car (last (directory-files dir t "\\`[0-9]+\\'")))
+            depth (1- depth))
+      (unless (and dir (file-directory-p dir))
+        (setq dir nil)))
+    dir))
+
+(defun agent-log-codex--home-threads (home state-db-only)
+  "Return every Codex thread the catalog reports under HOME.
+Read Codex's index when STATE-DB-ONLY is non-nil, otherwise take the
+slower scan-and-repair path that rebuilds that index from the rollouts
+on disk.  Agent Log omits `cwd', because it lists every project, and
+follows every cursor because it lists the whole catalog rather than one
+page."
+  (let* ((process-environment
           (cons (concat "CODEX_HOME=" (directory-file-name home))
                 (cl-remove-if
                  (lambda (entry)
@@ -200,8 +245,6 @@ cursor because it lists the whole catalog rather than one page."
          (request-id 0)
          (seen-ids (make-hash-table :test #'equal))
          (seen-cursors (make-hash-table :test #'equal))
-         (state-db-only t)
-         (first-page t)
          cursor
          threads)
     (unwind-protect
@@ -226,26 +269,22 @@ cursor because it lists the whole catalog rather than one page."
                       (agent-log-codex--catalog-request
                        process (cl-incf request-id) "thread/list" params))
                      (page (append (alist-get 'data result) nil)))
-                (if (and first-page state-db-only (null page))
-                    (setq state-db-only nil
-                          cursor nil)
-                  (setq first-page nil)
-                  (dolist (thread page)
-                    (let ((id (alist-get 'id thread)))
-                      (unless (and (stringp id) (gethash id seen-ids))
-                        (when (stringp id)
-                          (puthash id t seen-ids))
-                        (setq threads (nconc threads (list thread))))))
-                  (let ((next-cursor (alist-get 'nextCursor result)))
-                    (cond
-                     ((not (stringp next-cursor))
-                      (setq done t))
-                     ((gethash next-cursor seen-cursors)
-                      (error "Codex thread catalog repeated cursor %s"
-                             next-cursor))
-                     (t
-                      (puthash next-cursor t seen-cursors)
-                      (setq cursor next-cursor)))))))
+                (dolist (thread page)
+                  (let ((id (alist-get 'id thread)))
+                    (unless (and (stringp id) (gethash id seen-ids))
+                      (when (stringp id)
+                        (puthash id t seen-ids))
+                      (setq threads (nconc threads (list thread))))))
+                (let ((next-cursor (alist-get 'nextCursor result)))
+                  (cond
+                   ((not (stringp next-cursor))
+                    (setq done t))
+                   ((gethash next-cursor seen-cursors)
+                    (error "Codex thread catalog repeated cursor %s"
+                           next-cursor))
+                   (t
+                    (puthash next-cursor t seen-cursors)
+                    (setq cursor next-cursor))))))
           threads))
       (agent-log-codex--stop-catalog-process process stderr-buffer))))
 

@@ -3701,6 +3701,76 @@ session."
                      '("repaired"))))
     (should (equal (nreverse calls) '(t :json-false)))))
 
+(ert-deftest agent-log-test-codex-thread-list/repairs-stale-index ()
+  "Falls back to rollout repair when the index misses the newest rollout.
+Codex indexes a thread when its session closes, so a session whose
+process was killed instead leaves an unindexed rollout on disk.  An
+index that is stale rather than empty must still trigger the repair."
+  (agent-log-test--with-temp-dir
+    (let* ((home (file-name-as-directory
+                  (expand-file-name "home" agent-log-test--dir)))
+           (backend
+            (agent-log--make-codex
+             :name "Codex" :key 'codex :directory "/unused/.codex"))
+           (unindexed "019fddcf-164d-7ec1-8e33-7ee2677f8454")
+           calls)
+      (agent-log-test--write-file
+       (concat "home/sessions/2026/08/07/rollout-2026-08-07T16-59-24-"
+               unindexed ".jsonl")
+       "{}\n")
+      (cl-letf (((symbol-function 'agent-log-codex--effective-home)
+                 (lambda (_backend) home))
+                ((symbol-function 'make-process)
+                 (lambda (&rest _args) 'fake-process))
+                ((symbol-function 'agent-log-codex--stop-catalog-process)
+                 (lambda (&rest _args) nil))
+                ((symbol-function 'agent-log-codex--catalog-request)
+                 (lambda (_process _request-id method params)
+                   (pcase method
+                     ("initialize" nil)
+                     ("thread/list"
+                      (push (alist-get 'useStateDbOnly params) calls)
+                      (if (eq (alist-get 'useStateDbOnly params) t)
+                          '((data . [((id . "indexed"))]) (nextCursor . nil))
+                        `((data . [((id . "indexed")) ((id . ,unindexed))])
+                          (nextCursor . nil))))))))
+        (should (equal (mapcar (lambda (thread) (alist-get 'id thread))
+                               (agent-log-codex--thread-list backend))
+                       (list "indexed" unindexed))))
+      (should (equal (nreverse calls) '(t :json-false))))))
+
+(ert-deftest agent-log-test-codex-thread-list/keeps-a-current-index ()
+  "Skips the rollout repair when the index already covers the newest rollout."
+  (agent-log-test--with-temp-dir
+    (let* ((home (file-name-as-directory
+                  (expand-file-name "home" agent-log-test--dir)))
+           (backend
+            (agent-log--make-codex
+             :name "Codex" :key 'codex :directory "/unused/.codex"))
+           (newest "019fddcf-164d-7ec1-8e33-7ee2677f8454")
+           calls)
+      (agent-log-test--write-file
+       (concat "home/sessions/2026/08/07/rollout-2026-08-07T16-59-24-"
+               newest ".jsonl")
+       "{}\n")
+      (cl-letf (((symbol-function 'agent-log-codex--effective-home)
+                 (lambda (_backend) home))
+                ((symbol-function 'make-process)
+                 (lambda (&rest _args) 'fake-process))
+                ((symbol-function 'agent-log-codex--stop-catalog-process)
+                 (lambda (&rest _args) nil))
+                ((symbol-function 'agent-log-codex--catalog-request)
+                 (lambda (_process _request-id method params)
+                   (pcase method
+                     ("initialize" nil)
+                     ("thread/list"
+                      (push (alist-get 'useStateDbOnly params) calls)
+                      `((data . [((id . ,newest))]) (nextCursor . nil)))))))
+        (should (equal (mapcar (lambda (thread) (alist-get 'id thread))
+                               (agent-log-codex--thread-list backend))
+                       (list newest))))
+      (should (equal calls '(t))))))
+
 (ert-deftest agent-log-test-codex-thread-list/keeps-every-native-thread ()
   "Threads native Resume would list are never filtered out by Agent Log.
 The catalog is the membership authority, so unfamiliar source kinds and
