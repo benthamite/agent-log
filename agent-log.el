@@ -3425,20 +3425,25 @@ that identify the session which just stopped producing output."
    (list session) 0 1 agent-log--summarize-generation))
 
 (defun agent-log--spawn-summary-worker (session-id)
-  "Start a background summary worker for SESSION-ID."
+  "Start a background summary worker for SESSION-ID.
+The worker runs from `temporary-file-directory' because it reads its
+state file by absolute path and never uses the working directory, while
+`make-process' fails outright when `default-directory' names a directory
+that has been deleted or renamed."
   (unless (gethash session-id agent-log--summary-workers)
     (let ((state-file (agent-log--summary-worker-state-file session-id)))
       (condition-case err
-          (let ((process
-                 (make-process
-                  :name (format "agent-log-summary-%s" session-id)
-                  :buffer nil
-                  :noquery t
-                  :connection-type 'pipe
-                  :command (agent-log--summary-worker-command state-file)
-                  :sentinel (lambda (proc event)
-                              (agent-log--summary-worker-sentinel
-                               session-id proc event)))))
+          (let* ((default-directory temporary-file-directory)
+                 (process
+                  (make-process
+                   :name (format "agent-log-summary-%s" session-id)
+                   :buffer nil
+                   :noquery t
+                   :connection-type 'pipe
+                   :command (agent-log--summary-worker-command state-file)
+                   :sentinel (lambda (proc event)
+                               (agent-log--summary-worker-sentinel
+                                session-id proc event)))))
             (puthash session-id (cons process state-file)
                      agent-log--summary-workers)
             (message "agent-log: summarizing session %s in background"
@@ -3450,23 +3455,29 @@ that identify the session which just stopped producing output."
 
 (defun agent-log--spawn-summary-sweep-worker (limit &optional session-ids)
   "Start a background summary backlog worker for up to LIMIT sessions.
-When SESSION-IDS is non-nil, prioritize those sessions."
+When SESSION-IDS is non-nil, prioritize those sessions.
+
+The worker runs from `temporary-file-directory' because it reads its
+state file by absolute path and never uses the working directory, while
+`make-process' fails outright when `default-directory' names a directory
+that has been deleted or renamed."
   (let ((key :sweep))
     (unless (gethash key agent-log--summary-workers)
       (let ((state-file
              (agent-log--summary-sweep-worker-state-file
               limit session-ids)))
         (condition-case err
-            (let ((process
-                   (make-process
-                    :name "agent-log-summary-sweep"
-                    :buffer nil
-                    :noquery t
-                    :connection-type 'pipe
-                    :command (agent-log--summary-worker-command state-file)
-                    :sentinel (lambda (proc event)
-                                (agent-log--summary-worker-sentinel
-                                 key proc event)))))
+            (let* ((default-directory temporary-file-directory)
+                   (process
+                    (make-process
+                     :name "agent-log-summary-sweep"
+                     :buffer nil
+                     :noquery t
+                     :connection-type 'pipe
+                     :command (agent-log--summary-worker-command state-file)
+                     :sentinel (lambda (proc event)
+                                 (agent-log--summary-worker-sentinel
+                                  key proc event)))))
               (puthash key (cons process state-file)
                        agent-log--summary-workers)
               (message
