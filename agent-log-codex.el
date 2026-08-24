@@ -197,16 +197,59 @@ rollout on disk, as stale and therefore worth repairing."
                        threads)))))
 
 (defun agent-log-codex--newest-rollout-id (home)
-  "Return the session id of the newest rollout recorded under HOME, or nil.
+  "Return the session id of the newest resumable rollout under HOME, or nil.
 Rollouts sit in a date-partitioned tree under names that begin with the
 session timestamp, so the newest is reached by descending the
 greatest-named directory at each level rather than by scanning the whole
-tree, which holds every session the user has ever run."
+tree, which holds every session the user has ever run.  Subagent
+rollouts are skipped: Codex never lists them, so comparing the index
+against one would report the index stale forever."
   (when-let* ((day (agent-log-codex--newest-numbered-directory
-                    (expand-file-name "sessions" home) 3))
-              (rollout (car (last (directory-files day nil "\\.jsonl\\'")))))
-    (when (string-match agent-log-codex--session-id-regexp rollout)
-      (match-string 1 rollout))))
+                    (expand-file-name "sessions" home) 3)))
+    (let ((rollouts (reverse (directory-files day t "\\.jsonl\\'")))
+          id)
+      (while (and rollouts (not id))
+        (let ((rollout (pop rollouts)))
+          (when (and (string-match agent-log-codex--session-id-regexp rollout)
+                     (not (agent-log-codex--subagent-rollout-p rollout)))
+            (setq id (match-string 1 rollout)))))
+      id)))
+
+(defun agent-log-codex--subagent-rollout-p (rollout)
+  "Return non-nil when ROLLOUT's session metadata marks a subagent thread.
+Only the first line is read.  A rollout whose metadata is missing or
+unreadable counts as a top-level thread, so a stale index is still
+repaired rather than silently accepted."
+  (let ((meta (agent-log-codex--rollout-session-meta rollout)))
+    (or (equal (alist-get 'thread_source meta) "subagent")
+        (let ((source (alist-get 'source meta)))
+          (and (consp source) (assq 'subagent source) t)))))
+
+(defun agent-log-codex--rollout-session-meta (rollout)
+  "Return the session_meta payload alist from ROLLOUT's first line, or nil.
+Only the first line is read, in chunks, so a rollout of any size costs
+one small read."
+  (condition-case nil
+      (with-temp-buffer
+        (let ((chunk 65536)
+              (start 0)
+              (done nil))
+          (while (not done)
+            (let ((read (cadr (insert-file-contents
+                               rollout nil start (+ start chunk)))))
+              (cl-incf start read)
+              (setq done (or (< read chunk)
+                             (save-excursion
+                               (goto-char (point-min))
+                               (search-forward "\n" nil t)))))))
+        (goto-char (point-min))
+        (let ((entry (json-parse-buffer :object-type 'alist
+                                        :array-type 'list
+                                        :null-object nil
+                                        :false-object nil)))
+          (and (equal (alist-get 'type entry) "session_meta")
+               (alist-get 'payload entry))))
+    (error nil)))
 
 (defun agent-log-codex--newest-numbered-directory (root depth)
   "Return the greatest-named directory DEPTH numbered levels under ROOT.

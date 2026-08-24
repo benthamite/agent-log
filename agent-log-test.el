@@ -3771,6 +3771,50 @@ index that is stale rather than empty must still trigger the repair."
                        (list newest))))
       (should (equal calls '(t))))))
 
+(ert-deftest agent-log-test-codex-thread-list/ignores-unindexed-subagent-rollouts ()
+  "Skips the rollout repair when only subagent rollouts are unindexed.
+Codex never lists subagent threads, so a subagent rollout newer than
+every indexed thread must not make the index look stale; otherwise every
+catalog read would pay for a repair that cannot add it."
+  (agent-log-test--with-temp-dir
+    (let* ((home (file-name-as-directory
+                  (expand-file-name "home" agent-log-test--dir)))
+           (backend
+            (agent-log--make-codex
+             :name "Codex" :key 'codex :directory "/unused/.codex"))
+           (parent "019fddcf-164d-7ec1-8e33-7ee2677f8454")
+           (subagent "019fddcf-2f00-7ec1-8e33-7ee2677f8455")
+           calls)
+      (agent-log-test--write-file
+       (concat "home/sessions/2026/08/07/rollout-2026-08-07T16-59-24-"
+               parent ".jsonl")
+       (concat "{\"type\":\"session_meta\",\"payload\":{\"id\":\""
+               parent "\",\"source\":\"cli\"}}\n"))
+      (agent-log-test--write-file
+       (concat "home/sessions/2026/08/07/rollout-2026-08-07T17-05-00-"
+               subagent ".jsonl")
+       (concat "{\"type\":\"session_meta\",\"payload\":{\"id\":\""
+               subagent "\",\"source\":{\"subagent\":{\"thread_spawn\":"
+               "{\"parent_thread_id\":\"" parent "\"}}},"
+               "\"thread_source\":\"subagent\"}}\n"))
+      (cl-letf (((symbol-function 'agent-log-codex--effective-home)
+                 (lambda (_backend) home))
+                ((symbol-function 'make-process)
+                 (lambda (&rest _args) 'fake-process))
+                ((symbol-function 'agent-log-codex--stop-catalog-process)
+                 (lambda (&rest _args) nil))
+                ((symbol-function 'agent-log-codex--catalog-request)
+                 (lambda (_process _request-id method params)
+                   (pcase method
+                     ("initialize" nil)
+                     ("thread/list"
+                      (push (alist-get 'useStateDbOnly params) calls)
+                      `((data . [((id . ,parent))]) (nextCursor . nil)))))))
+        (should (equal (mapcar (lambda (thread) (alist-get 'id thread))
+                               (agent-log-codex--thread-list backend))
+                       (list parent))))
+      (should (equal calls '(t))))))
+
 (ert-deftest agent-log-test-codex-thread-list/keeps-every-native-thread ()
   "Threads native Resume would list are never filtered out by Agent Log.
 The catalog is the membership authority, so unfamiliar source kinds and
