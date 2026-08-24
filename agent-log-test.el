@@ -766,6 +766,39 @@ refresh from noticing until the file changed again."
     (agent-log--index-merge index "s1" (list :file "/new.md"))
     (should (equal (plist-get (gethash "s1" index) :file) "/new.md"))))
 
+(ert-deftest agent-log-test-read-index/caches-until-file-changes ()
+  "Reuses the parsed index while the file is unchanged, rereads when it is."
+  (agent-log-test--with-temp-dir
+    (let ((agent-log-rendered-directory agent-log-test--dir)
+          (agent-log--index-cache nil)
+          (agent-log--index-cache-state nil)
+          (reads 0))
+      (with-temp-file (agent-log--index-file)
+        (prin1 (let ((h (make-hash-table :test #'equal)))
+                 (puthash "a" '(:file "a.md") h) h)
+               (current-buffer)))
+      (cl-letf* ((real (symbol-function 'agent-log--read-index-from-disk))
+                 ((symbol-function 'agent-log--read-index-from-disk)
+                  (lambda () (cl-incf reads) (funcall real))))
+        (let ((first (agent-log--read-index)))
+          (should (eq first (agent-log--read-index)))
+          (should (= reads 1))
+          ;; A write through the package keeps the cache current.
+          (puthash "b" '(:file "b.md") first)
+          (agent-log--write-index first)
+          (should (eq first (agent-log--read-index)))
+          (should (= reads 1))
+          ;; An external writer, such as a sweep worker, invalidates it.
+          (sleep-for 0.02)
+          (with-temp-file (agent-log--index-file)
+            (prin1 (let ((h (make-hash-table :test #'equal)))
+                     (puthash "c" '(:file "c.md") h) h)
+                   (current-buffer)))
+          (let ((fresh (agent-log--read-index)))
+            (should (= reads 2))
+            (should (gethash "c" fresh))
+            (should-not (gethash "a" fresh))))))))
+
 (ert-deftest agent-log-test-repair-rendered-index/migrates-unknown-entry ()
   "Re-renders unknown-folder index entries to their real project path."
   (agent-log-test--with-temp-dir

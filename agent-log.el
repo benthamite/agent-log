@@ -1064,8 +1064,32 @@ spurious checker errors and background processes)."
   "Return the path to the rendered-directory index file."
   (expand-file-name "_index.el" agent-log-rendered-directory))
 
+(defvar agent-log--index-cache nil
+  "Parsed rendered index, or nil when no read has been cached.")
+
+(defvar agent-log--index-cache-state nil
+  "Index file state (SIZE . MTIME) that `agent-log--index-cache' describes.")
+
 (defun agent-log--read-index ()
-  "Read the index hash table from disk.
+  "Return the index hash table, reading it from disk when it has changed.
+The parsed table is cached against the index file's size and
+modification time, so a browse that consults the index several times
+parses the multi-megabyte file once, and a write by another process
+invalidates the cache.  Callers that mutate the table write it back
+with `agent-log--write-index', which keeps the cache current.  Returns
+an empty hash table if the file does not exist or is corrupt."
+  (let ((state (agent-log--index-file-state)))
+    (if (and agent-log--index-cache
+             state
+             (equal state agent-log--index-cache-state))
+        agent-log--index-cache
+      (let ((index (agent-log--read-index-from-disk)))
+        (setq agent-log--index-cache index
+              agent-log--index-cache-state state)
+        index))))
+
+(defun agent-log--read-index-from-disk ()
+  "Parse the index hash table from disk, bypassing the cache.
 Returns an empty hash table if the file does not exist or is corrupt."
   (let ((file (agent-log--index-file)))
     (condition-case err
@@ -1115,7 +1139,9 @@ if Emacs crashes mid-write."
                       (print-length nil))
                   (prin1 index (current-buffer))
                   (insert "\n"))))
-            (rename-file tmp file t))
+            (rename-file tmp file t)
+            (setq agent-log--index-cache index
+                  agent-log--index-cache-state (agent-log--index-file-state)))
         (error
          (ignore-errors (delete-file tmp))
          (signal (car err) (cdr err)))))))
