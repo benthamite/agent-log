@@ -95,14 +95,14 @@ or hardcode a brand color (e.g. \"#D97757\").")
 
 (defun agent-log--svg-icon (svg-data &optional face)
   "Return a propertized string displaying SVG-DATA as an inline icon.
-FACE determines the color and height (default `default').
+FACE determines the color (default `default').
 \"currentColor\" in the SVG is replaced with the foreground of FACE.
 Returns an empty string when SVG support is unavailable."
   (if (not (image-type-available-p 'svg))
       ""
     (let* ((face (or face 'default))
            (fg (face-foreground face nil t))
-           (h (window-font-height nil face))
+           (h (frame-char-height))
            (colored (replace-regexp-in-string
                      "currentColor" (or fg "#000") svg-data t t))
            (img (create-image colored 'svg t :height h :ascent 'center)))
@@ -1860,6 +1860,7 @@ Projects are sorted by most recent session timestamp."
 (defun agent-log--build-candidates (sessions)
   "Build an alist of (display-string . (session-id . metadata)) from SESSIONS."
   (let* ((index (agent-log--read-index))
+         (icons (agent-log--backend-icons sessions))
          (live-states (agent-log--session-live-states sessions))
          (live-width (agent-log--max-live-tag-width live-states))
          (proj-width (agent-log--max-project-width sessions))
@@ -1879,7 +1880,7 @@ Projects are sorted by most recent session timestamp."
      (let* ((session-id (car session))
             (meta (cdr session))
             (backend (plist-get meta :backend))
-            (icon (if backend (agent-log--backend-icon backend) ""))
+            (icon (if backend (gethash backend icons "") ""))
             (live-tag (agent-log--live-tag live live-width))
             (ts (plist-get meta :timestamp))
             (date (agent-log--format-epoch-ms ts))
@@ -1901,6 +1902,15 @@ Projects are sorted by most recent session timestamp."
                                       "\"")))))
             (label (concat icon " " live-tag body)))
        (cons label (cons session-id meta))))))
+
+(defun agent-log--backend-icons (sessions)
+  "Return backend icons for SESSIONS, rendering each distinct backend once."
+  (let ((icons (make-hash-table :test #'eq)))
+    (dolist (session sessions)
+      (when-let* ((backend (plist-get (cdr session) :backend))
+                  ((eq (gethash backend icons 'missing) 'missing)))
+        (puthash backend (agent-log--backend-icon backend) icons)))
+    icons))
 
 (defun agent-log--project-field (project width)
   "Return PROJECT's browser label padded or abbreviated to WIDTH columns.

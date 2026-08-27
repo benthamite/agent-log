@@ -113,6 +113,22 @@
   :type 'number
   :group 'agent-log)
 
+(defcustom agent-log-codex-catalog-repair-cooldown 300
+  "Seconds before retrying a background repair for the same rollout."
+  :type 'number
+  :group 'agent-log)
+
+(defcustom agent-log-codex-catalog-repair-timeout 120
+  "Seconds before the operating system stops a Codex catalog repair."
+  :type 'number
+  :group 'agent-log)
+
+(defvar agent-log-codex--catalog-repairs (make-hash-table :test #'equal)
+  "Background catalog repair state keyed by Codex home directory.")
+
+(defvar agent-log-codex--thread-caches (make-hash-table :test #'equal)
+  "Parsed persistent thread catalogs keyed by Codex home directory.")
+
 (defconst agent-log-codex--thread-list-page-size 1000
   "Number of canonical Codex threads requested per catalog page.")
 
@@ -176,13 +192,62 @@ Each value is a plist (:display :timestamp :project :file :file-dir
 
 (defun agent-log-codex--thread-list (backend)
   "Return every Codex thread that native Resume would offer for BACKEND.
-Read indexed state first, as native Resume does, and fall back to the
-rollout scan-and-repair path when that index turns out to be stale."
+Read only Agent Log's persistent catalog cache in the interactive Emacs.
+When that cache is absent or stale, start a detached refresh and repair;
+session browsing never starts or waits for Codex app-server."
   (let* ((home (agent-log-codex--effective-home backend))
-         (indexed (agent-log-codex--home-threads home t)))
+         (indexed (agent-log-codex--cached-home-threads home))
+         (state (gethash home agent-log-codex--catalog-repairs)))
     (if (agent-log-codex--index-covers-rollouts-p home indexed)
-        indexed
-      (agent-log-codex--home-threads home nil))))
+        (progn
+          (unless (and (processp (plist-get state :process))
+                       (process-live-p (plist-get state :process)))
+            (remhash home agent-log-codex--catalog-repairs))
+          indexed)
+      (agent-log-codex--maybe-start-catalog-repair home)
+      (unless indexed
+        (message "Agent Log: Codex catalog cache is initializing in the background"))
+      indexed)))
+
+(defun agent-log-codex--catalog-cache-file (home)
+  "Return Agent Log's persistent Codex catalog cache under HOME."
+  (expand-file-name "agent-log-thread-catalog.json" home))
+
+(defun agent-log-codex--cached-home-threads (home)
+  "Return the cached Codex thread catalog for HOME, or nil.
+Cache the parsed JSON against the catalog file's size and modification
+time so repeated browsing does not reparse it."
+  (let* ((file (agent-log-codex--catalog-cache-file home))
+         (attributes (and (file-readable-p file) (file-attributes file)))
+         (state (and attributes
+                     (list (file-attribute-size attributes)
+                           (file-attribute-modification-time attributes))))
+         (cached (gethash home agent-log-codex--thread-caches)))
+    (cond
+     ((null state)
+      (remhash home agent-log-codex--thread-caches)
+      nil)
+     ((equal state (plist-get cached :state))
+      (plist-get cached :threads))
+     (t
+      (condition-case err
+          (let* ((document
+                  (with-temp-buffer
+                    (insert-file-contents file)
+                    (json-parse-buffer
+                     :object-type 'alist :array-type 'list
+                     :null-object nil :false-object nil)))
+                 (version (alist-get 'version document))
+                 (threads (alist-get 'threads document)))
+            (unless (and (equal version 1) (listp threads))
+              (error "unsupported catalog cache format"))
+            (puthash home (list :state state :threads threads)
+                     agent-log-codex--thread-caches)
+            threads)
+        (error
+         (message "Agent Log could not read Codex catalog cache: %s"
+                  (error-message-string err))
+         nil))))))
 
 (defun agent-log-codex--index-covers-rollouts-p (home threads)
   "Return non-nil when THREADS is a current index of HOME's rollouts.
@@ -195,6 +260,119 @@ rollout on disk, as stale and therefore worth repairing."
          (or (null newest)
              (seq-some (lambda (thread) (equal (alist-get 'id thread) newest))
                        threads)))))
+
+(defun agent-log-codex--maybe-start-catalog-repair (home)
+  "Start a bounded background catalog repair for stale Codex HOME.
+Repeated browses do not restart a repair for the same newest rollout
+until `agent-log-codex-catalog-repair-cooldown' has elapsed."
+  (let* ((rollout (or (agent-log-codex--newest-rollout-id home) 'empty))
+         (state (gethash home agent-log-codex--catalog-repairs))
+         (active (and (processp (plist-get state :process))
+                      (process-live-p (plist-get state :process))))
+         (same-rollout (equal rollout (plist-get state :rollout)))
+         (recent (< (- (float-time) (or (plist-get state :started) 0))
+                    agent-log-codex-catalog-repair-cooldown)))
+    (unless (or active (and same-rollout recent))
+      (condition-case err
+          (agent-log-codex--start-catalog-repair home rollout)
+        (error
+         (puthash home (list :rollout rollout :started (float-time))
+                  agent-log-codex--catalog-repairs)
+         (message "Agent Log Codex catalog repair could not start: %s"
+                  (error-message-string err)))))))
+
+(defun agent-log-codex--start-catalog-repair (home rollout)
+  "Start an asynchronous catalog repair for HOME and newest ROLLOUT.
+The repair runs in a separate batch Emacs behind an operating-system
+timeout.  Its output is redirected before the helper starts, so the
+interactive Emacs never receives archive scan output and does not
+enforce the deadline from its event loop."
+  (let* ((timeout-program
+          (or (executable-find "timeout") (executable-find "gtimeout")
+              (error "Agent Log requires timeout or gtimeout for Codex catalog repair")))
+         (helper (expand-file-name
+                  "agent-log-codex-repair.el"
+                  (file-name-directory
+                   (or (locate-library "agent-log-codex")
+                       (error "Cannot locate agent-log-codex")))))
+         (emacs-program (expand-file-name invocation-name invocation-directory))
+         (cache-file (agent-log-codex--catalog-cache-file home))
+         (process-environment
+          (append
+           (list (concat "CODEX_HOME=" (directory-file-name home))
+                 (concat "AGENT_LOG_CODEX_PROGRAM=" codex-program)
+                 (concat "AGENT_LOG_CODEX_CACHE=" cache-file)
+                 (concat "AGENT_LOG_EXPECTED_ROLLOUT="
+                         (if (stringp rollout) rollout "")))
+           (cl-remove-if
+            (lambda (entry)
+              (or (string-prefix-p "CODEX_HOME=" entry)
+                  (string-prefix-p "AGENT_LOG_CODEX_PROGRAM=" entry)
+                  (string-prefix-p "AGENT_LOG_CODEX_CACHE=" entry)
+                  (string-prefix-p "AGENT_LOG_EXPECTED_ROLLOUT=" entry)))
+            process-environment)))
+         process)
+    (unless (file-readable-p helper)
+      (error "Cannot read Codex repair helper %s" helper))
+    (condition-case err
+        (progn
+          (setq process
+                (make-process
+                 :name "agent-log-codex-catalog-repair"
+                 :command
+                 (list "/bin/sh" "-c"
+                       (concat "exec \"$1\" --kill-after=5s \"$2\" "
+                               "\"$3\" -Q --batch -l \"$4\" "
+                               "--funcall agent-log-codex-repair-run "
+                               ">/dev/null 2>&1")
+                       "agent-log-codex-catalog-repair"
+                       timeout-program
+                       (format "%ss" agent-log-codex-catalog-repair-timeout)
+                       emacs-program
+                       helper)
+                 :connection-type 'pipe
+                 :coding 'utf-8-unix
+                 :buffer nil
+                 :stderr nil
+                 :noquery t
+                 :sentinel #'agent-log-codex--catalog-repair-sentinel))
+          (process-put process 'repair-active t)
+          (process-put process 'repair-home home)
+          (process-put process 'repair-rollout rollout)
+          (puthash home (list :rollout rollout :started (float-time)
+                              :process process)
+                   agent-log-codex--catalog-repairs))
+      (error
+       (if process
+           (progn
+             (process-put process 'repair-active nil)
+             (agent-log-codex--stop-catalog-process process nil)))
+       (signal (car err) (cdr err))))))
+
+(defun agent-log-codex--catalog-repair-sentinel (process event)
+  "Report catalog repair PROCESS ending unexpectedly with EVENT."
+  (when (and (memq (process-status process) '(exit signal failed))
+             (process-get process 'repair-active))
+    (let ((status (and (eq (process-status process) 'exit)
+                       (process-exit-status process))))
+      (agent-log-codex--finish-catalog-repair
+       process (unless (eq status 0)
+                 (string-trim (or event "process ended")))))))
+
+(defun agent-log-codex--finish-catalog-repair (process error-data)
+  "Finish catalog repair PROCESS, reporting ERROR-DATA when non-nil."
+  (when (process-get process 'repair-active)
+    (process-put process 'repair-active nil)
+    (let ((home (process-get process 'repair-home))
+          (rollout (process-get process 'repair-rollout))
+          (stderr-buffer (process-get process 'repair-stderr-buffer)))
+      (when (eq process (plist-get (gethash home agent-log-codex--catalog-repairs)
+                                   :process))
+        (puthash home (list :rollout rollout :started (float-time))
+                 agent-log-codex--catalog-repairs))
+      (agent-log-codex--stop-catalog-process process stderr-buffer)
+      (when error-data
+        (message "Agent Log Codex catalog repair failed: %s" error-data)))))
 
 (defun agent-log-codex--newest-rollout-id (home)
   "Return the session id of the newest resumable rollout under HOME, or nil.
@@ -380,6 +558,12 @@ page."
     (when-let* ((rpc-error (alist-get 'error response)))
       (error "Codex %s failed: %s"
              method (or (alist-get 'message rpc-error) rpc-error)))
+    (when (equal method "initialize")
+      (process-send-string
+       process
+       (concat (json-encode
+                '((method . "initialized") (params . #s(hash-table))))
+               "\n")))
     (alist-get 'result response)))
 
 (defun agent-log-codex--stop-catalog-process (process stderr-buffer)

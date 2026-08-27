@@ -9,6 +9,7 @@
 (require 'agent-log)
 (require 'agent-log-claude)
 (require 'agent-log-codex)
+(require 'agent-log-codex-repair)
 (require 'agent-log-redact)
 
 ;;;;; Test helpers
@@ -3504,6 +3505,50 @@ session."
         (agent-log--build-candidates sessions)
         (should (= calls 1))))))
 
+(ert-deftest agent-log-test-svg-icon/does-not-select-a-window ()
+  "Constructing an icon does not select a window or run its hooks."
+  (cl-letf (((symbol-function 'image-type-available-p)
+             (lambda (_type) t))
+            ((symbol-function 'face-foreground)
+             (lambda (&rest _args) "#000000"))
+            ((symbol-function 'frame-char-height)
+             (lambda (&optional _frame) 16))
+            ((symbol-function 'create-image)
+             (lambda (&rest _args) 'image))
+            ((symbol-function 'select-window)
+             (lambda (&rest _args)
+               (ert-fail "Icon construction selected a window"))))
+    (should (stringp (agent-log--svg-icon
+                      "<svg fill=\"currentColor\"></svg>")))))
+
+(ert-deftest agent-log-test-build-candidates/renders-one-icon-per-backend ()
+  "Render each backend icon once rather than once per session row."
+  (let* ((sessions
+          `(("c1" :display "one" :timestamp 1700000000000
+             :project "/tmp/p" :file "/tmp/c1.jsonl"
+             :backend ,agent-log-claude--instance)
+            ("c2" :display "two" :timestamp 1700000000000
+             :project "/tmp/p" :file "/tmp/c2.jsonl"
+             :backend ,agent-log-claude--instance)
+            ("x1" :display "three" :timestamp 1700000000000
+             :project "/tmp/p" :file "/tmp/x1.jsonl"
+             :backend ,agent-log-codex--instance)))
+         (calls 0)
+         (agent-log-live-session-info-table-function nil)
+         (agent-log-live-session-info-function nil))
+    (cl-letf (((symbol-function 'agent-log--read-index)
+               (lambda () (make-hash-table :test #'equal)))
+              ((symbol-function 'agent-log--session-size-label)
+               (lambda (_meta) "1k"))
+              ((symbol-function 'agent-log--backend-icon)
+               (lambda (_backend) (cl-incf calls) "I"))
+              ((symbol-function 'image-type-available-p)
+               (lambda (_type) t))
+              ((symbol-function 'frame-width)
+               (lambda (&optional _frame) 100)))
+      (should (= (length (agent-log--build-candidates sessions)) 3))
+      (should (= calls 2)))))
+
 ;;;;; Claude current-buffer session detection
 
 (ert-deftest agent-log-test-claude-current-buffer-session-file/visible-text ()
@@ -3688,7 +3733,7 @@ session."
                       '((data . [((id . "one")) ((id . "two"))])
                         (nextCursor . nil))))))))
       (should (equal (mapcar (lambda (thread) (alist-get 'id thread))
-                             (agent-log-codex--thread-list backend))
+                             (agent-log-codex--home-threads effective-home t))
                      '("one" "two"))))
     (setq calls (nreverse calls))
     (should (equal (mapcar #'cadr calls)
@@ -3707,38 +3752,60 @@ session."
     (should (member "CODEX_HOME=/tmp/active-codex-home"
                     spawned-environment))))
 
-(ert-deftest agent-log-test-codex-thread-list/repairs-empty-index ()
-  "Falls back to rollout repair when Codex's state database is empty."
+(ert-deftest agent-log-test-codex-thread-list/repairs-empty-index-in-background ()
+  "Return an empty index immediately while starting its repair."
   (let ((backend
          (agent-log--make-codex
           :name "Codex" :key 'codex :directory "/unused/.codex"))
-        calls)
+        calls
+        repair-home)
     (cl-letf (((symbol-function 'agent-log-codex--effective-home)
                (lambda (_backend) "/tmp/active-codex-home/"))
-              ((symbol-function 'make-process)
-               (lambda (&rest _args) 'fake-process))
-              ((symbol-function 'agent-log-codex--stop-catalog-process)
-               (lambda (&rest _args) nil))
-              ((symbol-function 'agent-log-codex--catalog-request)
-               (lambda (_process _request-id method params)
-                 (pcase method
-                   ("initialize" nil)
-                   ("thread/list"
-                    (push (alist-get 'useStateDbOnly params) calls)
-                    (if (eq (alist-get 'useStateDbOnly params) t)
-                        '((data . []) (nextCursor . nil))
-                      '((data . [((id . "repaired"))])
-                        (nextCursor . nil))))))))
-      (should (equal (mapcar (lambda (thread) (alist-get 'id thread))
-                             (agent-log-codex--thread-list backend))
-                     '("repaired"))))
-    (should (equal (nreverse calls) '(t :json-false)))))
+              ((symbol-function 'agent-log-codex--cached-home-threads)
+               (lambda (_home)
+                 (push 'cache calls)
+                 nil))
+              ((symbol-function 'agent-log-codex--maybe-start-catalog-repair)
+               (lambda (home) (setq repair-home home))))
+      (should-not (agent-log-codex--thread-list backend)))
+    (should (equal calls '(cache)))
+    (should (equal repair-home "/tmp/active-codex-home/"))))
 
-(ert-deftest agent-log-test-codex-thread-list/repairs-stale-index ()
-  "Falls back to rollout repair when the index misses the newest rollout.
+(ert-deftest agent-log-test-codex-thread-list/never-contacts-app-server ()
+  "Use the persistent cache without starting a synchronous catalog process."
+  (let ((backend
+         (agent-log--make-codex
+          :name "Codex" :key 'codex :directory "/unused/.codex")))
+    (cl-letf (((symbol-function 'agent-log-codex--effective-home)
+               (lambda (_backend) "/nonexistent/codex-home/"))
+              ((symbol-function 'agent-log-codex--cached-home-threads)
+               (lambda (_home) '(((id . "cached")))))
+              ((symbol-function 'agent-log-codex--home-threads)
+               (lambda (&rest _args)
+                 (ert-fail "browse path contacted app-server"))))
+      (should (equal (agent-log-codex--thread-list backend)
+                     '(((id . "cached"))))))))
+
+(ert-deftest agent-log-test-codex-catalog-cache/roundtrip ()
+  "Read the detached helper's atomically written persistent cache."
+  (agent-log-test--with-temp-dir
+    (let* ((home (file-name-as-directory agent-log-test--dir))
+           (cache (agent-log-codex--catalog-cache-file home))
+           (process-environment
+            (cons (concat "AGENT_LOG_CODEX_CACHE=" cache)
+                  process-environment))
+           (agent-log-codex--thread-caches (make-hash-table :test #'equal))
+           (threads '(((id . "one")) ((id . "two")))))
+      (agent-log-codex-repair--write-cache threads)
+      (should (file-readable-p cache))
+      (should (equal (agent-log-codex--cached-home-threads home) threads))
+      (should (equal (agent-log-codex--cached-home-threads home) threads)))))
+
+(ert-deftest agent-log-test-codex-thread-list/repairs-stale-index-in-background ()
+  "Return a stale index immediately while starting its repair.
 Codex indexes a thread when its session closes, so a session whose
 process was killed instead leaves an unindexed rollout on disk.  An
-index that is stale rather than empty must still trigger the repair."
+index that is stale rather than empty must trigger a non-blocking repair."
   (agent-log-test--with-temp-dir
     (let* ((home (file-name-as-directory
                   (expand-file-name "home" agent-log-test--dir)))
@@ -3746,31 +3813,143 @@ index that is stale rather than empty must still trigger the repair."
             (agent-log--make-codex
              :name "Codex" :key 'codex :directory "/unused/.codex"))
            (unindexed "019fddcf-164d-7ec1-8e33-7ee2677f8454")
-           calls)
+           calls
+           repair-home)
       (agent-log-test--write-file
        (concat "home/sessions/2026/08/07/rollout-2026-08-07T16-59-24-"
                unindexed ".jsonl")
        "{}\n")
       (cl-letf (((symbol-function 'agent-log-codex--effective-home)
                  (lambda (_backend) home))
-                ((symbol-function 'make-process)
-                 (lambda (&rest _args) 'fake-process))
-                ((symbol-function 'agent-log-codex--stop-catalog-process)
-                 (lambda (&rest _args) nil))
-                ((symbol-function 'agent-log-codex--catalog-request)
-                 (lambda (_process _request-id method params)
-                   (pcase method
-                     ("initialize" nil)
-                     ("thread/list"
-                      (push (alist-get 'useStateDbOnly params) calls)
-                      (if (eq (alist-get 'useStateDbOnly params) t)
-                          '((data . [((id . "indexed"))]) (nextCursor . nil))
-                        `((data . [((id . "indexed")) ((id . ,unindexed))])
-                          (nextCursor . nil))))))))
+                ((symbol-function 'agent-log-codex--cached-home-threads)
+                 (lambda (_home)
+                   (push 'cache calls)
+                   '(((id . "indexed")))))
+                ((symbol-function 'agent-log-codex--maybe-start-catalog-repair)
+                 (lambda (repair) (setq repair-home repair))))
         (should (equal (mapcar (lambda (thread) (alist-get 'id thread))
                                (agent-log-codex--thread-list backend))
-                       (list "indexed" unindexed))))
-      (should (equal (nreverse calls) '(t :json-false))))))
+                       '("indexed"))))
+      (should (equal calls '(cache)))
+      (should (equal repair-home home)))))
+
+(ert-deftest agent-log-test-codex-catalog-repair/cools-down-per-rollout ()
+  "Do not restart a background repair on every session browse."
+  (let ((agent-log-codex--catalog-repairs
+         (make-hash-table :test #'equal))
+        (agent-log-codex-catalog-repair-cooldown 300)
+        calls)
+    (cl-letf (((symbol-function 'agent-log-codex--newest-rollout-id)
+               (lambda (_home) "rollout-1"))
+              ((symbol-function 'agent-log-codex--start-catalog-repair)
+               (lambda (home rollout)
+                 (push (list home rollout) calls)
+                 (puthash home (list :rollout rollout
+                                     :started (float-time))
+                          agent-log-codex--catalog-repairs))))
+      (agent-log-codex--maybe-start-catalog-repair "/tmp/home/")
+      (agent-log-codex--maybe-start-catalog-repair "/tmp/home/")
+      (should (equal calls '(("/tmp/home/" "rollout-1")))))))
+
+(ert-deftest agent-log-test-codex-catalog-repair/does-not-overlap-rollouts ()
+  "Keep one repair per home even when a newer rollout appears."
+  (let ((agent-log-codex--catalog-repairs (make-hash-table :test #'equal))
+        calls)
+    (puthash "/tmp/home/"
+             '(:rollout "rollout-1" :started 0 :process active-process)
+             agent-log-codex--catalog-repairs)
+    (cl-letf (((symbol-function 'processp) (lambda (_object) t))
+              ((symbol-function 'process-live-p) (lambda (_process) t))
+              ((symbol-function 'agent-log-codex--newest-rollout-id)
+               (lambda (_home) "rollout-2"))
+              ((symbol-function 'agent-log-codex--start-catalog-repair)
+               (lambda (&rest args) (push args calls))))
+      (agent-log-codex--maybe-start-catalog-repair "/tmp/home/"))
+    (should-not calls)))
+
+(ert-deftest agent-log-test-codex-catalog-repair/helper-handshake-order ()
+  "Initialize fully before the detached helper requests a repair."
+  (let (calls)
+    (cl-letf (((symbol-function 'make-process)
+               (lambda (&rest _args) 'fake-process))
+              ((symbol-function 'agent-log-codex-repair--request)
+               (lambda (_process _id method _params) (push method calls)))
+              ((symbol-function 'agent-log-codex-repair--notify-initialized)
+               (lambda (_process) (push "initialized" calls)))
+              ((symbol-function 'agent-log-codex-repair--thread-list)
+               (lambda (_process) (push "thread/list" calls) nil))
+              ((symbol-function 'agent-log-codex-repair--validate-catalog)
+               #'identity)
+              ((symbol-function 'agent-log-codex-repair--write-cache) #'ignore)
+              ((symbol-function 'process-live-p) (lambda (_process) nil))
+              ((symbol-function 'process-buffer) (lambda (_process) nil)))
+      (agent-log-codex-repair-run))
+    (should (equal (nreverse calls)
+                   '("initialize" "initialized" "thread/list")))))
+
+(ert-deftest agent-log-test-codex-catalog-repair/detaches-output-and-timeout ()
+  "Keep archive scan output and timeout enforcement outside Emacs."
+  (let ((agent-log-codex--catalog-repairs
+         (make-hash-table :test #'equal))
+        process-args
+        located-library)
+    (cl-letf (((symbol-function 'executable-find)
+               (lambda (program)
+                 (and (equal program "timeout") "/usr/bin/timeout")))
+              ((symbol-function 'locate-library)
+               (lambda (_library) (setq located-library
+                                         "/tmp/agent-log-codex.el")))
+              ((symbol-function 'file-readable-p) (lambda (_file) t))
+              ((symbol-function 'make-process)
+               (lambda (&rest args)
+                 (setq process-args args)
+                 'fake-process))
+              ((symbol-function 'process-put) #'ignore))
+      (agent-log-codex--start-catalog-repair "/tmp/home/" "rollout-1"))
+    (let ((command (plist-get process-args :command)))
+      (should (equal (car command) "/bin/sh"))
+      (should (string-match-p ">/dev/null 2>&1" (nth 2 command)))
+      (should (string-match-p "--kill-after=5s" (nth 2 command)))
+      (should (member "/usr/bin/timeout" command))
+      (should (member "120s" command))
+      (should (member "/tmp/agent-log-codex-repair.el" command)))
+    (should located-library)
+    (should-not (plist-member process-args :filter))))
+
+(ert-deftest agent-log-test-codex-catalog-repair/rejects-incomplete-cache ()
+  "Do not replace a good cache when repair omits its triggering rollout."
+  (let ((process-environment
+         (cons "AGENT_LOG_EXPECTED_ROLLOUT=expected" process-environment)))
+    (should-error
+     (agent-log-codex-repair--validate-catalog '(((id . "other"))))
+     :type 'error)
+    (should (equal
+             (agent-log-codex-repair--validate-catalog
+              '(((id . "expected"))))
+             '(((id . "expected")))))))
+
+(ert-deftest agent-log-test-codex-catalog-repair/scans-once-then-paginates-index ()
+  "Repair once, paginate indexed state, and deduplicate moving pages."
+  (let (calls)
+    (cl-letf (((symbol-function 'agent-log-codex-repair--request)
+               (lambda (_process _id _method params)
+                 (push params calls)
+                 (cond
+                  ((eq (alist-get 'useStateDbOnly params) :json-false)
+                   '((data . []) (nextCursor . nil)))
+                  ((null (alist-get 'cursor params))
+                   '((data . [((id . "one"))]) (nextCursor . "page-2")))
+                  (t
+                   '((data . [((id . "one")) ((id . "two"))])
+                     (nextCursor . nil)))))))
+      (should (equal
+               (mapcar (lambda (thread) (alist-get 'id thread))
+                       (agent-log-codex-repair--thread-list 'fake-process))
+               '("one" "two"))))
+    (should (equal (mapcar (lambda (params)
+                            (alist-get 'useStateDbOnly params))
+                          (nreverse calls))
+                   '(:json-false t t)))))
 
 (ert-deftest agent-log-test-codex-thread-list/keeps-a-current-index ()
   "Skips the rollout repair when the index already covers the newest rollout."
@@ -3788,21 +3967,16 @@ index that is stale rather than empty must still trigger the repair."
        "{}\n")
       (cl-letf (((symbol-function 'agent-log-codex--effective-home)
                  (lambda (_backend) home))
-                ((symbol-function 'make-process)
-                 (lambda (&rest _args) 'fake-process))
-                ((symbol-function 'agent-log-codex--stop-catalog-process)
-                 (lambda (&rest _args) nil))
-                ((symbol-function 'agent-log-codex--catalog-request)
-                 (lambda (_process _request-id method params)
-                   (pcase method
-                     ("initialize" nil)
-                     ("thread/list"
-                      (push (alist-get 'useStateDbOnly params) calls)
-                      `((data . [((id . ,newest))]) (nextCursor . nil)))))))
+                ((symbol-function 'agent-log-codex--cached-home-threads)
+                 (lambda (_home)
+                   (push 'cache calls)
+                   `(((id . ,newest)))))
+                ((symbol-function 'agent-log-codex--maybe-start-catalog-repair)
+                 (lambda (_home) (push 'repair calls))))
         (should (equal (mapcar (lambda (thread) (alist-get 'id thread))
                                (agent-log-codex--thread-list backend))
                        (list newest))))
-      (should (equal calls '(t))))))
+      (should (equal calls '(cache))))))
 
 (ert-deftest agent-log-test-codex-thread-list/ignores-unindexed-subagent-rollouts ()
   "Skips the rollout repair when only subagent rollouts are unindexed.
@@ -3832,21 +4006,16 @@ catalog read would pay for a repair that cannot add it."
                "\"thread_source\":\"subagent\"}}\n"))
       (cl-letf (((symbol-function 'agent-log-codex--effective-home)
                  (lambda (_backend) home))
-                ((symbol-function 'make-process)
-                 (lambda (&rest _args) 'fake-process))
-                ((symbol-function 'agent-log-codex--stop-catalog-process)
-                 (lambda (&rest _args) nil))
-                ((symbol-function 'agent-log-codex--catalog-request)
-                 (lambda (_process _request-id method params)
-                   (pcase method
-                     ("initialize" nil)
-                     ("thread/list"
-                      (push (alist-get 'useStateDbOnly params) calls)
-                      `((data . [((id . ,parent))]) (nextCursor . nil)))))))
+                ((symbol-function 'agent-log-codex--cached-home-threads)
+                 (lambda (_home)
+                   (push 'cache calls)
+                   `(((id . ,parent)))))
+                ((symbol-function 'agent-log-codex--maybe-start-catalog-repair)
+                 (lambda (_home) (push 'repair calls))))
         (should (equal (mapcar (lambda (thread) (alist-get 'id thread))
                                (agent-log-codex--thread-list backend))
                        (list parent))))
-      (should (equal calls '(t))))))
+      (should (equal calls '(cache))))))
 
 (ert-deftest agent-log-test-codex-thread-list/keeps-every-native-thread ()
   "Threads native Resume would list are never filtered out by Agent Log.
@@ -3857,21 +4026,15 @@ archived threads must survive."
           :name "Codex" :key 'codex :directory "/unused/.codex")))
     (cl-letf (((symbol-function 'agent-log-codex--effective-home)
                (lambda (_backend) "/tmp/active-codex-home/"))
-              ((symbol-function 'make-process)
-               (lambda (&rest _args) 'fake-process))
-              ((symbol-function 'agent-log-codex--stop-catalog-process)
-               (lambda (&rest _args) nil))
-              ((symbol-function 'agent-log-codex--catalog-request)
-               (lambda (_process _id method _params)
-                 (pcase method
-                   ("initialize" nil)
-                   ("thread/list"
-                    '((data . [((id . "cli-thread") (source . "cli"))
-                               ((id . "vscode-thread") (source . "vscode"))
-                               ((id . "future-thread") (source . "mystery"))
-                               ((id . "archived-thread") (source . "cli")
-                                (archived . t))])
-                      (nextCursor . nil)))))))
+              ((symbol-function 'agent-log-codex--cached-home-threads)
+               (lambda (_home)
+                 '(((id . "cli-thread") (source . "cli"))
+                   ((id . "vscode-thread") (source . "vscode"))
+                   ((id . "future-thread") (source . "mystery"))
+                   ((id . "archived-thread") (source . "cli")
+                    (archived . t)))))
+              ((symbol-function 'agent-log-codex--maybe-start-catalog-repair)
+               #'ignore))
       (should (equal (mapcar (lambda (thread) (alist-get 'id thread))
                              (agent-log-codex--thread-list backend))
                      '("cli-thread" "vscode-thread"
