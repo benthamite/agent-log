@@ -1625,7 +1625,9 @@ Returns the path to the rendered file."
              cached-size current-size
              (= cached-size current-size))
         rendered-path
-      (let* ((can-move
+      (let* ((live-buffers (agent-log--rendered-live-buffers
+                            session-id rendered-path desired-path))
+             (can-move
               (and rendered-path
                    (file-exists-p rendered-path)
                    (agent-log--path-under-directory-p
@@ -1653,6 +1655,9 @@ Returns the path to the rendered file."
              (list :file (car result) :jsonl-size (cdr result)))
           (agent-log--index-update-props
            session-id (list :file (car result) :jsonl-size (cdr result))))
+        (dolist (buffer live-buffers)
+          (with-current-buffer buffer
+            (agent-log--retarget-rendered-buffer metadata result)))
         (when (and rendered-path
                    (file-exists-p rendered-path)
                    (not (string= (expand-file-name rendered-path)
@@ -1663,6 +1668,62 @@ Returns the path to the rendered file."
                     rendered-path session-id backend jsonl-file))
           (agent-log--trash-rendered-file rendered-path))
         (car result)))))
+
+(defun agent-log--rendered-live-buffers (session-id old-path new-path)
+  "Return live buffers for SESSION-ID visiting OLD-PATH or NEW-PATH.
+Reject modified buffers before rendering can replace their contents."
+  (let (buffers)
+    (dolist (buffer (buffer-list))
+      (with-current-buffer buffer
+        (when (and (equal agent-log--session-id session-id)
+                   agent-log--rendered-file
+                   (or (agent-log--same-path-p agent-log--rendered-file old-path)
+                       (agent-log--same-path-p agent-log--rendered-file new-path)))
+          (when (buffer-modified-p)
+            (error "Rendered session buffer has unsaved changes: %s"
+                   (buffer-name)))
+          (push buffer buffers))))
+    buffers))
+
+(defun agent-log--retarget-rendered-buffer (metadata result)
+  "Update the current live rendered buffer after rendering METADATA.
+RESULT contains the rendered path and source byte size.  Move the file
+association and source watcher together so updates cannot recreate an
+obsolete rendered path."
+  (let ((watching agent-log--watcher)
+        (path (car result))
+        (same-offset (and (agent-log--same-path-p
+                           agent-log--source-file (plist-get metadata :file))
+                          (equal agent-log--file-offset (cdr result))))
+        (inhibit-read-only t))
+    (when watching
+      (file-notify-rm-watch agent-log--watcher)
+      (setq agent-log--watcher nil))
+    (save-restriction
+      (widen)
+      (let ((contents (with-temp-buffer
+                        (insert-file-contents path)
+                        (buffer-string)))
+            (position (point)))
+        (let ((change-major-mode-with-file-name nil))
+          (set-visited-file-name path t))
+        (erase-buffer)
+        (insert contents)
+        (goto-char (min position (point-max))))
+      (setq agent-log--rendered-file path
+            agent-log--source-file (plist-get metadata :file)
+            agent-log--session-project (plist-get metadata :project)
+            agent-log--backend (or (plist-get metadata :backend)
+                                   (agent-log--default-backend))
+            agent-log--file-offset (cdr result))
+      (unless same-offset
+        (setq agent-log--partial-line ""
+              agent-log--partial-bytes nil))
+      (set-visited-file-modtime)
+      (set-buffer-modified-p nil)
+      (agent-log--collapse-as-configured))
+    (when watching
+      (agent-log--start-watcher))))
 
 (defun agent-log--rendered-front-matter (file)
   "Return Agent Log front matter from rendered Markdown FILE.

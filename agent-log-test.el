@@ -3146,6 +3146,119 @@ session."
         (should-not (string-search "STALE" content)))
       (should-not (file-exists-p old-path)))))
 
+(ert-deftest agent-log-test-ensure-rendered/migrates-live-buffer ()
+  "Migration keeps live appends and buffer cleanup on the canonical file."
+  (agent-log-test--with-temp-dir
+    (let* ((agent-log-rendered-directory agent-log-test--dir)
+           (agent-log-live-update nil)
+           (backend (agent-log--make-claude
+                     :name "Claude" :key 'claude-code
+                     :directory agent-log-test--dir))
+           (line "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"hello\"}}\n")
+           (source (agent-log-test--write-file "session.jsonl" line))
+           (metadata (list :file source :timestamp 1700000000000
+                           :project "/project" :display "Old"
+                           :backend backend))
+           (old-path (agent-log--ensure-rendered "s1" metadata))
+           (buffer (find-file-noselect old-path))
+           new-path)
+      (unwind-protect
+          (progn
+            (with-current-buffer buffer
+              (agent-log-mode)
+              (setq agent-log--source-file source
+                    agent-log--session-id "s1"
+                    agent-log--rendered-file old-path
+                    agent-log--backend backend)
+              (agent-log--record-offset))
+            (setq metadata (plist-put metadata :display "New")
+                  new-path (agent-log--ensure-rendered "s1" metadata))
+            (write-region line nil source t 'quiet)
+            (with-current-buffer buffer
+              (agent-log--handle-file-change)
+              (should (equal agent-log--rendered-file new-path))
+              (should (equal buffer-file-name new-path))
+              (should (eq major-mode 'agent-log-mode))
+              (should (equal agent-log--session-id "s1")))
+            (should-not (file-exists-p old-path))
+            (should (agent-log--rendered-owner-matches-p new-path "s1" backend))
+            (should (equal (agent-log--ensure-rendered "s1" metadata) new-path))
+            (kill-buffer buffer)
+            (should (equal (plist-get (gethash "s1" (agent-log--read-index)) :file)
+                           new-path)))
+        (when (buffer-live-p buffer)
+          (kill-buffer buffer))))))
+
+(ert-deftest agent-log-test-ensure-rendered/retargets-source-watcher ()
+  "A new source at the same rendered path replaces live contents and watcher."
+  (agent-log-test--with-temp-dir
+    (let* ((agent-log-rendered-directory agent-log-test--dir)
+           (backend (agent-log--make-claude
+                     :name "Claude" :key 'claude-code
+                     :directory agent-log-test--dir))
+           (line "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"hello\"}}\n")
+           (source (agent-log-test--write-file "old.jsonl" line))
+           (new-source (agent-log-test--write-file "new.jsonl" (concat line line)))
+           (metadata (list :file source :timestamp 1700000000000
+                           :project "/project" :display "Hello"
+                           :backend backend))
+           (path (agent-log--ensure-rendered "s1" metadata))
+           (buffer (find-file-noselect path)))
+      (unwind-protect
+          (with-current-buffer buffer
+            (agent-log-mode)
+            (setq agent-log--source-file source
+                  agent-log--session-id "s1"
+                  agent-log--rendered-file path
+                  agent-log--backend backend
+                  agent-log--partial-line "unfinished"
+                  agent-log--partial-bytes (unibyte-string 194))
+            (agent-log--record-offset)
+            (agent-log--start-watcher)
+            (setq metadata (plist-put metadata :file new-source))
+            (agent-log--ensure-rendered "s1" metadata)
+            (should (file-notify-valid-p agent-log--watcher))
+            (should (equal agent-log--source-file new-source))
+            (should (= agent-log--file-offset (* 2 (string-bytes line))))
+            (should (equal agent-log--partial-line ""))
+            (should-not agent-log--partial-bytes)
+            (write-region line nil new-source t 'quiet)
+            (agent-log--handle-file-change)
+            (should (equal (buffer-substring-no-properties (point-min) (point-max))
+                           (with-temp-buffer
+                             (insert-file-contents path)
+                             (buffer-string)))))
+        (when (buffer-live-p buffer)
+          (kill-buffer buffer))))))
+
+(ert-deftest agent-log-test-retarget-rendered-buffer/preserves-partial-turn ()
+  "Retargeting at the same source offset preserves incomplete JSON."
+  (agent-log-test--with-temp-dir
+    (let* ((agent-log-rendered-directory agent-log-test--dir)
+           (backend (agent-log--make-claude
+                     :name "Claude" :key 'claude-code
+                     :directory agent-log-test--dir))
+           (line "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"hello\"}}\n")
+           (prefix (substring line 0 20))
+           (source (agent-log-test--write-file "session.jsonl" prefix))
+           (path (agent-log-test--write-file
+                  "session.md" (agent-log--render-front-matter
+                                "s1" source (length prefix) backend))))
+      (with-temp-buffer
+        (set-visited-file-name path t)
+        (agent-log-mode)
+        (setq agent-log--source-file source
+              agent-log--backend backend
+              agent-log--rendered-file path
+              agent-log--file-offset (length prefix))
+        (agent-log--process-incremental-text prefix nil)
+        (agent-log--retarget-rendered-buffer
+         (list :file source :backend backend) (cons path (length prefix)))
+        (should (equal agent-log--partial-line prefix))
+        (agent-log--process-incremental-text (substring line 20) nil)
+        (should (string-search "hello" (buffer-string)))
+        (should (equal agent-log--partial-line ""))))))
+
 (ert-deftest agent-log-test-ensure-rendered/refuses-wrong-owner-target ()
   "Never overwrites a canonical path whose front matter has another owner."
   (agent-log-test--with-temp-dir
