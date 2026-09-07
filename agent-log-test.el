@@ -3517,6 +3517,43 @@ session."
 
 ;;;;; Completion candidates
 
+(ert-deftest agent-log-test-completing-read/launch-buffer-killed ()
+  "Completion can restore its context after the launching buffer is killed."
+  (dolist (prompt '("Project: " "Session: "))
+    (let ((origin (generate-new-buffer " *agent-log-test-origin*"))
+          context)
+      (unwind-protect
+          (with-current-buffer origin
+            (cl-letf (((symbol-function 'completing-read)
+                       (lambda (_prompt table &rest _)
+                         (setq context (current-buffer))
+                         (kill-buffer origin)
+                         ;; Emacs restores this buffer after reading input.
+                         (set-buffer context)
+                         (car (all-completions "" table)))))
+              (should (equal (agent-log--completing-read prompt '("chosen"))
+                             "chosen"))))
+        (when (buffer-live-p origin)
+          (kill-buffer origin)))
+      (should-not (buffer-live-p context)))))
+
+(ert-deftest agent-log-test-completing-read/quit-cleans-context ()
+  "Quitting completion releases its context and preserves the caller."
+  (with-temp-buffer
+    (let ((origin (current-buffer))
+          context)
+      (cl-letf (((symbol-function 'completing-read)
+                 (lambda (&rest _)
+                   (setq context (current-buffer))
+                   (signal 'quit nil))))
+        (should (eq (condition-case nil
+                        (agent-log--completing-read "Session: " '("chosen"))
+                      (quit 'quit))
+                    'quit)))
+      (should (eq (current-buffer) origin))
+      (should (buffer-live-p origin))
+      (should-not (buffer-live-p context)))))
+
 (ert-deftest agent-log-test-browse-sessions/kicks-sweep-for-missing-summary ()
   "Grouped browsing starts a background sweep for raw unsummarized candidates."
   (agent-log-test--with-temp-dir

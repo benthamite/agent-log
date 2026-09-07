@@ -1887,10 +1887,13 @@ METADATA is a plist with :file, :timestamp, :project, :display."
     (not (null (agent-log--sessions-needing-summary sessions index)))))
 
 (defun agent-log--completing-read (prompt collection)
-  "Read from COLLECTION with PROMPT, preserving display order."
-  (completing-read prompt
-                   (agent-log--preserve-order-table collection)
-                   nil t))
+  "Read from COLLECTION with PROMPT, preserving display order.
+Keep the completion context alive if the launching buffer is killed
+while the minibuffer is active."
+  (with-temp-buffer
+    (completing-read prompt
+                     (agent-log--preserve-order-table collection)
+                     nil t)))
 
 (defun agent-log--group-by-project (sessions)
   "Group SESSIONS into an alist of (project-name . sessions).

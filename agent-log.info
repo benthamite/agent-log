@@ -1,0 +1,1929 @@
+This is agent-log.info, produced by makeinfo version 7.3 from
+agent-log.texi.
+
+INFO-DIR-SECTION Emacs misc features
+START-INFO-DIR-ENTRY
+* Agent-Log: (agent-log). Browse AI coding agent session logs in Emacs.
+END-INFO-DIR-ENTRY
+
+
+File: agent-log.info,  Node: Top,  Next: Overview,  Up: (dir)
+
+agent-log: Browse AI coding agent session logs in Emacs
+*******************************************************
+
+This manual describes the features and customization options for the
+‘agent-log’ package (‘agent-log.el’ and its backend files).
+
+* Menu:
+
+* Overview::
+* Installation::
+* User options::
+* Commands::
+* Agent integration::
+* Secret redaction::
+* agent-log-mode::
+* How it works::
+* Troubleshooting::
+* Development::
+* License::
+* Indices::
+
+-- The Detailed Node Listing --
+
+Installation
+
+* Manual installation::
+* Installation with use-package::
+
+User options
+
+* Backend configuration::
+* Directory configuration::
+* Display of thinking and tool sections::
+* Timestamps::
+* Tool output limits::
+* Session browser options::
+* Live updates::
+* Summary generation: Summary generation (1).
+* AI search options::
+
+Commands
+
+* Session browsing::
+* Rendered directory::
+* Sync and rendering::
+* Navigation::
+* Section visibility::
+* Copying::
+* Summary generation::
+* Session rename::
+* AI search::
+* Session resumption::
+
+Summary generation
+
+* Automatic sync and summarization on session end::
+
+Secret redaction
+
+* Coverage::
+* Integration::
+* Commands: Commands (1).
+* User options: User options (1).
+
+‘agent-log-mode’
+
+* agent-log-search-mode::
+* Transient menu::
+
+How it works
+
+* Backend architecture::
+* Data sources::
+* Rendered directory structure::
+* Rendering pipeline::
+* Live update mechanism::
+
+Data sources
+
+* Claude Code::
+* Codex::
+
+Troubleshooting
+
+* No sessions found::
+* Rendered files not updating::
+* Live updates not working::
+
+Indices
+
+* Function index::
+* Variable index::
+
+
+File: agent-log.info,  Node: Overview,  Next: Installation,  Prev: Top,  Up: Top
+
+1 Overview
+**********
+
+AI coding agents such as Claude Code
+(https://docs.anthropic.com/en/docs/claude-code) and Codex
+(https://openai.com/index/introducing-codex/) store complete
+conversation transcripts as JSONL files.  While these files contain a
+full record of every session, they are not human-readable: each line is
+a JSON object with nested content arrays, tool-use blocks, thinking
+sections, and system metadata.  ‘agent-log.el’ renders these transcripts
+into readable Markdown files and provides a dedicated Emacs interface
+for browsing, searching, and navigating them.
+
+   What counts as a session is not Agent Log's decision.  Each backend
+reports exactly the conversations its own tool offers when you run its
+resume command, and Agent Log lists those and nothing else.  Codex is
+asked directly, over app-server ‘thread/list’; Claude Code's own session
+record is read from ‘history.jsonl’ and its project transcript
+directories.  Agent Log never decides for itself which transcript files
+on disk amount to a conversation.  This matters because both tools write
+transcript files that are not conversations: Codex writes a separate
+rollout file for every subagent, permission guardian, and
+non-interactive execution thread, each inheriting the parent's working
+directory, and Claude Code writes subagent transcripts under a
+‘subagents/’ subdirectory.  Because neither tool lists those in its own
+resume picker, they never reach Agent Log, and no heuristic is needed to
+tell them apart from real conversations.
+
+   The package supports multiple backends through a generic interface
+based on ‘cl-defstruct’ and ‘cl-defmethod’.  Each backend knows how to
+discover sessions, parse its tool's JSONL format, and normalize entries
+into a canonical representation that the rendering pipeline, session
+browser, and AI features operate on.  Currently supported backends are
+Claude Code (‘agent-log-claude.el’) and Codex (‘agent-log-codex.el’).
+By default, the package auto-detects which tools are installed and
+activates the corresponding backends (*note Backend configuration::).
+
+   The package maintains a mirror directory of pre-rendered Markdown
+files, organized by project.  This means that standard tools such as
+‘consult-ripgrep’, Dired, and ‘grep’ work natively on readable content
+without any special integration.
+
+   The core capabilities of ‘agent-log.el’ are:
+
+   • *Session browsing*.  A ‘completing-read’ interface lists ordinary
+     user sessions, grouped by project or as a flat list, sorted by
+     recency.  Each candidate shows a backend-specific icon (SVG in GUI
+     frames, a short text label in terminal frames), the date, project
+     name, JSONL file size, and either an AI-generated summary or the
+     first user message (*note Session browsing::).
+   • *Lazy rendering*.  Sessions are rendered to ‘.md’ files on first
+     access.  The package tracks JSONL file sizes in an index to avoid
+     re-rendering files that have not changed (*note Sync and
+     rendering::).
+   • *Live updates*.  For active sessions, a ‘file-notify’ watcher
+     detects JSONL changes and appends new entries to both the ‘.md’
+     file on disk and the open buffer in real time (*note Live
+     updates::).
+   • *Outline navigation*.  Rendered buffers use ‘outline-minor-mode’
+     for folding tool calls, thinking blocks, and tool results.
+     Dedicated keybindings jump between conversation turns (*note
+     Navigation::).
+   • *Smart tool summaries*.  Each tool call is summarized by its most
+     relevant input—the file path for Read/Write, the command for Bash,
+     the pattern for Grep, and so on.
+   • *AI-powered session summaries*.  An optional integration with
+     ‘gptel’ generates concise one-line and paragraph summaries for each
+     session, displayed in the browser and at the top of rendered
+     buffers (*note Summary generation::).
+   • *AI-powered search*.  A two-stage LLM pipeline lets you search your
+     session history with natural language queries.  A scope-narrowing
+     model filters sessions by project and date range, then a selection
+     model identifies the most relevant sessions and presents a
+     narrative with clickable links (*note AI search::).
+   • *Session resumption*.  You can resume any session directly in the
+     coding agent from within the rendered buffer, provided the
+     corresponding Emacs integration package is installed (e.g.
+     ‘claude-code’ for Claude Code) (*note Session resumption::).
+
+   The package requires Emacs 29.1 or later, markdown-mode
+(https://jblevins.org/projects/markdown-mode/) 2.6 or later, and
+transient (https://github.com/magit/transient) 0.13.3 or later.  The
+optional summary feature requires gptel
+(https://github.com/karthink/gptel).  Session resumption for Claude Code
+sessions requires claude-code
+(https://github.com/stevemolitor/claude-code.el); for Codex sessions it
+requires codex (https://github.com/benthamite/codex.el).
+
+   The development repository is on GitHub
+(https://github.com/benthamite/agent-log).
+
+
+File: agent-log.info,  Node: Installation,  Next: User options,  Prev: Overview,  Up: Top
+
+2 Installation
+**************
+
+* Menu:
+
+* Manual installation::
+* Installation with use-package::
+
+
+File: agent-log.info,  Node: Manual installation,  Next: Installation with use-package,  Up: Installation
+
+2.1 Manual installation
+=======================
+
+Clone the repository to a directory on your Emacs load path and add the
+following to your init file:
+
+     (require 'agent-log)
+
+
+File: agent-log.info,  Node: Installation with use-package,  Prev: Manual installation,  Up: Installation
+
+2.2 Installation with use-package
+=================================
+
+If you use ‘use-package’, add one of the following snippets to your init
+file:
+
+     ;; with vc
+     (use-package agent-log
+       :vc (:url "https://github.com/benthamite/agent-log"))
+
+     ;; with elpaca
+     (use-package agent-log
+       :ensure (:host github :repo "benthamite/agent-log"))
+
+     ;; with straight
+     (use-package agent-log
+       :straight (:host github :repo "benthamite/agent-log"))
+
+     ;; with quelpa
+     (use-package agent-log
+       :quelpa (agent-log :fetcher github :repo "benthamite/agent-log"))
+
+
+File: agent-log.info,  Node: User options,  Next: Commands,  Prev: Installation,  Up: Top
+
+3 User options
+**************
+
+All user options belong to the ‘agent-log’ customization group.  You can
+browse them interactively with ‘M-x customize-group RET agent-log RET’.
+
+* Menu:
+
+* Backend configuration::
+* Directory configuration::
+* Display of thinking and tool sections::
+* Timestamps::
+* Tool output limits::
+* Session browser options::
+* Live updates::
+* Summary generation: Summary generation (1).
+* AI search options::
+
+
+File: agent-log.info,  Node: Backend configuration,  Next: Directory configuration,  Up: User options
+
+3.1 Backend configuration
+=========================
+
+The user option ‘agent-log-backends’ is an alist mapping backend key
+symbols to their feature (file) names.  Each entry is a cons cell ‘(KEY
+. FEATURE)’ where ‘KEY’ is a symbol identifying the backend (e.g.
+‘claude-code’, ‘codex’) and ‘FEATURE’ is the symbol passed to ‘require’
+to load the backend file.  Backend files are loaded lazily on first use.
+The default value includes entries for Claude Code and Codex:
+
+     '((claude-code . agent-log-claude)
+       (codex . agent-log-codex))
+
+   You would modify this to add a custom backend or to remove a backend
+you do not want available.
+
+   The user option ‘agent-log-active-backends’ controls which backends
+are scanned for sessions.  It accepts either the symbol ‘auto’ or a list
+of backend key symbols.  When set to ‘auto’ (the default), the package
+checks whether each backend's root directory exists on disk (e.g.
+‘~/.claude’ for Claude Code, ‘~/.codex’ for Codex) and activates only
+the backends whose directories are found.  Set it to an explicit list
+such as ‘(claude-code)’ if you want to restrict the session browser to a
+specific backend regardless of what is installed.
+
+
+File: agent-log.info,  Node: Directory configuration,  Next: Display of thinking and tool sections,  Prev: Backend configuration,  Up: User options
+
+3.2 Directory configuration
+===========================
+
+The user option ‘agent-log-directory’ specifies the root directory of
+the Claude Code backend's configuration.  The package reads
+‘history.jsonl’ in this directory and looks for session files under the
+‘projects/’ subdirectory.  The default value is ‘~/.claude’.  You would
+change this only if you have configured Claude Code to use a
+non-standard location.  Each backend has its own directory
+configuration.
+
+   The user option ‘agent-log-rendered-directory’ specifies the
+directory where rendered Markdown files are stored.  Each project gets
+its own subdirectory, and each session is rendered as a dated ‘.md’ file
+within it (*note Sync and rendering::).  The default value is
+‘~/.claude/rendered’.  You might change this if you want rendered files
+to live outside the default configuration directory, for example on a
+path indexed by a desktop search tool.
+
+   For Codex, Agent Log follows the same account-aware home selected by
+the installed Agent integration.  If that integration is unavailable, it
+uses ‘CODEX_HOME’ and then the Codex backend's configured directory.
+Session discovery, transcript lookup, and resume all use this same
+resolved home.
+
+
+File: agent-log.info,  Node: Display of thinking and tool sections,  Next: Timestamps,  Prev: Directory configuration,  Up: User options
+
+3.3 Display of thinking and tool sections
+=========================================
+
+Agent conversations contain thinking blocks (the model's
+chain-of-thought reasoning) and tool-use sections (file reads, bash
+commands, grep searches, and so on).  These are valuable for
+understanding what the assistant did, but they can also be verbose and
+clutter the view when you are reading the high-level conversation.
+
+   Note that some backends store thinking blocks with empty content.
+Claude Code, for instance, redacts the thinking text from its JSONL
+logs, keeping only a cryptographic signature.  When the thinking text is
+empty, the package omits the section entirely rather than rendering an
+empty heading.
+
+   The user option ‘agent-log-show-thinking’ controls how thinking
+blocks appear.  It accepts one of three symbols:
+
+   • ‘hidden’: thinking blocks are omitted entirely from the rendered
+     output.
+   • ‘collapsed’: thinking blocks are rendered but folded under a
+     heading, so you see the heading but not the content until you
+     expand it.
+   • ‘visible’: thinking blocks are rendered fully expanded.
+
+   The default value is ‘collapsed’.
+
+   The user option ‘agent-log-show-tools’ works identically but controls
+tool-use and tool-result sections.  It also defaults to ‘collapsed’.
+
+   When both options are set to ‘hidden’, assistant turns that contain
+only tool calls and thinking (no visible text) are hidden entirely,
+including their heading and separator.
+
+   You can toggle individual sections interactively using
+‘agent-log-toggle-section’ (*note Section visibility::).
+
+
+File: agent-log.info,  Node: Timestamps,  Next: Tool output limits,  Prev: Display of thinking and tool sections,  Up: User options
+
+3.4 Timestamps
+==============
+
+The user option ‘agent-log-timestamp-format’ controls the format string
+used when displaying timestamps in rendered output.  It follows the
+conventions of ‘format-time-string’.  The default value is ‘"%Y-%m-%d
+%H:%M:%S"’.
+
+
+File: agent-log.info,  Node: Tool output limits,  Next: Session browser options,  Prev: Timestamps,  Up: User options
+
+3.5 Tool output limits
+======================
+
+Tool calls can have very long inputs (entire file contents for Write,
+lengthy commands for Bash) and even longer results.  Two user options
+control how much of this content is shown in the rendered output.
+
+   The user option ‘agent-log-max-tool-input-length’ sets the maximum
+number of characters displayed for tool input summaries.  Text beyond
+this limit is truncated with an ellipsis.  The default value is ‘200’.
+
+   The user option ‘agent-log-max-tool-result-length’ sets the maximum
+number of characters displayed for tool result content.  The default
+value is ‘500’.
+
+   Increase these values if you find that truncated tool content is
+hiding information you need.  Decrease them if rendered files are too
+large or buffers are slow to navigate.
+
+
+File: agent-log.info,  Node: Session browser options,  Next: Live updates,  Prev: Tool output limits,  Up: User options
+
+3.6 Session browser options
+===========================
+
+The user option ‘agent-log-group-by-project’ controls whether
+‘agent-log-browse-sessions’ groups sessions by project (*note Session
+browsing::).  When non-‘nil’ (the default), the command first prompts
+for a project, then for a session within that project.  When ‘nil’, all
+sessions are presented in a single flat list.  The grouped view is more
+convenient when you have many sessions across several projects; the flat
+view is useful for quickly finding a recent session regardless of
+project.
+
+   The user option ‘agent-log-session-sort-key’ controls which timestamp
+defines “most recent” in the session browser.  The default,
+‘creation-time’, sorts by the backend's recorded session timestamp.  Set
+it to ‘modification-time’ to sort by the source JSONL file's last
+modification time instead, so resumed or appended sessions rise to the
+top.
+
+   The user option ‘agent-log-ignored-project-regexps’ is a list of
+regular expressions; any session whose working directory matches one of
+them is omitted from the browser, ‘agent-log-open-latest’, and AI
+search.  The default excludes sessions run under the system temporary
+directory (‘/tmp’ and ‘/private/tmp’), which is where throwaway scratch
+sessions accumulate — for example when repeatedly launching a coding
+agent in disposable directories to test it.  Ignored sessions are not
+deleted: they remain on disk and can still be opened directly with
+‘agent-log-open-file’ or ‘agent-log-open-session’.  Add your own
+patterns to hide other transient or uninteresting locations.
+
+   The user option ‘agent-log-project-column-max-width’ bounds the width
+of the project column in the session browser.  The column is normally as
+wide as the longest project name on display, which means a single
+unusually long project directory pads every other row and leaves less
+space for the summary.  Names wider than this option are abbreviated
+with an ellipsis instead.  The default value is ‘24’; set it to ‘nil’ to
+always show every project name in full.
+
+   The user option ‘agent-log-slug-max-length’ sets the maximum length
+of the slug portion of rendered filenames.  The slug is derived from the
+first user message and appears after the UTC date in the filename.  The
+backend and full session ID follow the slug so repeated opening text
+cannot collapse distinct sessions (e.g.,
+‘2026-02-22_11-56_redesign-agent-log-package--codex--019c...md’).  The
+default value is ‘50’.
+
+
+File: agent-log.info,  Node: Live updates,  Next: Summary generation (1),  Prev: Session browser options,  Up: User options
+
+3.7 Live updates
+================
+
+The user option ‘agent-log-live-update’ controls whether the package
+watches the source JSONL file for changes when a rendered buffer is
+open.  When non-‘nil’ (the default), a ‘file-notify’ watcher detects new
+entries appended to the JSONL file and renders them into both the open
+buffer and the ‘.md’ file on disk.  This means you can have a rendered
+log open alongside an active coding agent session and see new turns
+appear as they happen.
+
+   Set this to ‘nil’ if you experience performance issues with file
+watching, or if you are on a system where ‘file-notify’ is not reliable
+(e.g., certain remote filesystems via TRAMP).
+
+
+File: agent-log.info,  Node: Summary generation (1),  Next: AI search options,  Prev: Live updates,  Up: User options
+
+3.8 Summary generation
+======================
+
+The summary feature uses ‘gptel’ to generate concise descriptions of
+each session.  Three user options control how summaries are generated.
+
+   The user option ‘agent-log-summary-backend’ specifies the ‘gptel’
+backend name to use for summary requests, for example ‘"Gemini"’ or
+‘"Claude"’.  When ‘nil’ (the default), the backend is inferred from
+‘agent-log-summary-model’ if set, otherwise it falls back to
+‘gptel-backend’.
+
+   The user option ‘agent-log-summary-model’ specifies the ‘gptel’ model
+to use, for example ‘claude-haiku-4-5-20251001’.  A smaller, faster
+model is often sufficient for summarization.  When ‘nil’ (the default),
+it uses ‘gptel-model’.
+
+   The user option ‘agent-log-summary-max-content-length’ sets the
+maximum number of characters of conversation text sent to the LLM for
+summarization.  The package extracts the plain text of user and
+assistant messages (ignoring tool calls, thinking blocks, Claude
+local-command output, and injected system preambles) and stops
+collecting text once this limit is reached.  The default value is
+‘8000’.  Increase this for longer, more detailed summaries at the cost
+of higher token usage and more foreground parsing; decrease it if you
+want to minimize API costs and UI disruption.
+
+
+File: agent-log.info,  Node: AI search options,  Prev: Summary generation (1),  Up: User options
+
+3.9 AI search options
+=====================
+
+The AI search feature (*note AI search::) uses two LLM calls: a
+scope-narrowing stage and a selection stage.  Each stage has its own
+backend and model options, allowing you to use a cheap, fast model for
+scope narrowing and a more capable model for the selection narrative.
+
+   The user option ‘agent-log-search-scope-backend’ specifies the
+‘gptel’ backend for stage 1 (scope narrowing), for example ‘"Gemini"’ or
+‘"Claude"’.  When ‘nil’ (the default), the backend is inferred from
+‘agent-log-search-scope-model’ if set, otherwise it falls back to
+‘gptel-backend’.
+
+   The user option ‘agent-log-search-scope-model’ specifies the model
+for stage 1.  A small, fast model (e.g.  ‘claude-haiku-4-5-20251001’) is
+recommended since the task is simple classification.  When ‘nil’ (the
+default), it uses ‘gptel-model’.
+
+   The user option ‘agent-log-search-backend’ specifies the ‘gptel’
+backend for stage 2 (selection and narrative).  When ‘nil’ (the
+default), the backend is inferred from ‘agent-log-search-model’ if set,
+otherwise it falls back to ‘gptel-backend’.
+
+   The user option ‘agent-log-search-model’ specifies the model for
+stage 2.  This model receives all filtered session summaries and must
+reason over them, so a more capable model may produce better results.
+When ‘nil’ (the default), it uses ‘gptel-model’.
+
+   The user option ‘agent-log-search-budget’ sets a per-request cost
+threshold as a ‘(TYPE . LIMIT)’ cons cell, where ‘TYPE’ is either
+‘tokens’ or ‘dollars’.  Before stage 2 sends the filtered summaries to
+the LLM, the package estimates the prompt's token count (heuristically,
+one token per four characters).  If the estimate exceeds the limit, the
+user is asked to confirm with ‘y-or-n-p’.  The default value is ‘(tokens
+. 50000)’.
+
+   In ‘dollars’ mode, cost estimation requires the ‘gptel-plus’ package.
+If ‘gptel-plus’ is not available, the budget is not enforced and a
+warning is displayed.  Dollar estimates use the model's input pricing
+from ‘gptel-plus’ to convert the estimated token count to a dollar
+amount.
+
+
+File: agent-log.info,  Node: Commands,  Next: Agent integration,  Prev: User options,  Up: Top
+
+4 Commands
+**********
+
+* Menu:
+
+* Session browsing::
+* Rendered directory::
+* Sync and rendering::
+* Navigation::
+* Section visibility::
+* Copying::
+* Summary generation::
+* Session rename::
+* AI search::
+* Session resumption::
+
+
+File: agent-log.info,  Node: Session browsing,  Next: Rendered directory,  Up: Commands
+
+4.1 Session browsing
+====================
+
+The project and session pickers remain usable if the buffer from which
+you opened them is closed while you are choosing an entry.
+
+   The command ‘agent-log-browse-sessions’ is the primary entry point
+for exploring your session history.  It asks each active backend for its
+canonical session catalog, resolves each session to its exact JSONL
+file, and presents the results in a ‘completing-read’ prompt.  For
+Codex, the catalog comes from app-server ‘thread/list’.  Agent Log
+follows native Resume's database-first path so browsing never waits for
+a scan of the rollout archive.  If the index is stale, the current
+indexed catalog is shown immediately while app-server runs its normal
+scan-and-repair path in the background; another browse picks up the
+repaired index.  Repairs for the same newest rollout are rate-limited,
+so an active or otherwise temporarily unindexed session cannot restart
+an archive scan on every invocation.  The index is stale when it is
+empty, and also when it omits the newest rollout on disk: Codex indexes
+a thread when its session closes, so a session whose process was killed
+rather than closed — as ‘agent-restart’ does — would otherwise stay out
+of the browser for good.  Checking this costs a few directory reads,
+because rollouts sit in a date-partitioned tree under names that begin
+with the session timestamp.  Subagent rollouts are skipped when looking
+for the newest one: Codex never indexes them, so measuring the index
+against one would report it stale forever.  In both cases app-server
+remains the membership authority: Agent Log applies no rule of its own
+and never infers sessions from rollout files.  Each candidate is
+formatted as:
+
+     [icon] 2026-02-22 14:06  my-project  42k  "Fix the authentication bug in..."
+
+   Each candidate is prefixed with a backend-specific icon so you can
+tell at a glance which agent a session belongs to.  In GUI frames the
+icon is an inline SVG image; in terminal frames it falls back to a short
+text label (e.g.  ‘CC’ for Claude Code, ‘CX’ for Codex).  Each distinct
+backend icon is rendered once per candidate set, using frame metrics
+without selecting a window, so candidate construction does not run
+unrelated window-selection hooks once per session.  The size column
+shows the human-readable size of the source JSONL file.
+
+   When ‘agent-log-group-by-project’ is non-‘nil’ (the default), the
+command first prompts for a project, then for a session within that
+project (*note Session browser options::).  Sessions are sorted
+most-recent-first using ‘agent-log-session-sort-key’.  If AI summaries
+have been generated for any sessions (*note Summary generation::), the
+summary replaces the quoted first message in the candidate display.  If
+the displayed session set still contains sessions without usable
+summaries while automatic summarization is enabled, browsing starts a
+non-overlapping background sweep that prioritizes that visible set, so
+the raw first-message entries are backfilled without waiting for AI
+search.
+
+   Every archive-wide command reads that same catalog, so what the
+session browser, ‘agent-log-open-latest’, bulk synchronization, archive
+summarization, background summary sweeps, and AI search treat as a
+session is exactly what the coding agent itself treats as a resumable
+conversation.  This matters most for Codex, which writes a separate
+rollout file for every subagent, permission guardian, and
+non-interactive execution thread, all inheriting the parent's working
+directory.  Codex leaves those out of its own thread list, so they never
+reach Agent Log and no heuristic is needed to recognize them.
+
+   Within a single browse run, source file size and modification-time
+metadata is cached per session.  This keeps flat browsing and
+modification-time sorting responsive even when the archive contains many
+sessions.  Checks for live sessions reuse the catalog that is already in
+hand instead of asking the backend for its session list a second time.
+Live-state annotations use one snapshot of the agent package's session
+registry for the entire picker, rather than rescanning live buffers for
+each historical row.
+
+   Each project is labelled by the shortest trailing portion of its
+working directory that uniquely identifies it.  A project whose final
+directory component is unique is shown by that component alone (for
+example, ‘my-project’); when several projects share a final component,
+each label grows one parent directory at a time until it is distinct
+(for example, ‘8.1.0-dev/elpaca/sources/codex’ versus
+‘8.3.0-dev/elpaca/sources/codex’).  This keeps labels short while
+guaranteeing that two distinct project directories never collapse to the
+same entry.  Labels that are still wider than
+‘agent-log-project-column-max-width’ are abbreviated in the browser
+(*note Session browser options::).
+
+   Selecting a session lazily renders it to a ‘.md’ file if needed, then
+opens the rendered buffer in ‘agent-log-mode’ (*note agent-log-mode::).
+
+   The command ‘agent-log-open-latest’ opens the most recent session
+directly, without prompting.  This is convenient when you want to review
+the last conversation you had with a coding agent.
+
+   The command ‘agent-log-open-file’ opens a specific JSONL file by
+path.  It prompts for a file path interactively.  This is useful for
+automation, for opening session files you found via the filesystem, or
+when you know the exact file you want.
+
+   The command ‘agent-log-open-session’ opens a session by its ID.  It
+prompts for the session ID interactively.
+
+   The command ‘agent-log-open-current-session’ opens the log for the
+coding agent session running in the current buffer.  When the *note
+agent integration: Agent integration. is active, the buffer's
+authoritative native session id names the exact JSONL file first, which
+uniquely identifies the session even when multiple sessions (including
+branches created with ‘/branch’) share the same project directory.
+Otherwise the command dispatches on the current buffer's backend: if the
+buffer is a Claude Code terminal, it matches distinctive visible
+terminal text against the project's JSONL transcripts, then falls back
+to the most recently modified JSONL file in the project's session
+directory, or to searching ‘history.jsonl’.  If the buffer is a Codex
+terminal, ‘agent-log’ records the session ID reported by Codex hook
+events and uses that buffer-local ID first.  Resolving the buffer's
+session reads the Codex thread catalog only when the buffer's own
+records cannot name it, so the common case does not start an app-server
+process.  Buffers launched with an explicit ‘codex resume SESSION_ID’
+command open that session ID directly, even if the resumed session was
+originally spawned as a subagent.  Otherwise the backend matches a Codex
+session whose recorded working directory matches the buffer's directory
+and whose ‘session_meta’ timestamp is near the live terminal process
+start time.  If that launch-time match fails but the terminal still
+displays transcript text from a completed Codex session, the backend
+normalizes distinctive visible lines (for example, terminal continuation
+indentation, list markers, and Markdown backticks), matches them back to
+the same project's JSONL files, and opens the transcript that actually
+appears in the buffer.  This lets you quickly jump from an active or
+recently completed coding agent session to its rendered log without
+attaching a buffer to an unrelated child or stale session.
+
+
+File: agent-log.info,  Node: Rendered directory,  Next: Sync and rendering,  Prev: Session browsing,  Up: Commands
+
+4.2 Rendered directory
+======================
+
+The command ‘agent-log-open-directory’ opens the rendered Markdown
+directory in Dired.  Since rendered files are plain Markdown organized
+by project, you can use standard Emacs tools to browse, search, and
+manage them.  For example, you can run ‘consult-ripgrep’ from this Dired
+buffer to search across all rendered sessions.
+
+   If the rendered directory does not yet exist, the command creates it.
+
+
+File: agent-log.info,  Node: Sync and rendering,  Next: Navigation,  Prev: Rendered directory,  Up: Commands
+
+4.3 Sync and rendering
+======================
+
+By default, rendering is lazy: sessions are rendered to ‘.md’ files on
+first access via ‘agent-log-browse-sessions’ or ‘agent-log-open-file’.
+The package maintains an index file (‘_index.el’) in the rendered
+directory that maps session IDs to rendered file paths and JSONL file
+sizes.  Rendered ownership is checked using the backend, full session
+ID, and exact source path.  When you access a session, the package
+compares the current JSONL file size and canonical rendered path against
+the indexed values; if either differs, the session is re-rendered.
+
+   Rendered output never contains NUL characters: any NUL that appears
+in conversation content (for example, in captured terminal output from a
+build tool) is replaced with the visible ‘␀’ symbol.  A single NUL byte
+would otherwise make Emacs visit the rendered file as binary, breaking
+display of non-ASCII characters and crashing integrations that serialize
+the buffer content as JSON.
+
+   The command ‘agent-log-sync-sessions’ renders all ordinary,
+non-ignored sessions that are unrendered or stale.  It processes
+sessions one at a time using ‘run-with-timer’ to avoid blocking Emacs,
+then commits the shared index once.  When a session's rendered path
+changes, the superseded file it owned is moved to the operating system
+Trash; no other rendered file is touched.  Open session buffers follow
+the new rendered path and source watcher before the old file is removed,
+so live updates and buffer cleanup continue using the canonical file.
+The completion callback reports a structured success or failure result,
+including the stage that failed.
+
+   The command ‘agent-log-refresh’ re-renders the session displayed in
+the current buffer from its JSONL source.  This is useful if the
+rendered file appears stale or if you have changed display settings such
+as ‘agent-log-show-thinking’ or ‘agent-log-show-tools’ (*note Display of
+thinking and tool sections::).  The keybinding is ‘g’ in
+‘agent-log-mode’.
+
+
+File: agent-log.info,  Node: Navigation,  Next: Section visibility,  Prev: Sync and rendering,  Up: Commands
+
+4.4 Navigation
+==============
+
+The command ‘agent-log-next-turn’ moves point to the next User or
+Assistant heading in the buffer.  The command ‘agent-log-previous-turn’
+moves to the previous one.  These commands search for ‘## User’ and ‘##
+Assistant’ headings, skipping over tool calls and thinking sections.
+
+   The keybindings are ‘n’ and ‘p’ in ‘agent-log-mode’, making it easy
+to step through a conversation turn by turn.
+
+
+File: agent-log.info,  Node: Section visibility,  Next: Copying,  Prev: Navigation,  Up: Commands
+
+4.5 Section visibility
+======================
+
+The command ‘agent-log-toggle-section’ toggles the visibility of the
+section at point.  When point is on a ‘####’ heading (tool call, tool
+result, or thinking block), it collapses or expands just that section.
+When point is on any other heading, it delegates to
+‘outline-toggle-children’.  The keybinding is ‘TAB’.
+
+   The command ‘agent-log-collapse-all’ collapses all tool-use,
+tool-result, and thinking sections in the buffer at once.  This gives
+you a clean view of just the user messages and assistant text responses.
+The keybinding is ‘C’.
+
+   The command ‘agent-log-expand-all’ expands all sections, removing all
+section overlays and showing the full content.  The keybinding is ‘E’.
+
+
+File: agent-log.info,  Node: Copying,  Next: Summary generation,  Prev: Section visibility,  Up: Commands
+
+4.6 Copying
+===========
+
+The command ‘agent-log-copy-turn’ copies the current turn to the kill
+ring.  A "turn" is delimited by ‘##’ headings: from the current ‘##
+User’ or ‘## Assistant’ heading up to (but not including) the next one.
+This is useful for extracting a specific message from a conversation to
+paste elsewhere.  The keybinding is ‘w’.
+
+
+File: agent-log.info,  Node: Summary generation,  Next: Session rename,  Prev: Copying,  Up: Commands
+
+4.7 Summary generation
+======================
+
+The command ‘agent-log-summarize-sessions’ generates AI summaries for
+all ordinary sessions that do not yet have a current one.  It requires
+the ‘gptel’ package.  The command processes sessions sequentially,
+sending each conversation's text to the configured LLM (*note Summary
+generation options: Summary generation (1).) and storing the response in
+the index.  Summary requests disable ‘gptel-use-tools’ so that globally
+configured tools (e.g.  MCP servers) are not included in the request.
+
+   Each summary consists of two parts: a one-line summary (up to 80
+characters) used in the session browser display, and a paragraph summary
+(3-5 sentences) shown at the top of rendered buffers.  The LLM is
+instructed to return a JSON object with ‘oneline’ and ‘summary’ fields.
+
+   Progress is displayed in the echo area, showing which pending summary
+update is running, how many sessions were discovered in the archive,
+which session is being summarized, and the model in use.  The
+pending-update count is the number of sessions lacking a current
+summary, not the total number of sessions in the archive.  If you invoke
+‘agent-log-summarize-sessions’ while summarization is already running,
+it stops the current run instead.  You can also stop explicitly with
+‘agent-log-stop-summarize-sessions’.
+
+   Summaries are persisted in the index file together with a fingerprint
+and source file state for the conversation text they describe, so they
+survive across Emacs sessions and are refreshed only when the underlying
+conversation changes.  Rendered Markdown files also include the
+paragraph summary below the session header when a usable summary is
+available; if a background summary finishes after rendering, the
+rendered file is updated in place.  Because the summary is stored in the
+file itself, opening a log displays it exactly once rather than
+re-inserting it.  If the JSONL file state changes but the fingerprint
+still matches, the index metadata is refreshed in place without another
+LLM request on the per-session summarization path.  This matters for
+metadata-only rewrites, such as moving a Codex session log to a new
+project: the JSONL size and modification time can change even though the
+user/assistant conversation text has not.  Archive-wide commands do not
+preflight every stale fingerprint in the live Emacs process, because
+doing so can require rereading large transcripts before any LLM request
+starts.  Instead, archive-wide summarization and search treat stored
+summaries with a current-version conversation fingerprint as usable even
+when the cached JSONL size or modification time is stale; exact refresh
+remains on the targeted per-session path.  If you resume a previously
+summarized session and continue working, the next targeted summarization
+path treats the old summary as stale and generates a replacement.  The
+fingerprint covers all summary-relevant user and assistant text, not
+only the capped text sent to the LLM, so resumed work appended to a long
+session is still detected.  Legacy summaries with an older fingerprint
+are validated against the current conversation text and upgraded in
+place when that individual session is processed; summaries without a
+fingerprint are refreshed once because the package cannot prove what
+conversation text they describe.
+
+* Menu:
+
+* Automatic sync and summarization on session end::
+
+
+File: agent-log.info,  Node: Automatic sync and summarization on session end,  Up: Summary generation
+
+4.7.1 Automatic sync and summarization on session end
+-----------------------------------------------------
+
+These user options control what happens automatically when a Claude Code
+or Codex session stops producing output.  Claude Code requires a ‘Stop’
+hook configured in Claude Code's settings (see the ‘claude-code’
+documentation for hook setup).  Codex requires ‘codex-mode’ with
+‘codex-enable-hooks’ enabled so ‘codex-event-hook’ receives ‘Stop’
+events.
+
+   When ‘agent-log-auto-sync-sessions’ is non-nil, the stopped session
+is rendered automatically.  If the event cannot be resolved to a
+specific session, automatic sync is skipped.
+
+   When ‘agent-log-auto-summarize-sessions’ is non-nil, the stopped
+session is summarized automatically in a background ‘emacs --quick
+--batch’ subprocess, so the running Emacs stays responsive while the LLM
+request and index update complete.  The session-end path resolves the
+stopped session by file lookup and parses only that session's JSONL file
+for project, timestamp, and first-message metadata; it does not scan the
+full archive.  The worker does not load the user's init file; it loads a
+private temporary state file containing the relevant ‘agent-log’ and
+‘gptel’ runtime configuration, including whether
+‘agent-log-auto-rename-sessions’ is enabled, then deletes that file.
+Successful background workers finish silently; failures are reported in
+the echo area.  If auto-sync is also enabled, the background summarizer
+is launched after sync completes.  If the event cannot be resolved to a
+specific session, automatic summarization is skipped quietly.  Workers
+start from ‘temporary-file-directory’ rather than the current buffer's
+directory, because they address their state file absolutely and never
+use the working directory; this keeps summarization working after a
+project directory has been deleted or renamed, which would otherwise
+stop the worker from starting at all.
+
+   If older index entries point at files under the ‘unknown’ rendered
+project, run ‘M-x agent-log-repair-rendered-index’.  The command
+re-renders those sessions from their JSONL files, writes corrected
+project-path Markdown files, and updates the rendered index.  It does
+not delete the old ‘unknown’ files.
+
+   Automatic summarization also runs a periodic backlog sweep so
+sessions created outside the Emacs lifecycle hooks, such as external
+Codex invocations, are eventually summarized.  The sweep is controlled
+by ‘agent-log-auto-summarize-sweep-interval’ (default 900 seconds) and
+‘agent-log-auto-summarize-sweep-limit’ (default 20 sessions per sweep).
+The timer is self-rescheduling rather than a long-lived repeating timer,
+so stale triggered timer objects are replaced automatically after each
+firing.  Each sweep runs in a separate batch Emacs process; the running
+Emacs only starts the worker and does not scan or summarize the archive
+itself.  If AI search or session browsing sees missing usable summaries
+while automatic summarization is enabled, it repairs a stale sweep timer
+if needed and starts a non-overlapping sweep that prioritizes the
+session set that exposed the missing summaries before continuing.  Set
+‘agent-log-auto-summarize-sweep-interval’ to nil to disable backlog
+sweeps while keeping session-end summaries enabled.
+
+   The hook handlers (‘agent-log-claude--session-end-handler’ and
+‘agent-log-codex--session-end-handler’) are defined in the backend files
+and installed via ‘eval-after-load’ when either defcustom is set before
+the backend is loaded.  The Codex backend also installs a session
+identity recorder on ‘codex-event-hook’ and a start hook that clears
+stale buffer-local identity.  It rechecks these hooks before ‘codex’
+dispatches lifecycle events, so another package resetting
+‘codex-event-hook’ does not silently disable automatic summaries.
+
+   Archive-wide manual summarization excludes sessions with a live agent
+process by session ID.  Each backend's ‘agent-log--active-session-ids’
+method provides the IDs of currently running sessions.  For Codex
+buffers, the backend uses the same hook-recorded ID, resume-ID,
+project-plus-launch-time, and visible-transcript matching logic as
+‘agent-log-open-current-session’ (*note Session browsing::).  Claude
+buffers whose ‘claude-code-extras’ status data has not been initialized
+yet are ignored until a session ID is available.  Targeted automatic
+summarization may summarize the stopped session even while its terminal
+buffer remains live, because the lifecycle event identifies that
+specific session.  If summarization is already running when another
+session stops, the in-progress batch continues undisturbed.
+
+
+File: agent-log.info,  Node: Session rename,  Next: AI search,  Prev: Summary generation,  Up: Commands
+
+4.8 Session rename
+==================
+
+The user option ‘agent-log-auto-rename-sessions’ controls whether
+sessions are renamed automatically when they receive an AI summary.
+When set to non-‘nil’, each time ‘agent-log-summarize-sessions’
+successfully generates a summary for a session, the one-line summary is
+slugified and written as a ‘custom-title’ entry in the session JSONL
+file.  This makes the name immediately visible in Claude Code's
+‘/resume’ picker without any manual step.
+
+   The default value is ‘nil’.  Set it to ‘t’ if you want session names
+to stay in sync with summaries automatically.  When a refreshed summary
+replaces an older summary-generated title, the title is refreshed too;
+titles that do not match the previous summary are treated as
+user-provided and left alone.
+
+   The command ‘agent-log-rename-sessions’ renames all sessions that
+lack a custom title.  This command is defined in ‘agent-log-claude.el’
+because custom-title entries are a Claude Code-specific JSONL
+convention.  For each session that has a one-line summary in the index
+but no ‘custom-title’ entry in its JSONL file, the command writes the
+summary directly as the custom title.  With a prefix argument (‘C-u’),
+it overwrites existing custom titles as well, which is useful after
+changing the title format.
+
+   This is a purely local, offline operation — no API calls are made.
+Sessions must be summarized first via ‘agent-log-summarize-sessions’
+(*note Summary generation::).  Sessions that already have a custom title
+(e.g.  from Claude Code's ‘/rename’ command) are skipped.
+
+   After writing custom-title entries, the cached JSONL file sizes in
+the index are updated in a single bulk write so that
+‘agent-log-sync-sessions’ does not treat the modified files as stale and
+trigger unnecessary re-renders.
+
+   The command reports how many sessions were renamed, how many were
+skipped, and how many lacked a summary.
+
+
+File: agent-log.info,  Node: AI search,  Next: Session resumption,  Prev: Session rename,  Up: Commands
+
+4.9 AI search
+=============
+
+The command ‘agent-log-search’ searches your session history using
+natural language.  It prompts for a query string (e.g., "how did I
+implement the caching layer?"  or "conversations about authentication in
+my web app last month") and uses a two-stage LLM pipeline to find
+relevant sessions.
+
+   *Stage 1: scope narrowing.*  The query, along with a summary of the
+archive's metadata (project names with session counts, date range), is
+sent to a scope-narrowing model.  This model returns structured JSON
+specifying which projects and date range to include.  If the query does
+not mention a specific project or timeframe, all ordinary sessions are
+included.  The model and backend for this stage are configured via
+‘agent-log-search-scope-model’ and ‘agent-log-search-scope-backend’
+(*note AI search options::).
+
+   *Stage 2: selection and narrative.*  The filtered current session
+summaries (one-line and paragraph, from ‘agent-log-summarize-sessions’)
+are sent to a selection model along with the original query.  If the
+number of matching sessions exceeds what fits within the token budget
+(‘agent-log-search-budget’), only the most recent sessions are included.
+The prompt includes a human-readable description of the scope applied in
+stage 1 (projects, date range, how many sessions matched, and how many
+were actually sent).  The model produces a Markdown narrative explaining
+which sessions are relevant and why, with inline links to specific
+sessions.  If the scope is narrower than "all projects, all dates", or
+if sessions were truncated for budget, the model notes this so you know
+some sessions may have been excluded.  Session summaries are sanitized
+to valid UTF-8 before serialization so that non-ASCII content does not
+cause errors.  The model and backend for this stage are configured via
+‘agent-log-search-model’ and ‘agent-log-search-backend’ (*note AI search
+options::).
+
+   The result is displayed in a ‘*agent-log-search*’ buffer in
+‘agent-log-search-mode’ (*note agent-log-search-mode::).  Session
+references in the narrative are rendered as clickable links.  Pressing
+‘RET’ or clicking on a link opens the corresponding rendered session
+log.
+
+   Before starting, the command uses stored current-version
+fingerprinted summaries without rereading every transcript, even when
+cached JSONL file state is stale from a metadata-only rewrite.  If any
+sessions still lack usable summaries, it starts a background summary
+sweep when automatic summarization is enabled, warns that those sessions
+will be excluded from the current search, and asks for confirmation.  If
+no sessions have searchable usable summaries at all, the command aborts
+with a message to run ‘agent-log-summarize-sessions’ first.  When
+existing summaries predate freshness tracking but cannot be preserved,
+the error says that those legacy summaries need refreshing rather than
+reporting them as never summarized.
+
+   Before stage 2, the estimated token cost is compared against
+‘agent-log-search-budget’ (*note AI search options::).  If the estimate
+exceeds the threshold, the user is asked to confirm.
+
+   When ‘gptel-plus’ is available, the combined dollar cost of both
+stages is displayed at the bottom of the results buffer.
+
+
+File: agent-log.info,  Node: Session resumption,  Prev: AI search,  Up: Commands
+
+4.10 Session resumption
+=======================
+
+The command ‘agent-log-resume-session’ resumes the session displayed in
+the current buffer in the coding agent.  The command extracts the
+session ID from the buffer (either from the buffer-local variable or
+from the front-matter comment) and dispatches to the buffer's backend
+via the ‘agent-log--resume-session’ generic function.  If a rendered
+Markdown file was opened directly rather than through ‘agent-log’, the
+command also reads the front-matter source path to recover the backend
+and source JSONL file before resuming.  For Claude Code sessions, this
+requires the ‘claude-code’ package and passes the session ID with the
+‘--resume’ flag, starting in the session's project directory when
+possible.  When the project path stored in Claude's transcript or
+‘history.jsonl’ no longer exists, the backend falls back to the encoded
+project directory under ‘~/.claude/projects/’ and uses the matching
+existing project directory.  The project directory is normalized with a
+trailing slash to match the format returned by ‘claude-code--directory’,
+ensuring that buffer names, concurrent session detection, and modeline
+display all work correctly.  For Codex sessions, this requires the
+‘codex’ package.  Agent Log first verifies the ID against the current
+canonical catalog, then passes both that ID and the catalog's exact
+transcript path to app-server ‘thread/resume’.  It does not rescan
+rollouts or fall back to another same-ID file if the canonical path
+disappears.  The CLI backend uses ‘codex resume’ for the same
+catalog-validated ID.  The keybinding is ‘r’ in ‘agent-log-mode’.  When
+the *note agent integration: Agent integration. is active, resuming
+additionally behaves as described there: live sessions are switched to
+rather than duplicated, and new resumes are routed through the ‘agent’
+dispatcher.
+
+
+File: agent-log.info,  Node: Agent integration,  Next: Secret redaction,  Prev: Commands,  Up: Top
+
+5 Agent integration
+*******************
+
+Agent Log owns the durable archive; the optional agent
+(https://github.com/benthamite/agent) package owns live session control
+(buffers, accounts, lifecycle state, teardown).  The bridge module
+‘agent-log-agent.el’ connects the two when both are loaded, regardless
+of load order: ‘agent-log.el’ requires it only after both the ‘agent’
+and ‘agent-log’ features are available, so loading Agent Log alone never
+loads or requires ‘agent’, and Agent Log remains fully functional
+standalone.  The bridge uses only public ‘agent’ API and adds ‘:around’
+methods to existing Agent Log generics, so removing it restores
+standalone behavior exactly.
+
+   With the bridge active:
+
+   • Opening the current session's log resolves the transcript from the
+     buffer's authoritative native session id, which ‘agent’ maintains
+     from the Claude status line and Codex hook events.  The standalone
+     heuristics (visible-text transcript matching, newest project JSONL,
+     ‘history.jsonl’ project match, Codex process and launch-time
+     matching) remain as fallbacks for buffers whose id is not yet
+     known.
+   • The session browser tags sessions that are currently live with
+     their state — ‘[busy]’, ‘[waiting]’, ‘[background-waiting]’, or
+     ‘[unknown]’ — in the ‘agent-log-live-state’ face.  There are two
+     extension points: ‘agent-log-live-session-info-function’ answers
+     about one session at a time, and
+     ‘agent-log-live-session-info-table-function’ returns a snapshot of
+     every live session at once.  The bridge installs both, and the
+     browser prefers the snapshot whenever it is installed, even if the
+     snapshot comes back empty.  The tag is a column like any other: it
+     is padded to the width of the widest tag on display, so the date,
+     project, and size columns line up whether or not a row is live, and
+     it disappears entirely when no displayed session is live.
+     Selecting a session still opens the rendered log; liveness only
+     annotates.
+   • The ‘agent’ session switcher shows each live session's stored
+     one-line summary after the session name, dimmed and aligned into a
+     column.  The bridge supplies that text through
+     ‘agent-session-annotation-functions’, the abnormal hook ‘agent’
+     runs when it builds the switcher; ‘agent’ itself knows nothing
+     about summaries.  Loading the bridge adds its own function to that
+     hook with ‘add-hook’, so an annotation function you installed
+     yourself keeps working whichever loads first, and the switcher
+     shows whichever of you answers first.  ‘remove-hook’ takes the
+     bridge's function back out if you would rather annotate the
+     switcher some other way.  The text comes from
+     ‘agent-log-session-oneline’, which reads an in-memory cache rather
+     than the rendered index, so opening the switcher never waits on a
+     multi-megabyte file.  A session shows no annotation at all when the
+     archive has not summarized it yet, when it is marked as having no
+     conversation to summarize, or when ‘agent’ does not yet know its
+     native session id; such sessions look exactly as they did before.
+     Because the background summary sweep skips sessions it believes are
+     live (see below), a live session's annotation describes its
+     conversation as of the last time it was summarized, which can be
+     hours behind.
+   • Resuming a session that is already live switches to its existing
+     buffer, with a message naming its state, instead of starting a
+     duplicate process on the same conversation.
+   • Resuming an inactive session is routed through
+     ‘agent-start-session’, so the resumed process gets ‘agent’'s
+     account handling, lifecycle registration, teardown, and state
+     tracking.  Codex resumes keep the catalog validation and
+     exact-transcript-path behavior described in *note Session
+     resumption::.
+   • Live-session id listing (used to protect running sessions from
+     background summarization) comes from ‘agent’'s session registry
+     instead of backend heuristics, which for Codex also avoids reading
+     the thread catalog.
+
+   The cache behind the switcher annotations is filled by
+‘agent-log-refresh-session-onelines’, which rereads the rendered index
+and keeps only the one-line summaries, so a consumer that wants a label
+does not hold the whole index in memory.  The rebuild is skipped when
+the index file's size and modification time are unchanged since the last
+one.  The bridge runs the rebuild from a repeating idle timer whose
+delay is the user option ‘agent-log-oneline-refresh-idle-delay’, in
+seconds, defaulting to ‘5’.  A repeating idle timer runs at most once
+per idle period, so the rebuild happens on each pause that lasts at
+least that long, not once every five seconds of a long pause.  A firing
+whose index is unchanged costs a single file-attribute check; a firing
+after a change rereads and reparses the whole index, which takes roughly
+90 ms on a 6 MB archive.  Lower the delay to have a newly written
+summary reach the switcher after a shorter pause; raise it so that only
+longer pauses pay for the reparse.  Setting the option to ‘nil’, or to a
+number that is not positive, cancels the timer altogether, and the
+switcher then shows whatever the cache last held.  The option
+reschedules the timer when it is set, so a change made through Customize
+or ‘setopt’ takes effect at once.
+
+   A corrupt rendered index makes the rebuild signal rather than replace
+good summaries with an empty cache, so the switcher keeps showing the
+annotations it already had.  Emacs reports the error from the timer as
+an ordinary message, once per pause rather than every few seconds; with
+‘debug-on-error’ set, each of those firings raises the debugger and
+shows a backtrace instead.  The timer survives the error, and the
+index's file state is recorded only after a successful rebuild, so every
+later firing rereads the whole index until the index is valid again — at
+which point annotations resume by themselves, with nothing to restart.
+
+   Browsing history stays lazy in both directions: the ‘agent’
+transients never read the historical catalog, and building the switcher
+reads only memory.  The idle refresh above is the one piece of bridge
+work that runs on its own; everything else waits for an explicit action.
+On the ‘agent’ side, the shared ‘agent-history’ command (bound to ‘l’ in
+‘agent-menu’) opens ‘agent-log-menu’ on demand.
+
+
+File: agent-log.info,  Node: Secret redaction,  Next: agent-log-mode,  Prev: Agent integration,  Up: Top
+
+6 Secret redaction
+******************
+
+Because AI coding agents frequently see or handle secrets, their
+conversation logs can contain API keys, tokens, and other credentials in
+plain text.  The optional ‘agent-log-redact’ module scans each rendered
+entry for known secret formats and replaces every match with a
+deterministic placeholder of the form ‘[REDACTED:LABEL:HASH8]’, where
+‘HASH8’ is the first 8 hex chars of ‘sha256(secret + salt)’.  The same
+secret always produces the same placeholder, so you can still reason
+about which credential appears where without exposing its value.
+
+   Enable it by loading the module:
+
+     (require 'agent-log-redact)
+
+   After enabling for the first time, run ‘agent-log-redact-rebuild-all’
+to re-render any previously-rendered logs through the redactor.
+
+* Menu:
+
+* Coverage::
+* Integration::
+* Commands: Commands (1).
+* User options: User options (1).
+
+
+File: agent-log.info,  Node: Coverage,  Next: Integration,  Up: Secret redaction
+
+6.1 Coverage
+============
+
+The built-in pattern list (‘agent-log-redact-patterns’) covers AWS
+access keys, GitHub tokens (classic, ‘ghs_’, and fine-grained PATs),
+GitLab personal access tokens, Slack tokens, generic ‘sk-’ API keys
+(with a more specific ‘sk-ant-’ rule for Anthropic keys that fires
+first), Google API keys (‘AIza...’), JSON Web Tokens, database
+connection strings with embedded credentials (‘postgres’, ‘mysql’,
+‘mongodb’, etc.), Google OAuth client secrets, PEM private-key blocks,
+and generic ‘api_key’ / ‘password’ / ‘token’ assignments with
+high-entropy values.  Add site-specific patterns via
+‘agent-log-redact-extra-patterns’ (same ‘(REGEX . LABEL)’ alist format);
+suppress known-safe matches via ‘agent-log-redact-allowlist’ (a list of
+literal strings).
+
+
+File: agent-log.info,  Node: Integration,  Next: Commands (1),  Prev: Coverage,  Up: Secret redaction
+
+6.2 Integration
+===============
+
+Redaction is applied at two layers:
+
+  1. _Render-time_ via ‘:filter-return’ advice on
+     ‘agent-log--render-entry’, so every rendered entry passes through
+     the redactor on its way to the Markdown file.  Covers both the
+     full-render path (‘agent-log--render-to-file’) and the live-update
+     path (‘agent-log--append-rendered-line’).
+  2. _Source-level_ via ‘agent-log-redact-scrub-jsonl’, which walks each
+     .jsonl under ‘agent-log-redact-jsonl-roots’ (Claude Code's
+     ‘~/.claude/projects/’, Codex's ‘~/.codex/sessions/’), parses each
+     line as JSON, and rewrites non-opaque string values through
+     ‘agent-log-redact-text’ atomically.  JSON object keys and values
+     under ‘agent-log-redact-opaque-json-keys’ are preserved unchanged.
+     Files modified within ‘agent-log-redact-active-session-seconds’ are
+     skipped to avoid racing with an active session.
+
+   Source-level scrubbing is the authoritative redaction for plaintext
+transcript fields: once the JSONL is clean, every downstream rendering
+of that session is automatically clean, and there is no plain-text copy
+of the secret on local disk.  Session-resume remains safe only if
+authenticated or encrypted resume fields are preserved byte-for-byte; by
+default, keys such as ‘encrypted_content’, ‘signature’, ‘ciphertext’,
+‘nonce’, ‘mac’, ‘tag’, and suffixed variants such as
+‘thinking_signature’ are treated as opaque.
+
+   Neither layer is a substitute for preventing secrets from entering
+the transcript in the first place (that is the job of an upstream
+PreToolUse hook).  They are defense in depth: prevention at the edge,
+redaction at the core, and redaction at the view.
+
+
+File: agent-log.info,  Node: Commands (1),  Next: User options (1),  Prev: Integration,  Up: Secret redaction
+
+6.3 Commands
+============
+
+‘agent-log-redact-rebuild-all’ deletes every rendered ‘.md’ file under
+‘agent-log-rendered-directory’, clears the index, and re-runs
+‘agent-log-sync-sessions’ so every non-ignored canonical session is
+re-rendered through the redactor.  Use after enabling redaction or after
+changing the pattern list.
+
+   ‘agent-log-redact-existing-in-place’ is a faster alternative for the
+first-time migration.  It iterates every already-rendered ‘.md’ file,
+runs its contents through ‘agent-log-redact-text’, and rewrites only
+files whose content actually changed — no JSONL re-parsing.  Much faster
+than ‘agent-log-redact-rebuild-all’ on large archives.  Sessions whose
+JSONL has grown since their last render are not refreshed by this
+command; run ‘agent-log-sync-sessions’ afterward to pick up any new
+content through the advice-based redactor.
+
+   ‘agent-log-redact-scrub-jsonl’ is the source-level scrubber.  It
+walks every directory in ‘agent-log-redact-jsonl-roots’ recursively, and
+for every ‘.jsonl’ older than ‘agent-log-redact-active-session-seconds’
+examines each line.  Idempotency is enforced at three layers.  First,
+‘agent-log-redact-text’ skips any regex match whose captured text
+already contains a ‘[REDACTED:...]’ substring, so a pattern with a
+permissive character class cannot swallow and re-hash its own
+placeholder (e.g.  the ‘db-password’ pattern captures ‘[^@/ \n]+’ as the
+password, which would otherwise match a previously-redacted placeholder
+on a subsequent pass).  Second, lines that contain no pattern match at
+all are left verbatim — no JSON round-trip.  Third, lines that match
+syntactically but whose recursive walk redacts no actual string are also
+left verbatim (this covers matches inside already-redacted placeholders
+and opaque fields such as Codex ‘encrypted_content’).  Only lines where
+at least one non-opaque string value is actually rewritten trigger JSON
+re-serialization.  The file is rewritten atomically (temporary file +
+rename) only when at least one line actually changed.  Both fast paths
+are required because JSON parse + serialize is not guaranteed to be
+byte-identical for all valid inputs — unconditional re-serialization
+would cause spurious drift across re-runs.  Lines that fail to parse as
+JSON are preserved unchanged, so malformed or truncated entries survive
+scrubbing.  The write path disables Emacs lockfiles so concurrent
+scrubber invocations do not deadlock on stale ‘.#’ lock symlinks.  Run
+once after enabling redaction to clean historical sessions, and
+periodically afterward (manually, or via a cron-like schedule) to scrub
+newly-completed sessions.
+
+   ‘agent-log-redact-preview’ lists every potential match in the current
+buffer — with its label, position, and a truncated preview — in a
+dedicated report buffer.  Useful for tuning patterns or adding entries
+to ‘agent-log-redact-allowlist’ when a legitimate value triggers a false
+positive.
+
+
+File: agent-log.info,  Node: User options (1),  Prev: Commands (1),  Up: Secret redaction
+
+6.4 User options
+================
+
+‘agent-log-redact-enabled’ (default ‘t’) toggles redaction globally.
+Set to ‘nil’ to bypass the redactor without unloading the module.
+
+   ‘agent-log-redact-patterns’ is the built-in ‘(REGEX . LABEL)’ alist.
+Each entry is applied in order.  If a regex contains a capture group,
+only the first capture group is replaced; otherwise the whole match is
+replaced.  Use a capture group when you want to preserve surrounding
+context (e.g.  the ‘password=’ prefix in a ‘password=VALUE’ match).
+
+   ‘agent-log-redact-extra-patterns’ is appended to the built-in list on
+every scan.  Use it to add site-specific secret formats without editing
+the built-in.
+
+   ‘agent-log-redact-allowlist’ is a list of literal strings that are
+never redacted, even when matched by a pattern.  Use to suppress known
+false positives such as public test keys.
+
+   ‘agent-log-redact-hash-salt’ is an optional salt prepended to secrets
+before hashing.  An empty salt (the default) is safe — the 8-char
+truncation already makes recovery impractical.  Set a non-empty salt if
+you sync the same logs to multiple machines and want placeholders to
+differ across them.
+
+   ‘agent-log-redact-jsonl-roots’ lists the directories the source-level
+scrubber walks.  Defaults to Claude Code's ‘~/.claude/projects/’ and
+Codex's ‘~/.codex/sessions/’.
+
+   ‘agent-log-redact-opaque-json-keys’ lists JSON keys whose values are
+never source-redacted.  This protects authenticated ciphertext and
+signature fields used by agent resume protocols.  Keys ending in
+‘_signature’, ‘_ciphertext’, ‘_nonce’, ‘_mac’, or ‘_tag’ are also
+treated as opaque.
+
+   ‘agent-log-redact-active-session-seconds’ controls how
+recently-modified a .jsonl must be before the scrubber skips it.
+Default 300 (five minutes).  Prevents racing with a session that is
+still writing.
+
+   ‘agent-log-auto-redact-sessions’, when non-nil, scrubs JSONL
+automatically after each Claude Code session ends.  Installs a handler
+on ‘claude-code-event-hook’ that fires on ‘:type stop’ and, after
+‘agent-log-redact-active-session-seconds’ plus 30 seconds, launches an
+‘emacs --batch’ subprocess that runs ‘agent-log-redact-scrub-jsonl’.
+Using a subprocess is essential: scrubbing thousands of files inline in
+the interactive Emacs would block the UI for minutes.  Codex has no
+equivalent event hook, so Codex sessions are only scrubbed on manual
+invocation.  This is the companion to ‘agent-log-auto-sync-sessions’ and
+‘agent-log-auto-summarize-sessions’ — same pattern, different action.
+
+
+File: agent-log.info,  Node: agent-log-mode,  Next: How it works,  Prev: Secret redaction,  Up: Top
+
+7 ‘agent-log-mode’
+******************
+
+‘agent-log-mode’ is the major mode used for rendered session buffers.
+It derives from ‘markdown-view-mode’, inheriting Markdown fontification
+in a read-only buffer.  Buffers are never marked as modified, so ‘q’
+(‘quit-window’) closes them without prompting to save.  The mode
+activates ‘outline-minor-mode’ with a regexp that matches Markdown
+headings (=## =, =### =, =#### =), enabling section folding.
+
+   Two invisibility specs are added: ‘agent-log-collapsed’ (which shows
+the heading but hides the body) and ‘agent-log-hidden’ (which hides both
+heading and body).  These are used by the section visibility commands
+(*note Section visibility::) and the display configuration options
+(*note Display of thinking and tool sections::).
+
+   When a buffer in this mode is killed, the file watcher is cleaned up
+and the index is updated with the final JSONL file size.
+
+   The full keymap is:
+
+Key     Command                      Description
+-------------------------------------------------------------------------------
+‘n’     ‘agent-log-next-turn’        Jump to the next User/Assistant heading
+‘p’     ‘agent-log-previous-turn’    Jump to the previous heading
+‘TAB’   ‘agent-log-toggle-section’   Toggle fold of section at point
+‘C’     ‘agent-log-collapse-all’     Collapse all tool/thinking sections
+‘E’     ‘agent-log-expand-all’       Expand all sections
+‘g’     ‘agent-log-refresh’          Re-render the buffer from scratch
+‘w’     ‘agent-log-copy-turn’        Copy the current turn to the kill ring
+‘r’     ‘agent-log-resume-session’   Resume the session in the coding agent
+‘?’     ‘agent-log-menu’             Open the transient menu
+‘q’     ‘quit-window’                Close the buffer
+
+* Menu:
+
+* agent-log-search-mode::
+* Transient menu::
+
+
+File: agent-log.info,  Node: agent-log-search-mode,  Next: Transient menu,  Up: agent-log-mode
+
+7.1 ‘agent-log-search-mode’
+===========================
+
+‘agent-log-search-mode’ is the major mode used for the
+‘*agent-log-search*’ result buffer.  It derives from
+‘markdown-view-mode’, providing Markdown fontification in a read-only
+buffer.  Session references in the LLM's narrative are replaced with
+clickable links: pressing ‘RET’ or clicking on them opens the
+corresponding rendered session log via ‘agent-log-search-follow-link’.
+
+   The keymap is minimal:
+
+Key     Command                          Description
+--------------------------------------------------------------------------
+‘RET’   ‘agent-log-search-follow-link’   Open the session link at point
+‘q’     ‘quit-window’                    Close the buffer
+
+
+File: agent-log.info,  Node: Transient menu,  Prev: agent-log-search-mode,  Up: agent-log-mode
+
+7.2 Transient menu
+==================
+
+The command ‘agent-log-menu’ opens a transient menu that arranges all
+‘agent-log’ commands in side-by-side columns: Open, Sync & AI, and
+Settings are always visible; a fourth Navigate column appears when the
+current buffer is in ‘agent-log-mode’.  The keybinding is ‘?’ in
+‘agent-log-mode’.  The menu is also available globally via its autoload,
+so you can bind it to a key of your choice outside of ‘agent-log-mode’.
+
+   The Open column includes ‘agent-log-resume-session’ (bound to ‘s’),
+which opens the session displayed in the current log in the coding
+agent.  The Sync & AI column includes the ‘agent-log-search’ command,
+bound to ‘/’.
+
+   The Navigate column groups movement commands (‘n’, ‘p’ for stepping
+through turns), section folding (‘TAB’ to toggle at point, ‘C’ to
+collapse all, ‘E’ to expand all), and buffer operations (‘G’ to
+re-render, ‘w’ to copy the current turn).  Note that the collapse and
+expand commands are one-shot operations on the current buffer view; the
+persistent per-type visibility defaults (hidden, collapsed, visible) are
+controlled by the Settings toggles (‘-t’ for thinking, ‘-o’ for tools).
+
+   The Settings column displays the current value of each option (e.g.,
+‘collapsed’, ‘on’, ‘off’, ‘created’, ‘modified’) highlighted with the
+‘transient-value’ face, matching the convention used by ‘magit’ and
+other transient-based menus.
+
+
+File: agent-log.info,  Node: How it works,  Next: Troubleshooting,  Prev: agent-log-mode,  Up: Top
+
+8 How it works
+**************
+
+* Menu:
+
+* Backend architecture::
+* Data sources::
+* Rendered directory structure::
+* Rendering pipeline::
+* Live update mechanism::
+
+
+File: agent-log.info,  Node: Backend architecture,  Next: Data sources,  Up: How it works
+
+8.1 Backend architecture
+========================
+
+The package uses a generic interface to support multiple AI coding
+agents.  The base type ‘agent-log-backend’ (defined with ‘cl-defstruct’)
+provides shared slots for the backend name, key symbol, root directory,
+and rendered directory.  Each backend extends this type via ‘:include’
+and implements a set of generic functions (‘cl-defgeneric’ /
+‘cl-defmethod’) that handle backend-specific operations: session
+discovery, JSONL entry normalization, conversation filtering, tool input
+summarization, and session resumption.
+
+   Backend files are loaded lazily.  When a backend is first accessed
+(e.g.  during ‘agent-log-browse-sessions’), the package calls ‘require’
+on the backend's feature name and the backend registers a singleton
+instance in a global registry.  The registry maps backend key symbols to
+struct instances, so all dispatch goes through the struct's type.
+
+   The rendering pipeline, session browser, live update mechanism, AI
+summaries, and AI search all operate on a normalized intermediate
+representation.  Each backend's ‘agent-log--normalize-entries’ method
+converts its native JSONL format into canonical plists that the generic
+code expects.  Core functions such as ‘agent-log--render-to-file’ and
+‘agent-log--extract-conversation-text’ receive a backend instance and
+thread it through to generic dispatch points (conversation filtering,
+entry classification, tool summarization, text extraction).  The
+convenience function ‘agent-log--read-all-sessions’ returns merged
+sessions from all active backends, sorted most-recent-first; individual
+buffers store their backend in the buffer-local variable
+‘agent-log--backend’, set when a session is opened.  This means the core
+of the package is backend-agnostic: adding a new backend requires only
+implementing the generic functions, with no changes to the core file.
+
+
+File: agent-log.info,  Node: Data sources,  Next: Rendered directory structure,  Prev: Backend architecture,  Up: How it works
+
+8.2 Data sources
+================
+
+Each backend reads conversation data from a different directory layout.
+
+* Menu:
+
+* Claude Code::
+* Codex::
+
+
+File: agent-log.info,  Node: Claude Code,  Next: Codex,  Up: Data sources
+
+8.2.1 Claude Code
+-----------------
+
+The Claude Code backend reads from two places:
+
+  1. ‘~/.claude/history.jsonl’: a global index mapping session IDs to
+     projects and timestamps.
+  2. ‘~/.claude/projects/<encoded-path>/<uuid>.jsonl’: one file per
+     session, containing all messages as JSON lines.
+
+   The encoded path replaces ‘/’, ‘.’, and space characters with ‘-’.
+The package tries both the expanded path and its ‘file-truename’ when
+locating a session directory, which handles symlinked project paths.
+
+
+File: agent-log.info,  Node: Codex,  Prev: Claude Code,  Up: Data sources
+
+8.2.2 Codex
+-----------
+
+The Codex backend obtains session identity from Codex app-server
+‘thread/list’ and reads conversation content from the exact rollout path
+returned for each thread.  Rollouts normally live under
+‘~/.codex/sessions/YYYY/MM/DD/rollout-<date>-<uuid>.jsonl’, or under the
+equivalent ‘sessions/’ tree in the active account's resolved
+‘CODEX_HOME’.
+
+   Each line in a Codex session file is an envelope ‘{timestamp, type,
+payload}’.  The ‘type’ field determines how the entry is processed:
+‘session_meta’ entries provide session metadata (working directory,
+model, CLI version, and source); ‘response_item’ entries carry the
+conversation content (user and assistant messages, function calls and
+their outputs, web searches, reasoning blocks); ‘event_msg’ and
+‘turn_context’ entries are internal bookkeeping and are skipped during
+rendering.  The normalization step converts this envelope format to the
+canonical flat representation used by the rendering pipeline.  The
+interactive Emacs reads Agent Log's persistent Codex catalog cache and
+never contacts app-server while browsing.  When that cache is absent or
+omits the newest non-subagent rollout on disk, Agent Log starts a
+detached refresh and repair, rate-limited per rollout.  A separate batch
+Emacs performs the complete app-server handshake, paginates the native
+catalog, and atomically replaces the cache only after a successful
+response.  Its output is redirected at the operating-system level before
+it starts, and an operating-system timeout escalates to a forced stop if
+necessary.  App-server startup, rollout scanning, output processing, and
+timeout enforcement therefore occur outside the interactive Emacs.  If
+no successful cache exists yet, the first browse explicitly reports that
+Codex sessions are initializing in the background; later browses use the
+completed cache.  Agent Log uses the cached native catalog's project,
+creation time, preview, and exact path rather than reconstructing
+identity from rollout metadata.
+
+
+File: agent-log.info,  Node: Rendered directory structure,  Next: Rendering pipeline,  Prev: Data sources,  Up: How it works
+
+8.3 Rendered directory structure
+================================
+
+The rendered directory mirrors the project structure:
+
+     ~/.claude/rendered/
+       tango-wiki/
+         2026-02-04_14-06_fix-the-authentication-bug--codex--019c....md
+         2026-02-05_09-22_refactor-database-schema--claude-code--8d3e....md
+       dotfiles/
+         2026-02-22_11-56_redesign-agent-log-package--codex--019d....md
+       _index.el
+
+   Each filename includes UTC creation time, a display slug, the
+backend, and the full session ID.  Each ‘.md’ file contains HTML-comment
+front matter (session ID, backend, exact source path, rendered
+timestamp, JSONL size) followed by the full conversation rendered as
+Markdown.  The ‘_index.el’ file is a hash table mapping session IDs to
+metadata (rendered file path, JSONL size, and optionally a summary plus
+the conversation fingerprint and JSONL file state it describes).  The
+parsed table is cached in memory against the file's size and
+modification time, so a single browse that consults it several times
+parses the multi-megabyte file once, while a write by another process,
+such as a summary sweep worker, is picked up on the next read.  Summary
+commands use that metadata to distinguish current summaries, sessions
+explicitly marked as having no conversation, older fingerprinted
+summaries that can be validated and upgraded without another LLM
+request, no-fingerprint summaries that must be refreshed once, and stale
+summaries that need to be regenerated.
+
+   The maintenance command ‘agent-log-rendered-index-audit’ reports
+those states separately, including source-present missing summaries,
+rendered-only historical entries whose original JSONL source is gone,
+stale index rows with no rendered file, remaining ‘unknown’ folder
+entries, and known test fixture rows.
+‘agent-log-clean-test-index-entries’ removes known stale fixture IDs
+from the real rendered index when they have no existing rendered file.
+‘agent-log-recover-rendered-only-summaries’ can generate summaries from
+rendered Markdown for historical entries whose JSONL source has
+disappeared; these summaries are marked with ‘:summary-source
+:rendered-markdown’ and ‘:summary-recovered-from-rendered t’ so they are
+not confused with canonical JSONL-backed summaries.
+
+
+File: agent-log.info,  Node: Rendering pipeline,  Next: Live update mechanism,  Prev: Rendered directory structure,  Up: How it works
+
+8.4 Rendering pipeline
+======================
+
+The rendering pipeline operates in three stages: parse, normalize,
+filter.  First, the JSONL file is parsed into raw plists.  Then each
+backend's ‘agent-log--normalize-entries’ method converts the raw entries
+to a canonical format (for Claude Code this is a no-op since the native
+format is already canonical; for Codex it unwraps the envelope, converts
+content types, strips system XML, and merges consecutive entries of the
+same role into single turns).  Finally, the backend's
+‘agent-log--filter-conversation’ and ‘agent-log--conversation-entry-p’
+methods select ‘user’ and ‘assistant’ entries while excluding
+system-generated messages.  For Claude Code, system entries are those
+whose content starts with known XML tags such as
+‘<local-command-stdout>’ or ‘<command-name>’.  For Codex, system entries
+are those starting with ‘<environment_context>’, ‘<permissions>’,
+‘<turn_aborted>’, or ‘<collaboration_mode>’.
+
+   Filtered entries are rendered as Markdown with ‘##’ headings for
+conversation turns and ‘####’ headings for tool calls and thinking
+blocks.  User turns show any text content followed by tool results.
+Assistant turns show thinking blocks, text content, and tool-use
+summaries.
+
+   The session header (the ‘# Session: ...’ line at the top of each
+rendered file) derives its project name from the ‘progress’ entry in the
+JSONL, which contains the working directory.  Not all sessions have a
+‘progress’ entry; when one is absent, the package falls back to the
+metadata recorded in ‘history.jsonl’ for that session — the project
+path, the timestamp, and the first-message display text — looked up by
+session ID.  The session date prefers the first conversation turn
+timestamp, falling back to the progress or session metadata timestamp
+when a log has been created but no user message has been recorded yet.
+
+
+File: agent-log.info,  Node: Live update mechanism,  Prev: Rendering pipeline,  Up: How it works
+
+8.5 Live update mechanism
+=========================
+
+When ‘agent-log-live-update’ is non-‘nil’ and a rendered buffer is open,
+the package registers a ‘file-notify’ watcher on the source JSONL file.
+When the file grows, the watcher reads only the new bytes (from the
+previously recorded offset to the new file size), handling incomplete
+UTF-8 sequences at chunk boundaries.  New complete lines are parsed and
+rendered incrementally, appended to both the buffer and the ‘.md’ file
+on disk.  Partial lines (those not terminated by a newline) are buffered
+and completed when the next chunk arrives.
+
+
+File: agent-log.info,  Node: Troubleshooting,  Next: Development,  Prev: How it works,  Up: Top
+
+9 Troubleshooting
+*****************
+
+* Menu:
+
+* No sessions found::
+* Rendered files not updating::
+* Live updates not working::
+
+
+File: agent-log.info,  Node: No sessions found,  Next: Rendered files not updating,  Up: Troubleshooting
+
+9.1 No sessions found
+=====================
+
+Ensure that ‘agent-log-directory’ points to the correct configuration
+directory (*note Directory configuration::).  The package reads
+‘history.jsonl’ in that directory and looks for session files under
+‘projects/’.
+
+
+File: agent-log.info,  Node: Rendered files not updating,  Next: Live updates not working,  Prev: No sessions found,  Up: Troubleshooting
+
+9.2 Rendered files not updating
+===============================
+
+If a rendered file appears stale, press ‘g’ (‘agent-log-refresh’) in the
+buffer to force a full re-render (*note Sync and rendering::).  You can
+also delete the index file (‘_index.el’ in the rendered directory) to
+force re-rendering of all ordinary sessions on next access.
+
+
+File: agent-log.info,  Node: Live updates not working,  Prev: Rendered files not updating,  Up: Troubleshooting
+
+9.3 Live updates not working
+============================
+
+Verify that ‘agent-log-live-update’ is set to ‘t’ (*note Live
+updates::).  Live updates rely on ‘file-notify’, which requires OS-level
+file watching support.  On some systems (e.g., remote filesystems via
+TRAMP), file notifications may not be available.
+
+
+File: agent-log.info,  Node: Development,  Next: License,  Prev: Troubleshooting,  Up: Top
+
+10 Development
+**************
+
+     make test     # run the full ERT suite
+     make compile  # byte-compile with warnings-as-errors
+     TZ=UTC make test  # run the suite with GitHub Actions' timezone
+
+
+File: agent-log.info,  Node: License,  Next: Indices,  Prev: Development,  Up: Top
+
+11 License
+**********
+
+GPL-3.0-or-later.
+
+
+File: agent-log.info,  Node: Indices,  Prev: License,  Up: Top
+
+12 Indices
+**********
+
+* Menu:
+
+* Function index::
+* Variable index::
+
+
+File: agent-log.info,  Node: Function index,  Next: Variable index,  Up: Indices
+
+12.1 Function index
+===================
+
+ [index ]
+* Menu:
+
+* agent-log-browse-sessions:             Session browsing.     (line  9)
+* agent-log-collapse-all:                Section visibility.   (line  6)
+* agent-log-copy-turn:                   Copying.              (line  6)
+* agent-log-expand-all:                  Section visibility.   (line  6)
+* agent-log-menu:                        Transient menu.       (line  6)
+* agent-log-mode:                        agent-log-mode.       (line  6)
+* agent-log-next-turn:                   Navigation.           (line  6)
+* agent-log-open-current-session:        Session browsing.     (line  9)
+* agent-log-open-directory:              Rendered directory.   (line  6)
+* agent-log-open-file:                   Session browsing.     (line  9)
+* agent-log-open-latest:                 Session browsing.     (line  9)
+* agent-log-open-session:                Session browsing.     (line  9)
+* agent-log-previous-turn:               Navigation.           (line  6)
+* agent-log-redact-existing-in-place:    Commands (1).         (line 12)
+* agent-log-redact-preview:              Commands (1).         (line 48)
+* agent-log-redact-rebuild-all:          Commands (1).         (line  6)
+* agent-log-redact-scrub-jsonl:          Commands (1).         (line 21)
+* agent-log-refresh:                     Sync and rendering.   (line  6)
+* agent-log-refresh-session-onelines:    Agent integration.    (line 75)
+* agent-log-rename-sessions:             Session rename.       (line  6)
+* agent-log-repair-rendered-index:       Automatic sync and summarization on session end.
+                                                               (line 37)
+* agent-log-resume-session:              Session resumption.   (line  6)
+* agent-log-search:                      AI search.            (line  6)
+* agent-log-search-follow-link:          AI search.            (line  6)
+* agent-log-search-mode:                 agent-log-search-mode.
+                                                               (line  6)
+* agent-log-session-oneline:             Agent integration.    (line 75)
+* agent-log-stop-summarize-sessions:     Summary generation.   (line  6)
+* agent-log-summarize-sessions:          Summary generation.   (line  6)
+* agent-log-sync-sessions:               Sync and rendering.   (line  6)
+* agent-log-toggle-section:              Section visibility.   (line  6)
+
+
+File: agent-log.info,  Node: Variable index,  Prev: Function index,  Up: Indices
+
+12.2 Variable index
+===================
+
+ [index ]
+* Menu:
+
+* agent-log-active-backends:             Backend configuration.
+                                                               (line  6)
+* agent-log-auto-redact-sessions:        User options (1).     (line 44)
+* agent-log-auto-rename-sessions:        Session rename.       (line  6)
+* agent-log-auto-summarize-sessions:     Automatic sync and summarization on session end.
+                                                               (line  6)
+* agent-log-auto-summarize-sweep-interval: Automatic sync and summarization on session end.
+                                                               (line  6)
+* agent-log-auto-summarize-sweep-limit:  Automatic sync and summarization on session end.
+                                                               (line  6)
+* agent-log-auto-sync-sessions:          Automatic sync and summarization on session end.
+                                                               (line  6)
+* agent-log-backends:                    Backend configuration.
+                                                               (line  6)
+* agent-log-directory:                   Directory configuration.
+                                                               (line  6)
+* agent-log-group-by-project:            Session browser options.
+                                                               (line  6)
+* agent-log-ignored-project-regexps:     Session browser options.
+                                                               (line  6)
+* agent-log-live-update:                 Live updates.         (line  6)
+* agent-log-max-tool-input-length:       Tool output limits.   (line  6)
+* agent-log-max-tool-result-length:      Tool output limits.   (line  6)
+* agent-log-oneline-refresh-idle-delay:  Agent integration.    (line 75)
+* agent-log-project-column-max-width:    Session browser options.
+                                                               (line  6)
+* agent-log-redact-active-session-seconds: User options (1).   (line 39)
+* agent-log-redact-allowlist:            User options (1).     (line 19)
+* agent-log-redact-enabled:              User options (1).     (line  6)
+* agent-log-redact-extra-patterns:       User options (1).     (line 15)
+* agent-log-redact-hash-salt:            User options (1).     (line 23)
+* agent-log-redact-jsonl-roots:          User options (1).     (line 29)
+* agent-log-redact-opaque-json-keys:     User options (1).     (line 33)
+* agent-log-redact-patterns:             User options (1).     (line  9)
+* agent-log-rendered-directory:          Directory configuration.
+                                                               (line  6)
+* agent-log-search-backend:              AI search options.    (line  6)
+* agent-log-search-budget:               AI search options.    (line  6)
+* agent-log-search-model:                AI search options.    (line  6)
+* agent-log-search-scope-backend:        AI search options.    (line  6)
+* agent-log-search-scope-model:          AI search options.    (line  6)
+* agent-log-session-sort-key:            Session browser options.
+                                                               (line  6)
+* agent-log-show-thinking:               Display of thinking and tool sections.
+                                                               (line  6)
+* agent-log-show-tools:                  Display of thinking and tool sections.
+                                                               (line  6)
+* agent-log-slug-max-length:             Session browser options.
+                                                               (line  6)
+* agent-log-summary-backend:             Summary generation (1).
+                                                               (line  6)
+* agent-log-summary-max-content-length:  Summary generation (1).
+                                                               (line  6)
+* agent-log-summary-model:               Summary generation (1).
+                                                               (line  6)
+* agent-log-timestamp-format:            Timestamps.           (line  6)
+
+
+Tag Table:
+Node: Top229
+Node: Overview1907
+Node: Installation7103
+Node: Manual installation7295
+Node: Installation with use-package7582
+Node: User options8294
+Node: Backend configuration8829
+Node: Directory configuration10174
+Node: Display of thinking and tool sections11573
+Node: Timestamps13349
+Node: Tool output limits13750
+Node: Session browser options14688
+Node: Live updates17361
+Node: Summary generation (1)18178
+Node: AI search options19651
+Node: Commands21957
+Node: Session browsing22284
+Node: Rendered directory29977
+Node: Sync and rendering30551
+Node: Navigation32721
+Node: Section visibility33289
+Node: Copying34161
+Node: Summary generation34639
+Node: Automatic sync and summarization on session end38172
+Node: Session rename43024
+Node: AI search45101
+Node: Session resumption48504
+Node: Agent integration50507
+Node: Secret redaction57261
+Node: Coverage58285
+Node: Integration59203
+Node: Commands (1)61078
+Node: User options (1)64215
+Node: agent-log-mode66955
+Node: agent-log-search-mode68965
+Node: Transient menu69827
+Node: How it works71439
+Node: Backend architecture71706
+Node: Data sources73734
+Node: Claude Code74008
+Node: Codex74626
+Node: Rendered directory structure76754
+Node: Rendering pipeline79180
+Node: Live update mechanism81259
+Node: Troubleshooting81971
+Node: No sessions found82200
+Node: Rendered files not updating82581
+Node: Live updates not working83075
+Node: Development83516
+Node: License83813
+Node: Indices83941
+Node: Function index84078
+Node: Variable index86569
+
+End Tag Table
+
+
+Local Variables:
+coding: utf-8
+Info-documentlanguage: en
+End:

@@ -257,6 +257,8 @@ In ~dollars~ mode, cost estimation requires the =gptel-plus= package.  If =gptel
 :CUSTOM_ID: h:session-browsing
 :END:
 
+The project and session pickers remain usable if the buffer from which you opened them is closed while you are choosing an entry.
+
 #+findex: agent-log-browse-sessions
 #+findex: agent-log-open-latest
 #+findex: agent-log-open-file
