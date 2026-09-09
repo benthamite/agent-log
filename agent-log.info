@@ -1582,7 +1582,14 @@ no successful cache exists yet, the first browse explicitly reports that
 Codex sessions are initializing in the background; later browses use the
 completed cache.  Agent Log uses the cached native catalog's project,
 creation time, preview, and exact path rather than reconstructing
-identity from rollout metadata.
+identity from rollout metadata.  Resuming a session that is absent from
+the cache starts or joins a detached catalog refresh, then resumes
+automatically after native discovery confirms that exact session.  This
+applies both to the direct command and the ‘agent’ dispatcher.  Repeated
+requests for the same session share one pending resume, which survives
+closure of the launching log buffer.  An account change cancels the
+pending launch.  A failed refresh reports that availability is unknown;
+only a successful refresh can report that a session is absent.
 
 
 File: agent-log.info,  Node: Rendered directory structure,  Next: Rendering pipeline,  Prev: Data sources,  Up: How it works
@@ -1907,18 +1914,18 @@ Node: Backend architecture71706
 Node: Data sources73734
 Node: Claude Code74008
 Node: Codex74626
-Node: Rendered directory structure76754
-Node: Rendering pipeline79180
-Node: Live update mechanism81259
-Node: Troubleshooting81971
-Node: No sessions found82200
-Node: Rendered files not updating82581
-Node: Live updates not working83075
-Node: Development83516
-Node: License83813
-Node: Indices83941
-Node: Function index84078
-Node: Variable index86569
+Node: Rendered directory structure77284
+Node: Rendering pipeline79710
+Node: Live update mechanism81789
+Node: Troubleshooting82501
+Node: No sessions found82730
+Node: Rendered files not updating83111
+Node: Live updates not working83605
+Node: Development84046
+Node: License84343
+Node: Indices84471
+Node: Function index84608
+Node: Variable index87099
 
 End Tag Table
 

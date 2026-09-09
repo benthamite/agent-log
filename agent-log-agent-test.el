@@ -89,3 +89,28 @@ and this test would then pass against whatever that stale file said."
 
 (provide 'agent-log-agent-test)
 ;;; agent-log-agent-test.el ends here
+
+(ert-deftest agent-log-agent-test-resume/codex-discovery-continuation ()
+  "Dispatch only after discovery, avoiding a session that became live."
+  (require 'agent-log-codex)
+  (dolist (became-live '(nil t))
+    (let ((agent-log-codex--exact-resume-paths (make-hash-table :test #'equal))
+          continuation live started)
+      (cl-letf (((symbol-function 'agent-log-agent--switch-to-live)
+                 (lambda (&rest _) live))
+                ((symbol-function 'agent-backend) (lambda (_) t))
+                ((symbol-function 'agent-log-codex--call-with-resume-session)
+                 (lambda (_backend _id function) (setq continuation function)))
+                ((symbol-function 'agent-log-agent--resume)
+                 (lambda (&rest args) (setq started args))))
+        (agent-log--resume-session agent-log-codex--instance "session")
+        (should continuation)
+        (should-not started)
+        (setq live became-live)
+        (puthash "session" "/tmp/exact.jsonl" agent-log-codex--exact-resume-paths)
+        (funcall continuation "/tmp/project/")
+        (if became-live
+            (progn
+              (should-not started)
+              (should-not (gethash "session" agent-log-codex--exact-resume-paths)))
+          (should (equal started '(codex "/tmp/project/" "session"))))))))

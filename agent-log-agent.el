@@ -40,10 +40,12 @@
 (require 'agent-log)
 (require 'agent)
 
+(defvar agent-log-codex--exact-resume-paths)
+
 (declare-function agent-log-claude--session-project-directory
                   "agent-log-claude" (session-id))
-(declare-function agent-log-codex--prepare-resume
-                  "agent-log-codex" (backend session-id))
+(declare-function agent-log-codex--call-with-resume-session
+                  "agent-log-codex" (backend session-id function))
 
 ;;;; Live-session identity
 
@@ -196,10 +198,16 @@ point the exact-path advice covers."
     (cond
      ((agent-log-agent--switch-to-live 'codex session-id))
      ((agent-backend 'codex)
-      (agent-log-agent--resume
-       'codex
-       (agent-log-codex--prepare-resume backend session-id)
-       session-id))
+      (agent-log-codex--call-with-resume-session
+       backend session-id
+       (lambda (directory)
+         (if (agent-log-agent--switch-to-live 'codex session-id)
+             (remhash session-id agent-log-codex--exact-resume-paths)
+           (condition-case err
+               (agent-log-agent--resume 'codex directory session-id)
+             (error
+              (remhash session-id agent-log-codex--exact-resume-paths)
+              (signal (car err) (cdr err))))))))
      (t (cl-call-next-method)))))
 
 (defun agent-log-agent--switch-to-live (backend-key session-id)

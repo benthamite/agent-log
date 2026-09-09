@@ -372,7 +372,15 @@ enforce the deadline from its event loop."
                  agent-log-codex--catalog-repairs))
       (agent-log-codex--stop-catalog-process process stderr-buffer)
       (when error-data
-        (message "Agent Log Codex catalog repair failed: %s" error-data)))))
+        (message "Agent Log Codex catalog repair failed: %s" error-data))
+      (let ((resumes (process-get process 'pending-resumes)))
+        (process-put process 'pending-resumes nil)
+        (dolist (resume resumes)
+          (condition-case err
+              (funcall (cdr resume) error-data)
+            (error
+             (message "Agent Log could not resume Codex session %s: %s"
+                      (car resume) (error-message-string err)))))))))
 
 (defun agent-log-codex--newest-rollout-id (home)
   "Return the session id of the newest resumable rollout under HOME, or nil.
@@ -1014,14 +1022,84 @@ it only for calls that did not originate in Agent Log."
                 :around #'agent-log-codex--exact-resume-advice)))
 
 (cl-defmethod agent-log--resume-session ((backend agent-log-codex) session-id)
-  "Resume the Codex session SESSION-ID."
-  (agent-log-codex--prepare-resume backend session-id)
-  (let* ((project-dir (or agent-log--session-project
-                          default-directory))
-         (default-directory (if (and project-dir
-                                     (file-directory-p project-dir))
-                                project-dir
-                              default-directory)))
+  "Resume the Codex session SESSION-ID, refreshing discovery when needed."
+  (agent-log-codex--call-with-resume-session
+   backend session-id
+   (lambda (directory)
+     (agent-log-codex--launch-resume session-id directory))))
+
+(defun agent-log-codex--call-with-resume-session (backend session-id function)
+  "Prepare BACKEND's SESSION-ID, then call FUNCTION with its directory.
+A missing cached entry starts or joins a detached catalog refresh.  Only
+that completed discovery can reject the session as absent; a stale cache
+is not evidence that a session cannot be resumed."
+  (let* ((home (agent-log-codex--effective-home backend))
+         (process (plist-get (gethash home agent-log-codex--catalog-repairs)
+                             :process)))
+    (if (and (processp process)
+             (assoc session-id (process-get process 'pending-resumes)))
+        (message "Agent Log: Codex session %s is already waiting for discovery"
+                 session-id)
+      (if-let* ((session (assoc session-id (agent-log--read-sessions backend))))
+          (funcall function
+                   (agent-log-codex--prepare-resume backend session-id session))
+        (agent-log-codex--defer-resume backend session-id function)))))
+
+(defun agent-log-codex--defer-resume (backend session-id function)
+  "Refresh BACKEND's catalog before preparing SESSION-ID for FUNCTION.
+Coalesce requests for the same home and ID.  Preserve the launching
+context independently of its buffer, which may close during discovery."
+  (let* ((home (agent-log-codex--effective-home backend))
+         (state (gethash home agent-log-codex--catalog-repairs))
+         (process (plist-get state :process))
+         (directory default-directory)
+         (environment (copy-sequence process-environment))
+         (project agent-log--session-project)
+         (terminal-backend codex-terminal-backend))
+    (unless (and (processp process) (process-live-p process))
+      (agent-log-codex--start-catalog-repair home 'resume)
+      (setq process (plist-get (gethash home agent-log-codex--catalog-repairs)
+                              :process)))
+    (unless (and (processp process) (process-live-p process))
+      (user-error "Codex catalog refresh could not start for %s" session-id))
+    (unless (assoc session-id (process-get process 'pending-resumes))
+      (process-put
+       process 'pending-resumes
+       (cons
+        (cons
+         session-id
+         (lambda (error-data)
+           (when error-data
+             (error "Catalog refresh failed (%s); session availability is unknown"
+                    error-data))
+           (with-temp-buffer
+             (setq default-directory directory)
+             (let ((process-environment environment)
+                   (agent-log--session-project project)
+                   (codex-terminal-backend terminal-backend))
+               (unless (equal home (agent-log-codex--effective-home backend))
+                 (user-error "Codex account changed while discovering session %s"
+                             session-id))
+               (let* ((thread
+                       (seq-find
+                        (lambda (entry) (equal (alist-get 'id entry) session-id))
+                        (agent-log-codex--cached-home-threads home)))
+                      (session (and thread
+                                    (agent-log-codex--thread-session backend thread))))
+                 (unless session
+                   (user-error
+                    "Codex session %s is absent from the refreshed interactive catalog"
+                    session-id))
+                 (funcall function
+                          (agent-log-codex--prepare-resume
+                           backend session-id session)))))))
+        (process-get process 'pending-resumes))))
+    (message "Agent Log: refreshing Codex catalog; session %s will resume when ready"
+             session-id)))
+
+(defun agent-log-codex--launch-resume (session-id directory)
+  "Launch the prepared Codex SESSION-ID in DIRECTORY when it is usable."
+  (let ((default-directory (or directory default-directory)))
     (cl-letf (((symbol-function 'codex--directory)
                (lambda () default-directory)))
       (if (and (eq codex-terminal-backend 'app-server)
@@ -1033,8 +1111,9 @@ it only for calls that did not originate in Agent Log."
              (signal (car err) (cdr err))))
         (codex--start-subcommand "resume" nil (list session-id))))))
 
-(defun agent-log-codex--prepare-resume (backend session-id)
+(defun agent-log-codex--prepare-resume (backend session-id &optional session)
   "Validate SESSION-ID against the canonical catalog of BACKEND and prepare.
+SESSION, when supplied, is the already discovered canonical entry.
 Record the session's project in `agent-log--session-project', cache the
 canonical transcript with the codex package, and, when the effective
 `codex-terminal-backend' is `app-server', register the transcript so
@@ -1042,7 +1121,8 @@ the resume is path-exact.  Return the project directory recorded in the
 catalog, or nil when it names no usable directory.  Signal a
 `user-error' when SESSION-ID is not in the catalog, the codex package
 is unavailable, or the transcript is unreadable."
-  (let ((session (assoc session-id (agent-log--read-sessions backend))))
+  (let ((session (or session
+                     (assoc session-id (agent-log--read-sessions backend)))))
     (unless session
       (user-error
        "Codex session %s is not in the canonical interactive thread catalog"

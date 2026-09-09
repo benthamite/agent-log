@@ -4295,6 +4295,118 @@ archived threads must survive."
       (should-not (gethash session-id
                            agent-log-codex--exact-resume-paths)))))
 
+(ert-deftest agent-log-test-codex-resume-session/refreshes-missing-session ()
+  "A cache miss resumes once after refresh, even if the launcher disappears."
+  (require 'codex)
+  (agent-log-test--with-temp-dir
+    (let* ((home (file-name-as-directory agent-log-test--dir))
+           (file (agent-log-test--write-file "exact.jsonl" "{}\n"))
+           (agent-log-codex--catalog-repairs (make-hash-table :test #'equal))
+           (agent-log-codex--exact-resume-paths (make-hash-table :test #'equal))
+           (codex-terminal-backend 'app-server)
+           (buffer (generate-new-buffer " *agent-log-resume-test*"))
+           process threads launched starts)
+      (unwind-protect
+          (cl-letf (((symbol-function 'agent-log-codex--effective-home)
+                     (lambda (_backend) home))
+                    ((symbol-function 'agent-log--read-sessions)
+                     (lambda (_backend) '(("newest" :file "unused"))))
+                    ((symbol-function 'agent-log-codex--cached-home-threads)
+                     (lambda (_home) threads))
+                    ((symbol-function 'agent-log-codex--start-catalog-repair)
+                     (lambda (actual-home rollout)
+                       (cl-incf starts)
+                       (setq process (make-pipe-process
+                                      :name "agent-log-test-repair" :noquery t))
+                       (process-put process 'repair-active t)
+                       (process-put process 'repair-home actual-home)
+                       (process-put process 'repair-rollout rollout)
+                       (puthash actual-home (list :process process)
+                                agent-log-codex--catalog-repairs)))
+                    ((symbol-function 'codex--cache-session-transcript) #'ignore)
+                    ((symbol-function 'codex--app-server-launch-resume-session)
+                     (lambda (id) (push (list id default-directory) launched))))
+            (setq starts 0)
+            (with-current-buffer buffer
+              (setq default-directory home)
+              (setq-local agent-log--backend agent-log-test--codex-backend)
+              (setq-local agent-log--session-project home)
+              (insert (format "<!-- session: older -->\n<!-- source: %s -->\n" file))
+              (agent-log-resume-session)
+              (agent-log-resume-session))
+            (should (= starts 1))
+            (should-not launched)
+            (should (process-get process 'repair-active))
+            (should (= 1 (length (process-get process 'pending-resumes))))
+            (kill-buffer buffer)
+            (setq threads `(((id . "older") (path . ,file) (cwd . ,home))))
+            (agent-log-codex--finish-catalog-repair process nil)
+            (should (equal launched (list (list "older" home))))
+            (should (equal (gethash "older" agent-log-codex--exact-resume-paths)
+                           file))
+            (agent-log-codex--finish-catalog-repair process nil)
+            (should (= (length launched) 1)))
+        (when (and process (process-live-p process)) (delete-process process))
+        (when (buffer-live-p buffer) (kill-buffer buffer))))))
+
+(ert-deftest agent-log-test-codex-resume-session/refresh-fails-closed ()
+  "Missing IDs, failed discovery, and changed accounts never launch."
+  (require 'codex)
+  (dolist (failure '(absent failed account))
+    (let* ((home "/tmp/agent-log-resume-test/")
+           (active-home home)
+           (agent-log-codex--catalog-repairs (make-hash-table :test #'equal))
+           (process (make-pipe-process :name "agent-log-test-repair" :noquery t))
+           messages launched)
+      (unwind-protect
+          (cl-letf (((symbol-function 'agent-log-codex--effective-home)
+                     (lambda (_backend) active-home))
+                    ((symbol-function 'agent-log--read-sessions) (lambda (_) nil))
+                    ((symbol-function 'agent-log-codex--cached-home-threads)
+                     (lambda (_) nil))
+                    ((symbol-function 'message)
+                     (lambda (format-string &rest args)
+                       (push (apply #'format format-string args) messages))))
+            (process-put process 'repair-active t)
+            (process-put process 'repair-home home)
+            (puthash home (list :process process) agent-log-codex--catalog-repairs)
+            (agent-log-codex--call-with-resume-session
+             agent-log-test--codex-backend "missing"
+             (lambda (_) (setq launched t)))
+            (when (eq failure 'account) (setq active-home "/tmp/other-account/"))
+            (agent-log-codex--finish-catalog-repair
+             process (and (eq failure 'failed) "timeout"))
+            (should-not launched)
+            (should-not (process-get process 'pending-resumes))
+            (should
+             (seq-some
+              (lambda (text)
+                (string-match-p
+                 (pcase failure
+                   ('absent "absent from the refreshed")
+                   ('failed "availability is unknown")
+                   ('account "account changed"))
+                 text))
+              messages)))
+        (agent-log-codex--stop-catalog-process process nil)))))
+
+(ert-deftest agent-log-test-codex-resume-session/cache-published-before-exit ()
+  "A published cache cannot bypass an already queued resume."
+  (let* ((home "/tmp/agent-log-resume-test/")
+         (agent-log-codex--catalog-repairs (make-hash-table :test #'equal))
+         (process (make-pipe-process :name "agent-log-test-repair" :noquery t)))
+    (unwind-protect
+        (cl-letf (((symbol-function 'agent-log-codex--effective-home)
+                   (lambda (_) home))
+                  ((symbol-function 'agent-log--read-sessions)
+                   (lambda (_) (ert-fail "Pending resume must win over cache"))))
+          (puthash home (list :process process) agent-log-codex--catalog-repairs)
+          (process-put process 'pending-resumes (list (cons "session" #'ignore)))
+          (agent-log-codex--call-with-resume-session
+           agent-log-test--codex-backend "session"
+           (lambda (_) (ert-fail "Must not launch twice"))))
+      (agent-log-codex--stop-catalog-process process nil))))
+
 (ert-deftest agent-log-test-codex-resume-session/rejects-noncanonical-id ()
   "Refuses a raw rollout UUID that Codex's thread catalog cannot resume."
   (let ((codex-terminal-backend 'app-server)
@@ -4309,7 +4421,7 @@ archived threads must survive."
               ((symbol-function 'codex--start-subcommand)
                (lambda (&rest _) (setq launched t))))
       (should-error
-       (agent-log--resume-session agent-log-test--codex-backend "raw-child")
+       (agent-log-codex--prepare-resume agent-log-test--codex-backend "raw-child")
        :type 'user-error)
       (should-not launched))))
 
