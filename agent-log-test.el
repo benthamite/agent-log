@@ -4265,6 +4265,8 @@ archived threads must survive."
                  (setq cached (cons session-id file))))
               ((symbol-function 'file-readable-p)
                (lambda (file) (equal file "/tmp/exact-rollout.jsonl")))
+              ((symbol-function 'agent-log-codex--rollout-session-meta)
+               (lambda (_file) `((id . "sid-123") (cwd . ,temporary-file-directory))))
               ((symbol-function 'codex--start-subcommand)
                (lambda (&rest _)
                  (ert-fail "app-server resume should not use terminal subcommand"))))
@@ -4272,6 +4274,64 @@ archived threads must survive."
     (should (equal called "sid-123"))
     (should (equal cached
                    '("sid-123" . "/tmp/exact-rollout.jsonl")))))
+
+(ert-deftest agent-log-test-codex-resume-session/relocated-project ()
+  "Resume from an old rendered log uses the relocated transcript directory."
+  (require 'codex)
+  (agent-log-test--with-temp-dir
+    (let* ((old (file-name-as-directory
+                 (expand-file-name "old" agent-log-test--dir)))
+           (new (file-name-as-directory
+                 (expand-file-name "new" agent-log-test--dir)))
+           (source (agent-log-test--write-file
+                    "rollout.jsonl"
+                    (concat (json-serialize
+                             `((type . "session_meta")
+                               (payload . ((id . "moved") (cwd . ,new)))))
+                            "\n")))
+           (codex-terminal-backend 'app-server)
+           (agent-log-codex--exact-resume-paths (make-hash-table :test #'equal))
+           launched)
+      (make-directory old)
+      (make-directory new)
+      (cl-letf (((symbol-function 'agent-log--read-sessions)
+                 (lambda (_backend)
+                   `(("moved" :project ,old :file ,source))))
+                ((symbol-function 'codex--cache-session-transcript) #'ignore)
+                ((symbol-function 'codex--app-server-launch-resume-session)
+                 (lambda (id) (setq launched (list id default-directory)))))
+        (with-temp-buffer
+          (setq default-directory old)
+          (setq-local agent-log--backend agent-log-test--codex-backend)
+          (setq-local agent-log--session-project old)
+          (insert (format "<!-- session: moved -->\n<!-- source: %s -->\n" source))
+          (agent-log-resume-session)
+          (should (equal launched (list "moved" new)))
+          (should (equal (gethash "moved" agent-log-codex--exact-resume-paths)
+                         source)))))))
+
+(ert-deftest agent-log-test-codex-resume-session/rejects-invalid-header ()
+  "Invalid canonical transcript metadata never launches in the cached project."
+  (require 'codex)
+  (agent-log-test--with-temp-dir
+    (dolist (payload `(((id . "other") (cwd . ,agent-log-test--dir))
+                       ((id . "moved"))
+                       ((id . "moved") (cwd . "relative"))
+                       ((id . "moved")
+                        (cwd . ,(expand-file-name "missing" agent-log-test--dir)))))
+      (let* ((source (agent-log-test--write-file
+                      "invalid.jsonl"
+                      (concat (json-serialize
+                               `((type . "session_meta") (payload . ,payload)))
+                              "\n")))
+             (agent-log--session-project agent-log-test--dir))
+        (cl-letf (((symbol-function 'codex--cache-session-transcript)
+                   (lambda (&rest _) (ert-fail "Invalid session was cached"))))
+          (should-error
+           (agent-log-codex--prepare-resume
+            agent-log-test--codex-backend "moved"
+            `("moved" :project ,agent-log-test--dir :file ,source))
+           :type 'user-error))))))
 
 (ert-deftest agent-log-test-codex-exact-resume/uses-catalog-path ()
   "Agent Log app-server resume sends the exact catalog path without rescanning."
@@ -4300,7 +4360,12 @@ archived threads must survive."
   (require 'codex)
   (agent-log-test--with-temp-dir
     (let* ((home (file-name-as-directory agent-log-test--dir))
-           (file (agent-log-test--write-file "exact.jsonl" "{}\n"))
+           (file (agent-log-test--write-file
+                  "exact.jsonl"
+                  (concat (json-serialize
+                           `((type . "session_meta")
+                             (payload . ((id . "older") (cwd . ,home)))))
+                          "\n")))
            (agent-log-codex--catalog-repairs (make-hash-table :test #'equal))
            (agent-log-codex--exact-resume-paths (make-hash-table :test #'equal))
            (codex-terminal-backend 'app-server)

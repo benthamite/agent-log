@@ -1117,10 +1117,10 @@ SESSION, when supplied, is the already discovered canonical entry.
 Record the session's project in `agent-log--session-project', cache the
 canonical transcript with the codex package, and, when the effective
 `codex-terminal-backend' is `app-server', register the transcript so
-the resume is path-exact.  Return the project directory recorded in the
-catalog, or nil when it names no usable directory.  Signal a
-`user-error' when SESSION-ID is not in the catalog, the codex package
-is unavailable, or the transcript is unreadable."
+the resume is path-exact.  Return the current project directory from the
+transcript header, whose identity must match SESSION-ID.  Signal a
+`user-error' when the catalog, transcript, project directory, or codex
+package cannot support this resume."
   (let ((session (or session
                      (assoc session-id (agent-log--read-sessions backend)))))
     (unless session
@@ -1128,14 +1128,13 @@ is unavailable, or the transcript is unreadable."
        "Codex session %s is not in the canonical interactive thread catalog"
        session-id))
     (let ((transcript (plist-get (cdr session) :file)))
-      (setq agent-log--session-project
-            (or (plist-get (cdr session) :project)
-                agent-log--session-project))
       (unless (require 'codex nil t)
         (user-error "Package `codex' is required but not available"))
       (unless (and (stringp transcript) (file-readable-p transcript))
         (user-error "Canonical Codex transcript is not readable: %s"
                     transcript))
+      (setq agent-log--session-project
+            (agent-log-codex--resume-project transcript session-id))
       (when (fboundp 'codex--cache-session-transcript)
         (codex--cache-session-transcript session-id transcript))
       (when (and (eq codex-terminal-backend 'app-server)
@@ -1143,11 +1142,22 @@ is unavailable, or the transcript is unreadable."
         (agent-log-codex--install-exact-resume-advice)
         (puthash session-id transcript
                  agent-log-codex--exact-resume-paths))
-      (when (and agent-log--session-project
-                 (stringp agent-log--session-project)
-                 (not (string-empty-p agent-log--session-project))
-                 (file-directory-p agent-log--session-project))
-        agent-log--session-project))))
+      agent-log--session-project)))
+
+(defun agent-log-codex--resume-project (transcript session-id)
+  "Read the current project from TRANSCRIPT after verifying SESSION-ID.
+Catalog and rendered metadata can retain a previous project after relocation."
+  (let* ((meta (agent-log-codex--rollout-session-meta transcript))
+         (directory (alist-get 'cwd meta)))
+    (unless (equal (alist-get 'id meta) session-id)
+      (user-error "Canonical Codex transcript identity does not match %s: %s"
+                  session-id transcript))
+    (unless (and (stringp directory)
+                 (file-name-absolute-p directory)
+                 (file-directory-p directory))
+      (user-error "Codex session %s has no usable project directory: %s"
+                  session-id directory))
+    (file-name-as-directory directory)))
 
 ;;;;;; Current-buffer session detection
 
