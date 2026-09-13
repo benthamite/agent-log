@@ -723,9 +723,18 @@ display of non-ASCII characters and crashing integrations that serialize
 the buffer content as JSON.
 
    The command ‘agent-log-sync-sessions’ renders all ordinary,
-non-ignored sessions that are unrendered or stale.  It processes
-sessions one at a time using ‘run-with-timer’ to avoid blocking Emacs,
-then commits the shared index once.  When a session's rendered path
+non-ignored sessions that are unrendered or stale.  It parses and
+renders sessions one at a time in background Emacs subprocesses, then
+commits the shared index once.  Automatic single-session sync uses the
+same subprocess path; its initial index lookup and index update also run
+in the worker.  Workers inherit the rendering and redaction options and
+write private temporary files; Emacs publishes each completed render and
+updates open buffers.  If another operation updates the index,
+single-session sync prepares a fresh index update without repeating the
+render, retrying up to three times.  If the source or summary changes
+during rendering, a newer sync supersedes it, or index publication
+exhausts those retries, the stale result is rejected and the session
+remains eligible for a later sync.  When a session's rendered path
 changes, the superseded file it owned is moved to the operating system
 Trash; no other rendered file is touched.  Open session buffers follow
 the new rendered path and source watcher before the old file is removed,
@@ -1058,15 +1067,19 @@ trailing slash to match the format returned by ‘claude-code--directory’,
 ensuring that buffer names, concurrent session detection, and modeline
 display all work correctly.  For Codex sessions, this requires the
 ‘codex’ package.  Agent Log first verifies the ID against the current
-canonical catalog, then passes both that ID and the catalog's exact
-transcript path to app-server ‘thread/resume’.  It does not rescan
-rollouts or fall back to another same-ID file if the canonical path
-disappears.  The CLI backend uses ‘codex resume’ for the same
-catalog-validated ID.  The keybinding is ‘r’ in ‘agent-log-mode’.  When
-the *note agent integration: Agent integration. is active, resuming
-additionally behaves as described there: live sessions are switched to
-rather than duplicated, and new resumes are routed through the ‘agent’
-dispatcher.
+canonical catalog, then reads the exact transcript header to verify its
+identity and obtain its current project directory.  This makes an old
+rendered log resume in the new project after relocation, even while the
+catalog still names the old project.  An unreadable or mismatched header
+or unavailable project directory stops the resume.  Agent Log then
+passes both that ID and the catalog's exact transcript path to
+app-server ‘thread/resume’.  It does not rescan rollouts or fall back to
+another same-ID file if the canonical path disappears.  The CLI backend
+uses ‘codex resume’ for the same catalog-validated ID.  The keybinding
+is ‘r’ in ‘agent-log-mode’.  When the *note agent integration: Agent
+integration. is active, resuming additionally behaves as described
+there: live sessions are switched to rather than duplicated, and new
+resumes are routed through the ‘agent’ dispatcher.
 
 
 File: agent-log.info,  Node: Agent integration,  Next: Secret redaction,  Prev: Commands,  Up: Top
@@ -1892,40 +1905,40 @@ Node: Commands21957
 Node: Session browsing22284
 Node: Rendered directory29977
 Node: Sync and rendering30551
-Node: Navigation32721
-Node: Section visibility33289
-Node: Copying34161
-Node: Summary generation34639
-Node: Automatic sync and summarization on session end38172
-Node: Session rename43024
-Node: AI search45101
-Node: Session resumption48504
-Node: Agent integration50507
-Node: Secret redaction57261
-Node: Coverage58285
-Node: Integration59203
-Node: Commands (1)61078
-Node: User options (1)64215
-Node: agent-log-mode66955
-Node: agent-log-search-mode68965
-Node: Transient menu69827
-Node: How it works71439
-Node: Backend architecture71706
-Node: Data sources73734
-Node: Claude Code74008
-Node: Codex74626
-Node: Rendered directory structure77284
-Node: Rendering pipeline79710
-Node: Live update mechanism81789
-Node: Troubleshooting82501
-Node: No sessions found82730
-Node: Rendered files not updating83111
-Node: Live updates not working83605
-Node: Development84046
-Node: License84343
-Node: Indices84471
-Node: Function index84608
-Node: Variable index87099
+Node: Navigation33346
+Node: Section visibility33914
+Node: Copying34786
+Node: Summary generation35264
+Node: Automatic sync and summarization on session end38797
+Node: Session rename43649
+Node: AI search45726
+Node: Session resumption49129
+Node: Agent integration51462
+Node: Secret redaction58216
+Node: Coverage59240
+Node: Integration60158
+Node: Commands (1)62033
+Node: User options (1)65170
+Node: agent-log-mode67910
+Node: agent-log-search-mode69920
+Node: Transient menu70782
+Node: How it works72394
+Node: Backend architecture72661
+Node: Data sources74689
+Node: Claude Code74963
+Node: Codex75581
+Node: Rendered directory structure78239
+Node: Rendering pipeline80665
+Node: Live update mechanism82744
+Node: Troubleshooting83456
+Node: No sessions found83685
+Node: Rendered files not updating84066
+Node: Live updates not working84560
+Node: Development85001
+Node: License85298
+Node: Indices85426
+Node: Function index85563
+Node: Variable index88054
 
 End Tag Table
 

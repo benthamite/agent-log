@@ -3492,6 +3492,241 @@ session."
     (should (eq (plist-get result :stage) 'render))
     (should (= (length (plist-get result :failures)) 1))))
 
+(ert-deftest agent-log-test-sync-session/real-worker ()
+  "Single-session sync returns before rendering and preserves redaction."
+  (agent-log-test--with-temp-dir
+    (let* ((agent-log-rendered-directory
+            (expand-file-name "rendered" agent-log-test--dir))
+           (agent-log--index-cache nil)
+           (agent-log--index-cache-state nil)
+           (agent-log-redact-extra-patterns '(("worker-secret" . "TEST")))
+           (source (agent-log-test--write-file
+                    "projects/session.jsonl"
+                    (concat "{\"type\":\"user\",\"timestamp\":"
+                            "\"2026-09-12T12:00:00Z\",\"message\":{"
+                            "\"role\":\"user\",\"content\":\"worker-secret hello\"}}\n")))
+           (session (list "async-test" :file source :project "/tmp/async"
+                          :backend (agent-log--make-claude
+                                    :name "Claude" :key 'claude-code
+                                    :directory agent-log-test--dir)))
+           (deadline (+ (float-time) 20))
+           (callbacks 0)
+           (read-index (symbol-function 'agent-log--read-index))
+           heartbeat process)
+      (unwind-protect
+          (cl-letf (((symbol-function 'agent-log--read-index)
+                     (lambda ()
+                       (when (= callbacks 0)
+                         (ert-fail "Index parsed in the parent Emacs"))
+                       (funcall read-index)))
+                    ((symbol-function 'agent-log--write-index)
+                     (lambda (&rest _)
+                       (ert-fail "Index serialized in the parent Emacs"))))
+            (setq process
+                  (agent-log--sync-session
+                   session (lambda () (cl-incf callbacks))))
+            (should (processp process))
+            (should (= callbacks 0))
+            (run-with-timer 0 nil (lambda () (setq heartbeat t)))
+            (while (and (= callbacks 0) (< (float-time) deadline))
+              (accept-process-output nil 0.02))
+            (should heartbeat)
+            (should (= callbacks 1))
+            (should-not (process-live-p process))
+            (let* ((entry (gethash "async-test" (agent-log--read-index)))
+                   (file (plist-get entry :file))
+                   (text (with-temp-buffer
+                           (insert-file-contents file)
+                           (buffer-string))))
+              (should (string-match-p "2026-09-12_12-00" file))
+              (should (string-match-p "hello" text))
+              (should (string-match-p "REDACTED:TEST" text))
+              (should-not (string-match-p "worker-secret" text))
+              (should (= (plist-get entry :jsonl-size)
+                         (file-attribute-size (file-attributes source))))
+              (let ((mtime (file-attribute-modification-time (file-attributes file))))
+                (agent-log--sync-session session (lambda () (cl-incf callbacks)))
+                (while (and (< callbacks 2) (< (float-time) deadline))
+                  (accept-process-output nil 0.02))
+                (should (= callbacks 2))
+                (should (equal mtime (file-attribute-modification-time
+                                     (file-attributes file))))))
+            (should-not (file-exists-p (car (last (process-command process))))))
+        (when (and process (process-live-p process))
+          (delete-process process))))))
+
+(ert-deftest agent-log-test-render-async/source-changed ()
+  "An append after worker launch prevents stale publication."
+  (agent-log-test--with-temp-dir
+    (let* ((agent-log-rendered-directory
+            (expand-file-name "rendered" agent-log-test--dir))
+           (agent-log--index-cache nil)
+           (agent-log--index-cache-state nil)
+           (source (agent-log-test--write-file "session.jsonl" ""))
+           (session (list "changed" :file source :project "/tmp/async"
+                          :backend agent-log-test--claude-backend))
+           (deadline (+ (float-time) 20))
+           (callbacks 0)
+           failure process)
+      (unwind-protect
+          (progn
+            (setq process
+                  (agent-log--render-session-async
+                   session nil nil
+                   (lambda (err) (setq failure err) (cl-incf callbacks))))
+            (write-region "{}\n" nil source t 'quiet)
+            (while (and (= callbacks 0) (< (float-time) deadline))
+              (accept-process-output nil 0.02))
+            (should (= callbacks 1))
+            (should (string-match-p "source changed"
+                                    (error-message-string failure)))
+            (should-not (gethash "changed" (agent-log--read-index)))
+            (should-not (file-exists-p (car (last (process-command process))))))
+        (when (and process (process-live-p process))
+          (delete-process process))))))
+
+(ert-deftest agent-log-test-render-async/publication-conflicts ()
+  "Reject new target owners, changed summaries and superseded renders."
+  (dolist (conflict '(owner summary superseded worker-error index))
+    (agent-log-test--with-temp-dir
+      (let* ((agent-log-rendered-directory
+              (expand-file-name "rendered" agent-log-test--dir))
+             (agent-log--index-cache nil)
+             (agent-log--index-cache-state nil)
+             (source (agent-log-test--write-file "session.jsonl" ""))
+             (metadata (list :file source :project "/tmp/async"
+                             :backend agent-log-test--claude-backend))
+             (session (cons "conflict" metadata))
+             (index (make-hash-table :test #'equal))
+             (agent-log-backends
+              (if (eq conflict 'worker-error)
+                  '((claude-code . agent-log-test-missing-feature))
+                agent-log-backends))
+             (deadline (+ (float-time) 20))
+             (callbacks 0)
+             failure process newer)
+        (when (eq conflict 'summary)
+          (puthash "conflict" (list :summary "Before" :summary-oneline "Before")
+                   index)
+          (agent-log--write-index index))
+        (unwind-protect
+            (progn
+              (setq process
+                    (agent-log--render-session-async
+                     session index (not (eq conflict 'index))
+                     (lambda (err) (setq failure err) (cl-incf callbacks))))
+              (pcase conflict
+                ('index
+                 (agent-log--index-update-props "other" '(:summary "New")))
+                ('owner
+                 (let ((target (agent-log--rendered-filepath "conflict" metadata)))
+                   (make-directory (file-name-directory target) t)
+                   (with-temp-file target (insert "Unrelated file"))))
+                ('summary
+                 (agent-log--index-merge index "conflict" '(:summary "After"))
+                 (agent-log--write-index index))
+                ('superseded
+                 (setq newer
+                       (agent-log--render-session-async
+                        session nil nil (lambda (_err) nil)))))
+              (while (and (or (= callbacks 0)
+                              (and newer (process-live-p newer)))
+                          (< (float-time) deadline))
+                (accept-process-output nil 0.02))
+              (should (= callbacks 1))
+              (ert-info ((format "Conflict: %s" conflict))
+                (if (eq conflict 'index)
+                    (progn
+                      (should-not failure)
+                      (should (plist-get (gethash "conflict" (agent-log--read-index))
+                                         :file))
+                      (should (equal (plist-get (gethash "other" (agent-log--read-index))
+                                                :summary)
+                                     "New")))
+                  (should failure)))
+              (unless (eq conflict 'index)
+                (should
+                 (string-match-p
+                (pcase conflict
+                  ('owner "belongs to another\\|owned by another")
+                  ('index "index changed")
+                  ('summary "summary changed")
+                  ('superseded "superseded")
+                  ('worker-error "Cannot open load file"))
+                  (error-message-string failure))))
+              (should-not
+               (file-exists-p (car (last (process-command process))))))
+          (dolist (worker (list process newer))
+            (when (and worker (process-live-p worker))
+              (delete-process worker))))))))
+
+(ert-deftest agent-log-test-render-async/startup-failure ()
+  "Process creation failure calls back once and removes private state."
+  (agent-log-test--with-temp-dir
+    (let* ((agent-log-rendered-directory agent-log-test--dir)
+           (source (agent-log-test--write-file "session.jsonl" ""))
+           (session (list "startup" :file source
+                          :backend agent-log-test--claude-backend))
+           (callbacks 0)
+           state-file failure)
+      (cl-letf (((symbol-function 'make-process)
+                 (lambda (&rest arguments)
+                   (setq state-file (car (last (plist-get arguments :command))))
+                   (error "Cannot start worker"))))
+        (agent-log--render-session-async
+         session nil nil
+         (lambda (err) (setq failure err) (cl-incf callbacks))))
+      (should (= callbacks 1))
+      (should (equal failure '(error "Cannot start worker")))
+      (should-not (file-exists-p (file-name-directory state-file))))))
+
+(ert-deftest agent-log-test-render-async/concurrent-sessions ()
+  "Concurrent sessions both publish without losing either index entry."
+  (agent-log-test--with-temp-dir
+    (let* ((agent-log-rendered-directory agent-log-test--dir)
+           (agent-log--index-cache nil)
+           (agent-log--index-cache-state nil)
+           (source (agent-log-test--write-file "session.jsonl" ""))
+           (metadata (list :file source :backend agent-log-test--claude-backend))
+           (deadline (+ (float-time) 20))
+           results)
+      (dolist (sid '("first" "second"))
+        (agent-log--render-session-async
+         (cons sid metadata) nil nil
+         (lambda (err) (push (cons sid err) results))))
+      (while (and (< (length results) 2) (< (float-time) deadline))
+        (accept-process-output nil 0.02))
+      (should (= (length results) 2))
+      (should-not (cdr (assoc "first" results)))
+      (should-not (cdr (assoc "second" results)))
+      (let ((index (agent-log--read-index-strict)))
+        (should (= (hash-table-count (agent-log--read-index)) 2))
+        (dolist (sid '("first" "second"))
+          (should (file-exists-p (plist-get (gethash sid index) :file))))))))
+
+(ert-deftest agent-log-test-sync-index/preserves-newer-render ()
+  "Deferred archive publication preserves a concurrent sync and summary."
+  (agent-log-test--with-temp-dir
+    (let ((agent-log-rendered-directory agent-log-test--dir)
+          (agent-log--index-cache nil)
+          (agent-log--index-cache-state nil)
+          (baseline (make-hash-table :test #'equal))
+          (working (make-hash-table :test #'equal))
+          (fresh (make-hash-table :test #'equal)))
+      (puthash "raced" '(:file "old.md" :jsonl-size 1) baseline)
+      (puthash "raced" '(:file "archive.md" :jsonl-size 2) working)
+      (puthash "raced" '(:file "newer.md" :jsonl-size 3) fresh)
+      (puthash "normal" '(:file "normal.md" :jsonl-size 4) working)
+      (puthash "normal" '(:summary "Concurrent summary") fresh)
+      (agent-log--write-index fresh)
+      (agent-log--commit-sync-index
+       working '(("raced") ("normal")) baseline)
+      (let ((result (agent-log--read-index-strict)))
+        (should (equal (gethash "raced" result) (gethash "raced" fresh)))
+        (should (equal (plist-get (gethash "normal" result) :file) "normal.md"))
+        (should (equal (plist-get (gethash "normal" result) :summary)
+                       "Concurrent summary"))))))
+
 ;;;;; Append to file
 
 (ert-deftest agent-log-test-append-to-file ()

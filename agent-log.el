@@ -893,7 +893,7 @@ active backends (e.g. Claude Code or Codex)."
 ;;;###autoload
 (defun agent-log-sync-sessions (&optional callback)
   "Render all unrendered or stale sessions.
-Uses timers to avoid blocking Emacs.  When CALLBACK is non-nil,
+Renders each session in a subprocess.  When CALLBACK is non-nil,
 call it exactly once with a terminal result plist.  Successful results
 have `:ok' non-nil.  Failed results have `:ok' nil, a `:stage', and
 either `:failures' or `:error'."
@@ -902,13 +902,14 @@ either `:failures' or `:error'."
          (index (agent-log--read-index-strict))
          (_validated (agent-log--validate-render-sync-plan sessions))
          (pending (agent-log--pending-sessions sessions index))
-         failures
+         (baseline (make-hash-table :test #'equal))
+         successful failures
          (finish
           (lambda ()
             (let* ((index-error
                     (condition-case err
                         (progn
-                          (agent-log--commit-sync-index index pending)
+                          (agent-log--commit-sync-index index successful baseline)
                           nil)
                       (error err)))
                    (result
@@ -930,6 +931,8 @@ either `:failures' or `:error'."
                            (length (plist-get result :failures))))))
               (when callback
                 (funcall callback result))))))
+    (dolist (session pending)
+      (puthash (car session) (copy-tree (gethash (car session) index)) baseline))
     (if (null pending)
         (progn
           (message "All %d sessions up to date" (length sessions))
@@ -939,7 +942,7 @@ either `:failures' or `:error'."
        pending 0 (length pending) finish
        (lambda (session err)
          (push (cons session err) failures))
-       index t))))
+       index t (lambda (session) (push session successful))))))
 
 (defun agent-log--validate-render-sync-plan (sessions)
   "Validate SESSIONS before sync performs any filesystem mutation.
@@ -976,17 +979,11 @@ owner.  Signal on the first conflict; return non-nil otherwise."
     t))
 
 (defun agent-log--sync-session (session &optional callback)
-  "Render SESSION if it is unrendered or stale.
+  "Render SESSION asynchronously if it is unrendered or stale.
 When CALLBACK is non-nil, call it with no arguments after the
 session has been checked."
-  (let* ((index (agent-log--read-index))
-         (pending (agent-log--pending-sessions (list session) index)))
-    (if (null pending)
-        (progn
-          (message "Session %s up to date" (car session))
-          (when callback (funcall callback)))
-      (message "Syncing session %s..." (car session))
-      (agent-log--sync-next pending 0 1 callback))))
+  (message "Syncing session %s..." (car session))
+  (agent-log--sync-next (list session) 0 1 callback))
 
 (defun agent-log--pending-sessions (sessions index)
   "Return sessions from SESSIONS that need rendering per INDEX."
@@ -1016,33 +1013,263 @@ session has been checked."
 
 (defun agent-log--sync-next
     (remaining done total &optional callback error-callback
-               index defer-index-write)
+               index defer-index-write success-callback)
   "Render the next session in REMAINING.
 DONE sessions rendered so far out of TOTAL.  When CALLBACK is
 non-nil, call it with no arguments after the last session.
 When ERROR-CALLBACK is non-nil, call it with the failed session and
 error data for each render failure.  INDEX and DEFER-INDEX-WRITE are
-passed through to `agent-log--ensure-rendered'."
+passed through to `agent-log--ensure-rendered'.  SUCCESS-CALLBACK,
+when non-nil, receives each successfully rendered session."
   (if (null remaining)
       (progn
         (message "Sync complete: rendered %d session(s)" total)
         (when callback (funcall callback)))
-    (let* ((session (car remaining))
-           (sid (car session))
-           (meta (cdr session)))
+    (let ((session (car remaining)))
+      (agent-log--render-session-async
+       session index defer-index-write
+       (lambda (err)
+         (when err
+           (message "Failed to render %s: %s"
+                    (car session) (error-message-string err))
+           (when error-callback
+             (funcall error-callback session err)))
+         (when (and (not err) success-callback)
+           (funcall success-callback session))
+         (run-with-timer agent-log-sync-yield-delay nil #'agent-log--sync-next
+                         (cdr remaining) (1+ done) total callback
+                         error-callback index defer-index-write
+                         success-callback))))))
+
+(defvar agent-log--render-generations (make-hash-table :test #'equal)
+  "Latest render token for each rendered directory and session ID.")
+
+(define-error 'agent-log--index-changed "Session index changed during rendering")
+
+(defun agent-log--render-session-async
+    (session index defer-index-write callback)
+  "Render SESSION in a subprocess, then publish it in this Emacs.
+INDEX and DEFER-INDEX-WRITE control index publication as in
+`agent-log--ensure-rendered'.  Call CALLBACK once with nil on success
+or error data on failure.  The worker never changes the shared index
+or canonical rendered files."
+  (let* (directory state render-index index-state finished
+         (retries 0)
+         (rendered-directory agent-log-rendered-directory)
+         (key (cons rendered-directory (car session)))
+         (token (list t))
+         (metadata (copy-sequence (cdr session)))
+         (worker-index (make-hash-table :test #'equal)))
+    (cl-labels
+        ((finish (err)
+           (if finished
+               (when err (signal (car err) (cdr err)))
+             (setq finished t)
+             (when (eq token (gethash key agent-log--render-generations))
+               (remhash key agent-log--render-generations))
+             (condition-case cleanup-error
+                 (when directory (delete-directory directory t))
+               (error (setq err (or err cleanup-error))))
+             (funcall callback err)))
+         (launch (index-only)
+           (let ((state-file
+                  (agent-log--render-worker-state-file
+                   (cons (car session) metadata) worker-index directory
+                   (not defer-index-write) index-only))
+                 (default-directory temporary-file-directory))
+             (make-process
+              :name (format "agent-log-render-%s" (car session))
+              :buffer nil :noquery t :connection-type 'pipe
+              :command (agent-log--summary-worker-command state-file)
+              :sentinel
+              (lambda (process _event)
+                (when (and (memq (process-status process) '(exit signal))
+                           (not (process-get process 'agent-log-finished)))
+                  (process-put process 'agent-log-finished t)
+                  (complete process))))))
+         (complete (process)
+           (let ((agent-log-rendered-directory rendered-directory))
+             (condition-case err
+                 (progn
+                   (unless (eq token (gethash key agent-log--render-generations))
+                     (error "Session render superseded by a newer sync"))
+                   (agent-log--publish-worker-render
+                    process (cons (car session) metadata) state
+                    worker-index directory render-index defer-index-write
+                    index-state)
+                   (finish nil))
+               (agent-log--index-changed
+                (if (>= retries 3)
+                    (finish err)
+                  (condition-case retry-error
+                      (progn
+                        (cl-incf retries)
+                        (setq index-state (agent-log--index-file-state))
+                        (launch t))
+                    (error (finish retry-error)))))
+               (error (finish err))))))
       (condition-case err
-          (agent-log--ensure-rendered
-           sid meta index defer-index-write)
-        (error
-         (message "Failed to render %s: %s"
-                  sid (error-message-string err))
-         (when error-callback
-           (funcall error-callback session err))))
-      ;; Yield to the event loop between sessions to keep Emacs responsive
-      ;; and avoid deep recursion when processing hundreds of sessions.
-      (run-with-timer agent-log-sync-yield-delay nil #'agent-log--sync-next
-                      (cdr remaining) (1+ done) total callback
-                      error-callback index defer-index-write))))
+          (progn
+            (setq directory (make-temp-file "agent-log-render-" t)
+                  state (agent-log--render-source-state
+                         (plist-get metadata :file)))
+            (puthash key token agent-log--render-generations)
+            (setq render-index (or index (make-hash-table :test #'equal))
+                  index-state (agent-log--index-file-state)
+                  metadata (plist-put metadata :backend
+                                      (or (plist-get metadata :backend)
+                                          (agent-log--default-backend))))
+            (puthash (car session)
+                     (copy-tree (gethash (car session) render-index)) worker-index)
+            (launch nil))
+        (error (finish err))))))
+
+(defun agent-log--render-source-state (file)
+  "Return the size, modification time and identity of source FILE."
+  (let ((attributes (file-attributes file)))
+    (list (file-attribute-size attributes)
+          (file-attribute-modification-time attributes)
+          (file-attribute-inode-number attributes)
+          (file-attribute-device-number attributes))))
+
+(defun agent-log--render-worker-state-file
+    (session index directory prepare-index &optional index-only)
+  "Write a worker for SESSION with summary INDEX under DIRECTORY.
+When PREPARE-INDEX is non-nil, also stage the updated archive index.
+When INDEX-ONLY is non-nil, reuse the previously staged render.
+Return the private state file path."
+  (let* ((file (expand-file-name "worker.el" directory))
+         (backend (plist-get (cdr session) :backend))
+         (feature (alist-get (agent-log-backend-key backend)
+                             agent-log-backends)))
+    (unless feature
+      (error "No registered feature for backend %s"
+             (agent-log-backend-key backend)))
+    (with-temp-file file
+      (let ((print-length nil) (print-level nil))
+        (prin1
+         `(let ((result
+                 (condition-case err
+                     (progn
+                       (setq load-path ',load-path load-prefer-newer t)
+                       (require 'agent-log)
+                       (require ',feature)
+                       ,@(when (featurep 'agent-log-redact)
+                           '((require 'agent-log-redact)))
+                       ,@(agent-log--render-worker-settings)
+                       (agent-log--prepare-worker-render
+                        ',session ',index ,directory ,prepare-index ,index-only))
+                   (error (list :ok nil :error err)))))
+            (with-temp-file ,(expand-file-name "result.el" directory)
+              (let ((print-length nil) (print-level nil))
+                (prin1 result (current-buffer)))))
+         (current-buffer))))
+    file))
+
+(defun agent-log--prepare-worker-render
+    (session index directory prepare-index index-only)
+  "Prepare SESSION output in DIRECTORY using summary INDEX.
+When PREPARE-INDEX is non-nil, read and stage the complete disk index.
+When INDEX-ONLY is non-nil, reuse the staged render after verifying
+that its summary still matches the current disk index."
+  (let* ((session-id (car session))
+         (index (if prepare-index (agent-log--read-index-strict) index))
+         (entry (gethash session-id index))
+         (summary (agent-log--rendered-summary-text session-id index))
+         (previous (when index-only
+                     (with-temp-buffer
+                       (insert-file-contents
+                        (expand-file-name "result.el" directory))
+                       (read (current-buffer)))))
+         (pending (or index-only
+                      (not prepare-index)
+                      (agent-log--pending-sessions (list session) index)))
+         (render
+          (cond
+           (index-only
+            (unless (equal summary (plist-get previous :summary))
+              (error "Session summary changed during rendering"))
+            (plist-get previous :render))
+           (pending
+            (agent-log--render-to-file
+             session-id (cdr session) nil index directory))
+           (t (cons (plist-get entry :file) (plist-get entry :jsonl-size))))))
+    (when (and prepare-index pending)
+      (agent-log--stage-render-index session-id render directory index))
+    (list :ok t :render render :entry entry :summary summary
+          :skipped (if index-only (plist-get previous :skipped) (not pending)))))
+
+(defun agent-log--stage-render-index (session-id render directory index)
+  "Stage INDEX with the update for SESSION-ID and RENDER under DIRECTORY."
+  (let ((index (copy-hash-table index)))
+    (puthash session-id (copy-tree (gethash session-id index)) index)
+    (agent-log--index-merge
+     index session-id (list :file (car render) :jsonl-size (cdr render)))
+    (let ((agent-log-rendered-directory directory))
+      (agent-log--write-index index))))
+
+(defun agent-log--publish-worker-render
+    (process session state worker-index directory index defer-index-write
+             index-state)
+  "Publish PROCESS output for SESSION if its source still matches STATE.
+WORKER-INDEX is the summary snapshot used by the worker in DIRECTORY.
+INDEX and DEFER-INDEX-WRITE control publication of render index fields.
+INDEX-STATE is the disk index state captured before starting the worker."
+  (unless (and (eq (process-status process) 'exit)
+               (zerop (process-exit-status process)))
+    (error "Render worker failed (exit %s)" (process-exit-status process)))
+  (let* ((response (with-temp-buffer
+                     (insert-file-contents
+                      (expand-file-name "result.el" directory))
+                     (read (current-buffer))))
+         (result (plist-get response :render)))
+    (unless (plist-get response :ok)
+      (let ((err (plist-get response :error)))
+        (signal (car err) (cdr err))))
+    (unless (and (consp result)
+                 (stringp (car result))
+                 (numberp (cdr result)))
+      (error "Invalid render worker result"))
+    (unless (equal state
+                   (agent-log--render-source-state
+                    (plist-get (cdr session) :file)))
+      (error "Session source changed during rendering"))
+    (when (and defer-index-write
+               (not (equal
+                     (agent-log--rendered-summary-text (car session) worker-index)
+                     (agent-log--rendered-summary-text (car session)))))
+      (error "Session summary changed during rendering"))
+    (unless (or defer-index-write
+                (equal index-state (agent-log--index-file-state)))
+      (signal 'agent-log--index-changed nil))
+    (unless defer-index-write
+      (puthash (car session) (plist-get response :entry) index))
+    (if (plist-get response :skipped)
+        (car result)
+      (agent-log--ensure-rendered
+       (car session) (cdr session) index defer-index-write
+       (list (expand-file-name "rendered.md" directory)
+             (car result) (cdr result))
+       (unless defer-index-write (expand-file-name "_index.el" directory))))))
+
+(defun agent-log--render-worker-settings ()
+  "Return forms restoring rendering and redaction options in a worker."
+  (let (forms)
+    (dolist (variable '(agent-log-directory
+                        agent-log-rendered-directory
+                        agent-log-group-by-project
+                        agent-log-slug-max-length
+                        agent-log-timestamp-format
+                        agent-log-max-tool-input-length
+                        agent-log-max-tool-result-length
+                        agent-log-redact-enabled
+                        agent-log-redact-patterns
+                        agent-log-redact-extra-patterns
+                        agent-log-redact-allowlist
+                        agent-log-redact-hash-salt))
+      (when (boundp variable)
+        (push `(setq ,variable ',(symbol-value variable)) forms)))
+    (nreverse forms)))
 
 (defun agent-log--activate-mode ()
   "Activate `agent-log-mode' with parent mode hooks suppressed.
@@ -1154,10 +1381,12 @@ Existing properties not in PROPS are preserved."
              do (setq existing (plist-put existing key val)))
     (puthash session-id existing index)))
 
-(defun agent-log--commit-sync-index (working-index sessions)
+(defun agent-log--commit-sync-index (working-index sessions &optional baseline)
   "Commit render properties for SESSIONS from WORKING-INDEX once.
 Merge into a fresh disk read so summaries written while rendering are
-preserved.  Only `:file' and `:jsonl-size' belong to archive sync."
+preserved.  Only `:file' and `:jsonl-size' belong to archive sync.
+When BASELINE is non-nil, preserve render fields changed on disk since
+that snapshot, so a concurrent sync cannot lose its newer index entry."
   (when sessions
     (let ((fresh-index (agent-log--read-index-strict))
           changed)
@@ -1166,13 +1395,23 @@ preserved.  Only `:file' and `:jsonl-size' belong to archive sync."
                (entry (gethash session-id working-index))
                (file (plist-get entry :file))
                (jsonl-size (plist-get entry :jsonl-size)))
-          (when (and (stringp file) (numberp jsonl-size))
+          (when (and (stringp file) (numberp jsonl-size)
+                     (or (null baseline)
+                         (equal
+                          (agent-log--render-index-fields
+                           (gethash session-id baseline))
+                          (agent-log--render-index-fields
+                           (gethash session-id fresh-index)))))
             (agent-log--index-merge
              fresh-index session-id
              (list :file file :jsonl-size jsonl-size))
             (setq changed t))))
       (when changed
         (agent-log--write-index fresh-index)))))
+
+(defun agent-log--render-index-fields (entry)
+  "Return the sync-owned fields of index ENTRY for comparison."
+  (list (plist-get entry :file) (plist-get entry :jsonl-size)))
 
 (defun agent-log--index-update-props (session-id props)
   "Atomically merge PROPS into the disk index entry for SESSION-ID.
@@ -1533,11 +1772,13 @@ Returns (:project SHORT-NAME :date DATE-STRING)."
           :date (or date "unknown"))))
 
 (defun agent-log--render-to-file
-    (session-id metadata &optional output-path index)
+    (session-id metadata &optional output-path index staging-directory)
   "Render the JSONL for SESSION-ID to a Markdown file.
 METADATA is a plist with :file, :timestamp, :project, :display.
 If OUTPUT-PATH is given, write there; otherwise compute from METADATA.
 When INDEX is non-nil, reuse it for summary lookup.
+With STAGING-DIRECTORY, write rendered.md there but return the intended
+canonical path without modifying it.
 Returns (RENDERED-PATH . JSONL-SIZE)."
   (let* ((jsonl-file (plist-get metadata :file))
          (backend (or (plist-get metadata :backend)
@@ -1556,6 +1797,9 @@ Returns (RENDERED-PATH . JSONL-SIZE)."
          (rendered-path (or output-path
                             (agent-log--rendered-filepath
                              session-id effective-metadata)))
+         (write-path (if staging-directory
+                         (expand-file-name "rendered.md" staging-directory)
+                       rendered-path))
          (jsonl-size (file-attribute-size (file-attributes jsonl-file)))
          (session-meta (agent-log--extract-session-metadata-from-entries
                         entries)))
@@ -1564,8 +1808,8 @@ Returns (RENDERED-PATH . JSONL-SIZE)."
                      rendered-path session-id backend)))
       (error "Refusing to overwrite rendered path owned by another file: %s"
              rendered-path))
-    (make-directory (file-name-directory rendered-path) t)
-    (with-temp-file rendered-path
+    (make-directory (file-name-directory write-path) t)
+    (with-temp-file write-path
       (insert (agent-log--render-front-matter
                session-id jsonl-file jsonl-size backend))
       (let ((project (plist-get session-meta :project)))
@@ -1595,17 +1839,24 @@ from disk."
               (agent-log--normalize-whitespace summary)))))
 
 (defun agent-log--ensure-rendered
-    (session-id metadata &optional index defer-index-write)
+    (session-id metadata &optional index defer-index-write prepared-render
+                prepared-index)
   "Ensure SESSION-ID has an up-to-date rendered .md file.
 METADATA is a plist with :file, :timestamp, :project, :display.
 When INDEX is non-nil, use and update that hash table.  When
 DEFER-INDEX-WRITE is non-nil, merge into INDEX without writing it;
 archive sync commits the shared index once at the end.
+PREPARED-RENDER, when non-nil, is a (STAGED-PATH CANONICAL-PATH SIZE) list
+to publish instead of parsing and rendering in this Emacs.
+PREPARED-INDEX is an optional staged index file to publish without
+serializing the full index in this Emacs.
 Returns the path to the rendered file."
   (let* ((index (or index (agent-log--read-index)))
          (index-entry (gethash session-id index))
          (rendered-path (when index-entry (plist-get index-entry :file)))
-         (desired-path (agent-log--rendered-filepath session-id metadata))
+         (desired-path (if prepared-render
+                           (nth 1 prepared-render)
+                         (agent-log--rendered-filepath session-id metadata)))
          (cached-size (when index-entry (plist-get index-entry :jsonl-size)))
          (jsonl-file (plist-get metadata :file))
          (current-size (file-attribute-size (file-attributes jsonl-file)))
@@ -1647,14 +1898,22 @@ Returns the path to the rendered file."
                       ;; later failure can only leave an extra copy.
                       (copy-file rendered-path desired-path t t t t))
                     (cons desired-path current-size))
-                (agent-log--render-to-file
-                 session-id metadata nil index))))
+                (if prepared-render
+                    (progn
+                      (make-directory (file-name-directory desired-path) t)
+                      (copy-file (car prepared-render) desired-path t)
+                      (cons desired-path (nth 2 prepared-render)))
+                  (agent-log--render-to-file
+                   session-id metadata nil index)))))
         (if defer-index-write
             (agent-log--index-merge
              index session-id
              (list :file (car result) :jsonl-size (cdr result)))
-          (agent-log--index-update-props
-           session-id (list :file (car result) :jsonl-size (cdr result))))
+          (if prepared-index
+              (agent-log--publish-render-index
+               prepared-index index session-id result)
+            (agent-log--index-update-props
+             session-id (list :file (car result) :jsonl-size (cdr result)))))
         (dolist (buffer live-buffers)
           (with-current-buffer buffer
             (agent-log--retarget-rendered-buffer metadata result)))
@@ -1668,6 +1927,31 @@ Returns the path to the rendered file."
                     rendered-path session-id backend jsonl-file))
           (agent-log--trash-rendered-file rendered-path))
         (car result)))))
+
+(defun agent-log--publish-render-index (file index session-id render)
+  "Publish staged index FILE and update cached INDEX for SESSION-ID.
+RENDER is the canonical rendered path and source size."
+  (make-directory agent-log-rendered-directory t)
+  (let* ((cache (and (equal agent-log--index-cache-state
+                                  (agent-log--index-file-state))
+                     agent-log--index-cache))
+         (target (agent-log--index-file))
+         (temporary (make-temp-file
+                     (expand-file-name "_index-tmp"
+                                       (file-name-directory target)))))
+    (unwind-protect
+        (progn
+          (copy-file file temporary t)
+          (rename-file temporary target t)
+          (agent-log--index-merge
+           index session-id (list :file (car render) :jsonl-size (cdr render)))
+          (when cache
+            (agent-log--index-merge
+             cache session-id (list :file (car render) :jsonl-size (cdr render))))
+          (setq agent-log--index-cache cache
+                agent-log--index-cache-state (and cache (agent-log--index-file-state))))
+      (when (file-exists-p temporary)
+        (delete-file temporary)))))
 
 (defun agent-log--rendered-live-buffers (session-id old-path new-path)
   "Return live buffers for SESSION-ID visiting OLD-PATH or NEW-PATH.
