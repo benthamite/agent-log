@@ -286,7 +286,7 @@ opened explicitly with `agent-log-open-file' or `agent-log-open-session'."
   :type '(repeat regexp))
 
 (defcustom agent-log-session-sort-key 'creation-time
-  "Which timestamp to use when sorting session browser entries.
+  "Which timestamp to display and sort by in the session browser.
 The value `creation-time' sorts by the session timestamp recorded
 by the backend.  The value `modification-time' sorts by the
 source JSONL file's last modification time."
@@ -2230,7 +2230,7 @@ Projects are sorted by most recent session timestamp."
             (backend (plist-get meta :backend))
             (icon (if backend (gethash backend icons "") ""))
             (live-tag (agent-log--live-tag live live-width))
-            (ts (plist-get meta :timestamp))
+            (ts (agent-log--session-sort-value session))
             (date (agent-log--format-epoch-ms ts))
             (project (agent-log--project-field
                       (plist-get meta :project) proj-width))

@@ -3842,6 +3842,38 @@ session."
         (should (equal kicked-ids '("s1")))
         (should (equal opened "s1"))))))
 
+(ert-deftest agent-log-test-build-candidates/displays-sort-timestamp ()
+  "Displayed dates follow the selected chronology, including missing files."
+  (agent-log-test--with-temp-dir
+    (let* ((old-file (agent-log-test--write-file "old.jsonl" "{}\n"))
+           (new-file (agent-log-test--write-file "new.jsonl" "{}\n"))
+           (sessions (list (list "created-newer" :timestamp 300000
+                                 :file old-file :display "First")
+                           (list "modified-newer" :timestamp 60000
+                                 :file new-file :display "Second")
+                           (list "missing" :timestamp 180000
+                                 :file (expand-file-name "missing.jsonl"
+                                                         agent-log-test--dir)
+                                 :display "Third"))))
+      (set-file-times old-file (seconds-to-time 120))
+      (set-file-times new-file (seconds-to-time 240))
+      (cl-letf (((symbol-function 'agent-log--read-index)
+                 (lambda () (make-hash-table :test #'equal))))
+        (dolist (case '((creation-time ("created-newer" "missing" "modified-newer")
+                                      (300000 180000 60000))
+                        (modification-time ("modified-newer" "missing" "created-newer")
+                                           (240000 180000 120000))))
+          (let* ((agent-log-session-sort-key (car case))
+                 (candidates (agent-log--build-candidates
+                              (agent-log--sort-sessions sessions))))
+            (should (equal (mapcar #'cadr candidates) (cadr case)))
+            (cl-loop for candidate in candidates
+                     for timestamp in (caddr case)
+                     do (should (string-match-p
+                                 (regexp-quote
+                                  (agent-log--format-epoch-ms timestamp))
+                                 (car candidate))))))))))
+
 (ert-deftest agent-log-test-build-candidates/includes-session-size ()
   "Includes a human-readable session file size column."
   (agent-log-test--with-temp-dir
