@@ -3874,6 +3874,34 @@ session."
                                   (agent-log--format-epoch-ms timestamp))
                                  (car candidate))))))))))
 
+(ert-deftest agent-log-test-build-candidates/catalog-activity-survives-rewrite ()
+  "Bulk file rewrites do not replace the conversation's recorded activity."
+  (agent-log-test--with-temp-dir
+    (let* ((first (agent-log-test--write-file "first.jsonl" "{}\n"))
+           (second (agent-log-test--write-file "second.jsonl" "{}\n"))
+           (agent-log-session-sort-key 'modification-time)
+           (backend (agent-log--make-codex :name "Codex" :key 'codex))
+           (threads `(((id . "older") (path . ,first)
+                       (createdAt . 120) (updatedAt . 180))
+                      ((id . "newer") (path . ,second)
+                       (createdAt . 60) (updatedAt . 240)))))
+      (set-file-times first (seconds-to-time 1000000))
+      (set-file-times second (seconds-to-time 1000000))
+      (cl-letf (((symbol-function 'agent-log--read-index)
+                 (lambda () (make-hash-table :test #'equal)))
+                ((symbol-function 'agent-log-codex--thread-list)
+                 (lambda (_backend) threads)))
+        (let ((candidates (agent-log--build-candidates
+                           (agent-log--sort-sessions
+                            (agent-log--read-sessions backend)))))
+          (should (equal (mapcar #'cadr candidates) '("newer" "older")))
+          (cl-loop for candidate in candidates
+                   for timestamp in '(240000 180000)
+                   do (should (string-match-p
+                               (regexp-quote
+                                (agent-log--format-epoch-ms timestamp))
+                               (car candidate)))))))))
+
 (ert-deftest agent-log-test-build-candidates/includes-session-size ()
   "Includes a human-readable session file size column."
   (agent-log-test--with-temp-dir
@@ -4202,6 +4230,30 @@ session."
                  (ert-fail "browse path contacted app-server"))))
       (should (equal (agent-log-codex--thread-list backend)
                      '(((id . "cached"))))))))
+
+(ert-deftest agent-log-test-codex-thread-list/refreshes-resumed-activity ()
+  "Appending to a known transcript refreshes the cached activity dates."
+  (agent-log-test--with-temp-dir
+    (let* ((home (file-name-as-directory agent-log-test--dir))
+           (file (agent-log-test--write-file "session.jsonl" "{}\n"))
+           (cache (agent-log-test--write-file "agent-log-thread-catalog.json"
+                                             "{}\n"))
+           (backend (agent-log--make-codex :name "Codex" :key 'codex))
+           (threads `(((id . "existing") (path . ,file))))
+           (repairs 0))
+      (set-file-times file (seconds-to-time 100))
+      (set-file-times cache (seconds-to-time 200))
+      (cl-letf (((symbol-function 'agent-log-codex--effective-home)
+                 (lambda (_backend) home))
+                ((symbol-function 'agent-log-codex--cached-home-threads)
+                 (lambda (_home) threads))
+                ((symbol-function 'agent-log-codex--maybe-start-catalog-repair)
+                 (lambda (_home) (cl-incf repairs))))
+        (should (equal (agent-log-codex--thread-list backend) threads))
+        (should (zerop repairs))
+        (write-region "{}\n" nil file t 'silent)
+        (should (equal (agent-log-codex--thread-list backend) threads))
+        (should (= repairs 1))))))
 
 (ert-deftest agent-log-test-codex-catalog-cache/roundtrip ()
   "Read the detached helper's atomically written persistent cache."

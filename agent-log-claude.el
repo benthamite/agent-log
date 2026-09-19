@@ -108,6 +108,7 @@ renames or profile migrations."
                (push (list sid
                            :display (or (plist-get entry :display) "")
                            :timestamp (plist-get entry :timestamp)
+                           :updated-timestamp (plist-get entry :timestamp)
                            :project project
                            :file-dir dir
                            :file file

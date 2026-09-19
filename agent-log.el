@@ -288,8 +288,9 @@ opened explicitly with `agent-log-open-file' or `agent-log-open-session'."
 (defcustom agent-log-session-sort-key 'creation-time
   "Which timestamp to display and sort by in the session browser.
 The value `creation-time' sorts by the session timestamp recorded
-by the backend.  The value `modification-time' sorts by the
-source JSONL file's last modification time."
+by the backend.  The value `modification-time' sorts by the backend's
+recorded last activity time, using the source JSONL file's modification
+time only for backends that do not supply an activity timestamp."
   :type '(choice (const :tag "Creation time" creation-time)
                  (const :tag "Modification time" modification-time)))
 
@@ -326,7 +327,8 @@ catalog."
   (let ((metadata (cdr session)))
     (pcase agent-log-session-sort-key
       ('modification-time
-       (or (agent-log--session-file-mtime-ms metadata)
+       (or (plist-get metadata :updated-timestamp)
+           (agent-log--session-file-mtime-ms metadata)
            (plist-get metadata :timestamp)))
       (_ (plist-get metadata :timestamp)))))
 

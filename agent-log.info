@@ -411,11 +411,16 @@ project.
    The user option ‘agent-log-session-sort-key’ controls which timestamp
 defines “most recent” in the session browser.  The default,
 ‘creation-time’, sorts by the backend's recorded session timestamp.  Set
-it to ‘modification-time’ to sort by the source JSONL file's last
-modification time instead, so resumed or appended sessions rise to the
-top.  The date column displays the timestamp used for sorting.  If the
-source file is unavailable, modification-time sorting and display use
-the recorded session timestamp.
+it to ‘modification-time’ to sort by the backend's recorded last
+activity: Codex's catalog update time or Claude Code's latest history
+entry.  Copying or rewriting transcript files therefore does not make
+old conversations appear recent.  Backends without an activity timestamp
+retain the file-modification-time behavior; if the source file is
+unavailable too, they use the recorded session timestamp.  The date
+column displays the timestamp used for sorting.  If a Codex transcript
+changes after the catalog snapshot, browsing starts a background catalog
+refresh; its updated activity dates appear on the next browse after that
+refresh completes.
 
    The user option ‘agent-log-ignored-project-regexps’ is a list of
 regular expressions; any session whose working directory matches one of
@@ -1900,47 +1905,47 @@ Node: Display of thinking and tool sections11573
 Node: Timestamps13349
 Node: Tool output limits13750
 Node: Session browser options14688
-Node: Live updates17529
-Node: Summary generation (1)18346
-Node: AI search options19819
-Node: Commands22125
-Node: Session browsing22452
-Node: Rendered directory30145
-Node: Sync and rendering30719
-Node: Navigation33514
-Node: Section visibility34082
-Node: Copying34954
-Node: Summary generation35432
-Node: Automatic sync and summarization on session end38965
-Node: Session rename43817
-Node: AI search45894
-Node: Session resumption49297
-Node: Agent integration51630
-Node: Secret redaction58384
-Node: Coverage59408
-Node: Integration60326
-Node: Commands (1)62201
-Node: User options (1)65338
-Node: agent-log-mode68078
-Node: agent-log-search-mode70088
-Node: Transient menu70950
-Node: How it works72562
-Node: Backend architecture72829
-Node: Data sources74857
-Node: Claude Code75131
-Node: Codex75749
-Node: Rendered directory structure78407
-Node: Rendering pipeline80833
-Node: Live update mechanism82912
-Node: Troubleshooting83624
-Node: No sessions found83853
-Node: Rendered files not updating84234
-Node: Live updates not working84728
-Node: Development85169
-Node: License85466
-Node: Indices85594
-Node: Function index85731
-Node: Variable index88222
+Node: Live updates17867
+Node: Summary generation (1)18684
+Node: AI search options20157
+Node: Commands22463
+Node: Session browsing22790
+Node: Rendered directory30483
+Node: Sync and rendering31057
+Node: Navigation33852
+Node: Section visibility34420
+Node: Copying35292
+Node: Summary generation35770
+Node: Automatic sync and summarization on session end39303
+Node: Session rename44155
+Node: AI search46232
+Node: Session resumption49635
+Node: Agent integration51968
+Node: Secret redaction58722
+Node: Coverage59746
+Node: Integration60664
+Node: Commands (1)62539
+Node: User options (1)65676
+Node: agent-log-mode68416
+Node: agent-log-search-mode70426
+Node: Transient menu71288
+Node: How it works72900
+Node: Backend architecture73167
+Node: Data sources75195
+Node: Claude Code75469
+Node: Codex76087
+Node: Rendered directory structure78745
+Node: Rendering pipeline81171
+Node: Live update mechanism83250
+Node: Troubleshooting83962
+Node: No sessions found84191
+Node: Rendered files not updating84572
+Node: Live updates not working85066
+Node: Development85507
+Node: License85804
+Node: Indices85932
+Node: Function index86069
+Node: Variable index88560
 
 End Tag Table
 

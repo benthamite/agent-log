@@ -172,7 +172,8 @@ Each value is a plist (:display :timestamp :project :file :file-dir
   "Convert canonical Codex THREAD into an Agent Log session for BACKEND."
   (let ((session-id (alist-get 'id thread))
         (file (alist-get 'path thread))
-        (created-at (alist-get 'createdAt thread)))
+        (created-at (alist-get 'createdAt thread))
+        (updated-at (alist-get 'updatedAt thread)))
     (when (and (stringp session-id)
                (stringp file)
                (not (string-empty-p file)))
@@ -180,6 +181,7 @@ Each value is a plist (:display :timestamp :project :file :file-dir
       (list session-id
             :display (or (alist-get 'preview thread) "")
             :timestamp (and (numberp created-at) (* created-at 1000))
+            :updated-timestamp (and (numberp updated-at) (* updated-at 1000))
             :project (or (alist-get 'cwd thread) "")
             :file-dir (file-name-directory file)
             :file file
@@ -198,7 +200,8 @@ session browsing never starts or waits for Codex app-server."
   (let* ((home (agent-log-codex--effective-home backend))
          (indexed (agent-log-codex--cached-home-threads home))
          (state (gethash home agent-log-codex--catalog-repairs)))
-    (if (agent-log-codex--index-covers-rollouts-p home indexed)
+    (if (and (agent-log-codex--index-covers-rollouts-p home indexed)
+             (not (agent-log-codex--activity-newer-than-cache-p home indexed)))
         (progn
           (unless (and (processp (plist-get state :process))
                        (process-live-p (plist-get state :process)))
@@ -208,6 +211,18 @@ session browsing never starts or waits for Codex app-server."
       (unless indexed
         (message "Agent Log: Codex catalog cache is initializing in the background"))
       indexed)))
+
+(defun agent-log-codex--activity-newer-than-cache-p (home threads)
+  "Return non-nil if a transcript in THREADS changed after HOME's cache."
+  (when-let* ((cache-attrs (file-attributes
+                          (agent-log-codex--catalog-cache-file home)))
+              (cache-time (file-attribute-modification-time cache-attrs)))
+    (seq-some
+     (lambda (thread)
+       (when-let* ((file (alist-get 'path thread))
+                   (attrs (file-attributes file)))
+         (time-less-p cache-time (file-attribute-modification-time attrs))))
+     threads)))
 
 (defun agent-log-codex--catalog-cache-file (home)
   "Return Agent Log's persistent Codex catalog cache under HOME."
