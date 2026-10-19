@@ -2436,6 +2436,54 @@ rereading every transcript."
                          "Hello project"))
           (should (numberp (plist-get (cdr session) :timestamp))))))))
 
+(ert-deftest agent-log-test-session-from-id-fast/large-file-parses-head-only ()
+  "Fast session lookup on a large file parses only its head."
+  (agent-log-test--with-temp-dir
+    (let* ((agent-log--metadata-head-bytes 400)
+           (jsonl-path
+            (agent-log-test--write-file
+             "session.jsonl"
+             (concat
+              "{\"type\":\"progress\",\"cwd\":\"/Users/me/project\",\"timestamp\":\"2026-06-04T07:21:52Z\"}\n"
+              "{\"type\":\"user\",\"timestamp\":\"2026-06-04T07:21:52Z\",\"message\":{\"role\":\"user\",\"content\":\"Hello project\"}}\n"
+              (mapconcat
+               (lambda (_)
+                 "{\"type\":\"assistant\",\"timestamp\":\"2026-06-04T07:22:00Z\",\"message\":{\"role\":\"assistant\",\"content\":\"filler\"}}\n")
+               (number-sequence 1 50) "")))))
+      (cl-letf (((symbol-function 'agent-log--find-session-file-any)
+                 (lambda (_sid) jsonl-path))
+                ((symbol-function 'agent-log--backend-for-file)
+                 (lambda (&rest _) agent-log-test--claude-backend))
+                ((symbol-function 'agent-log--parse-and-normalize)
+                 (lambda (&rest _) (error "Whole file parsed"))))
+        (let ((session (agent-log--session-from-id-fast "s1")))
+          (should (equal (plist-get (cdr session) :project)
+                         "/Users/me/project"))
+          (should (equal (plist-get (cdr session) :display)
+                         "Hello project"))
+          (should (numberp (plist-get (cdr session) :timestamp))))))))
+
+(ert-deftest agent-log-test-session-from-id-fast/head-without-user-text-parses-whole-file ()
+  "Fast session lookup parses the whole file when its head lacks user text."
+  (agent-log-test--with-temp-dir
+    (let* ((agent-log--metadata-head-bytes 200)
+           (jsonl-path
+            (agent-log-test--write-file
+             "session.jsonl"
+             (concat
+              (mapconcat
+               (lambda (_)
+                 "{\"type\":\"system\",\"timestamp\":\"2026-06-04T07:21:00Z\"}\n")
+               (number-sequence 1 10) "")
+              "{\"type\":\"user\",\"timestamp\":\"2026-06-04T07:21:52Z\",\"message\":{\"role\":\"user\",\"content\":\"Late hello\"}}\n"))))
+      (cl-letf (((symbol-function 'agent-log--find-session-file-any)
+                 (lambda (_sid) jsonl-path))
+                ((symbol-function 'agent-log--backend-for-file)
+                 (lambda (&rest _) agent-log-test--claude-backend)))
+        (should (equal (plist-get (cdr (agent-log--session-from-id-fast "s1"))
+                                  :display)
+                       "Late hello"))))))
+
 (ert-deftest agent-log-test-auto-summary-sweep/spawns-background-worker ()
   "Automatic backlog sweeps start a batch worker, not a live archive scan."
   (let* ((agent-log--summary-workers (make-hash-table :test #'equal))

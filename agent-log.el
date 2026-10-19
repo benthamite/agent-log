@@ -804,14 +804,38 @@ a project, then for a session within that project."
                          :backend backend)))
     (agent-log--open-rendered session-id metadata)))
 
+(defconst agent-log--metadata-head-bytes (* 1024 1024)
+  "Bytes read from the start of a session file to find its metadata.")
+
 (defun agent-log--metadata-from-file (file backend)
   "Return render metadata parsed from FILE for BACKEND.
 Only the single session file is parsed; this does not scan the
 archive."
   (agent-log--merge-render-metadata
    (agent-log--metadata-from-entries
-    file backend (agent-log--parse-and-normalize file backend))
+    file backend (agent-log--metadata-entries file backend))
    (agent-log--metadata-fallback-from-file backend file)))
+
+(defun agent-log--metadata-entries (file backend)
+  "Return the parsed entries of FILE that its BACKEND metadata needs.
+Session files grow to hundreds of megabytes, and parsing one whole on
+the main thread allocates gigabytes and freezes Emacs in garbage
+collection.  The metadata comes from the first progress entry, first
+message and first user text, which lie near the top of the file, so
+parse only its first `agent-log--metadata-head-bytes'.  When that head
+has no first user text, parse the whole file."
+  (let ((size (file-attribute-size (file-attributes file))))
+    (or (when (and size (> size agent-log--metadata-head-bytes))
+          (let* ((backend (or backend (agent-log--default-backend)))
+                 (entries (agent-log--parse-json-lines
+                           (agent-log--read-file-head-lines
+                            file agent-log--metadata-head-bytes)))
+                 (entries (if backend
+                              (agent-log--normalize-entries backend entries)
+                            entries)))
+            (when (and backend (agent-log--first-user-text backend entries))
+              entries)))
+        (agent-log--parse-and-normalize file backend))))
 
 (defun agent-log--metadata-from-entries (file backend entries)
   "Return render metadata for FILE and BACKEND from parsed ENTRIES."
@@ -2411,13 +2435,17 @@ when the other cons yields the same suffix at the same DEPTH."
 (defun agent-log--parse-jsonl-file (file)
   "Parse FILE as JSONL, returning a list of plists.
 Malformed lines are silently skipped."
-  (let ((lines (agent-log--read-file-lines file)))
-    (delq nil
-          (mapcar (lambda (line)
-                    (condition-case nil
-                        (agent-log--parse-json-line line)
-                      (error nil)))
-                  lines))))
+  (agent-log--parse-json-lines (agent-log--read-file-lines file)))
+
+(defun agent-log--parse-json-lines (lines)
+  "Parse LINES as JSON, returning a list of plists.
+Malformed lines are silently skipped."
+  (delq nil
+        (mapcar (lambda (line)
+                  (condition-case nil
+                      (agent-log--parse-json-line line)
+                    (error nil)))
+                lines)))
 
 (defun agent-log--parse-and-normalize (file &optional backend)
   "Parse FILE as JSONL and normalize entries using BACKEND.
@@ -2434,6 +2462,16 @@ agent-log format (e.g. Codex envelopes to flat entries)."
   "Read FILE and return a list of non-empty lines."
   (with-temp-buffer
     (insert-file-contents file)
+    (split-string (buffer-string) "\n" t)))
+
+(defun agent-log--read-file-head-lines (file bytes)
+  "Return the complete non-empty lines in the first BYTES of FILE.
+A line cut off at BYTES is dropped."
+  (with-temp-buffer
+    (insert-file-contents file nil 0 bytes)
+    (goto-char (point-max))
+    (when (search-backward "\n" nil t)
+      (delete-region (point) (point-max)))
     (split-string (buffer-string) "\n" t)))
 
 (defun agent-log--parse-json-line (line)
