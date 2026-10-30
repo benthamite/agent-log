@@ -58,6 +58,7 @@
 (defvar gptel-use-tools)
 (defvar gptel--known-backends)
 (declare-function gptel-request "gptel")
+(declare-function gptel--get-api-key "gptel-request")
 (declare-function gptel-get-backend "gptel")
 (declare-function gptel-backend-name "gptel")
 (declare-function gptel-backend-host "gptel")
@@ -714,6 +715,11 @@ without re-triggering.  Cleared by an interactive call to
 (defvar agent-log--summarize-consecutive-failures 0
   "Count of consecutive failed summary requests in the current run.
 Reset to 0 on success and at the start of each new run.")
+
+(defvar agent-log--summarize-failures 0
+  "Count of sessions whose summary failed in the current batch worker.
+Background workers exit non-zero when it is positive, so that the
+parent Emacs reports the failure instead of exiting silently.")
 
 (defvar agent-log--rendered-summary-active nil
   "Non-nil when rendered-only summary recovery is in progress.")
@@ -3855,7 +3861,8 @@ state file by absolute path and never uses the working directory, while
 `make-process' fails outright when `default-directory' names a directory
 that has been deleted or renamed."
   (unless (gethash session-id agent-log--summary-workers)
-    (let ((state-file (agent-log--summary-worker-state-file session-id)))
+    (let ((api-key (agent-log--summary-worker-key))
+          (state-file (agent-log--summary-worker-state-file session-id)))
       (condition-case err
           (let* ((default-directory temporary-file-directory)
                  (process
@@ -3868,6 +3875,7 @@ that has been deleted or renamed."
                    :sentinel (lambda (proc event)
                                (agent-log--summary-worker-sentinel
                                 session-id proc event)))))
+            (agent-log--summary-worker-send-key process api-key)
             (puthash session-id (cons process state-file)
                      agent-log--summary-workers)
             (message "agent-log: summarizing session %s in background"
@@ -3887,7 +3895,8 @@ state file by absolute path and never uses the working directory, while
 that has been deleted or renamed."
   (let ((key :sweep))
     (unless (gethash key agent-log--summary-workers)
-      (let ((state-file
+      (let ((api-key (agent-log--summary-worker-key))
+            (state-file
              (agent-log--summary-sweep-worker-state-file
               limit session-ids)))
         (condition-case err
@@ -3902,6 +3911,7 @@ that has been deleted or renamed."
                      :sentinel (lambda (proc event)
                                  (agent-log--summary-worker-sentinel
                                   key proc event)))))
+              (agent-log--summary-worker-send-key process api-key)
               (puthash key (cons process state-file)
                        agent-log--summary-workers)
               (message
@@ -3950,8 +3960,12 @@ When SESSION-IDS is non-nil, write a targeted sweep form."
                       agent-log-summary-max-content-length
                       ,agent-log-summary-max-content-length
                       gptel-model ',(and (boundp 'gptel-model) gptel-model))
-                (dolist (spec ',(agent-log--summary-worker-backend-specs))
-                  (agent-log--summary-worker-restore-backend spec))
+                (let* ((key-backend
+                        ',(agent-log--summary-worker-summary-backend-name))
+                       (key (agent-log--summary-worker-read-key key-backend)))
+                  (dolist (spec ',(agent-log--summary-worker-backend-specs))
+                    (agent-log--summary-worker-restore-backend
+                     spec key-backend key)))
                 (when-let* ((backend-name
                              ',(agent-log--summary-worker-default-backend-name)))
                   (setq gptel-backend (gptel-get-backend backend-name)))
@@ -3962,6 +3976,38 @@ When SESSION-IDS is non-nil, write a targeted sweep form."
         (terpri)))
     (set-file-modes file #o600)
     file))
+
+(defun agent-log--summary-worker-summary-backend ()
+  "Return the gptel backend used for summaries, or nil."
+  (when (boundp 'gptel--known-backends)
+    (car (agent-log--resolve-summary-backend-and-model))))
+
+(defun agent-log--summary-worker-summary-backend-name ()
+  "Return the name of the gptel backend used for summaries, or nil."
+  (when-let* ((backend (agent-log--summary-worker-summary-backend)))
+    (gptel-backend-name backend)))
+
+(defun agent-log--summary-worker-send-key (process key)
+  "Send API KEY to summary worker PROCESS as one line on its standard input.
+The key travels this way rather than in the state file so that it never
+reaches the disk.  A nil KEY is sent as an empty line."
+  (process-send-string process (concat (or key "") "\n")))
+
+(defun agent-log--summary-worker-key ()
+  "Return the API key of the summary backend, or nil.
+A function-valued key is called here, in the running Emacs, because the
+function may rely on code that the `--quick' worker does not load."
+  (when-let* ((backend (agent-log--summary-worker-summary-backend)))
+    (let ((gptel-backend backend))
+      (gptel--get-api-key))))
+
+(defun agent-log--summary-worker-read-key (backend-name)
+  "Return the API key for BACKEND-NAME read from standard input, or nil.
+Read nothing when BACKEND-NAME is nil.  An empty line yields nil."
+  (when backend-name
+    (let ((key (read-from-minibuffer "")))
+      (unless (string-empty-p key)
+        key))))
 
 (defun agent-log--summary-worker-default-backend-name ()
   "Return the current default gptel backend name, or nil."
@@ -3977,14 +4023,15 @@ When SESSION-IDS is non-nil, write a targeted sweep form."
                   gptel--known-backends))))
 
 (defun agent-log--summary-worker-backend-spec (backend)
-  "Return a readable constructor spec for gptel BACKEND."
+  "Return a readable constructor spec for gptel BACKEND.
+The spec omits the API key, which the worker receives on its standard
+input instead; see `agent-log--summary-worker-send-key'."
   (when backend
     (let ((plist
            (list :protocol (gptel-backend-protocol backend)
                  :host (gptel-backend-host backend)
                  :endpoint (gptel-backend-endpoint backend)
                  :header (gptel-backend-header backend)
-                 :key (gptel-backend-key backend)
                  :models (gptel-backend-models backend)
                  :stream (gptel-backend-stream backend)
                  :curl-args (gptel-backend-curl-args backend)
@@ -3994,14 +4041,17 @@ When SESSION-IDS is non-nil, write a targeted sweep form."
                       when (and value (readablep value))
                       collect key and collect value)))))
 
-(defun agent-log--summary-worker-restore-backend (spec)
-  "Restore a gptel backend from constructor SPEC."
+(defun agent-log--summary-worker-restore-backend (spec &optional key-backend key)
+  "Restore a gptel backend from constructor SPEC.
+When the backend is named KEY-BACKEND and KEY is non-nil, give it KEY."
   (pcase-let ((`(,type ,name . ,args) spec))
     (agent-log--summary-worker-require-backend type)
     (let ((maker (intern (concat "gptel-make-"
                                  (substring (symbol-name type) 6)))))
       (when (fboundp maker)
-        (apply maker name args)))))
+        (apply maker name (if (and key (equal name key-backend))
+                              (append args (list :key key))
+                            args))))))
 
 (defun agent-log--summary-worker-require-backend (type)
   "Require the gptel provider module for backend TYPE."
@@ -4037,7 +4087,8 @@ When SESSION-IDS is non-nil, write a targeted sweep form."
     (user-error "Package `gptel' is required for summary generation"))
   (let ((agent-log-auto-summarize-sessions t)
         (agent-log--summarize-active nil)
-        (agent-log--summarize-blocked-reason nil))
+        (agent-log--summarize-blocked-reason nil)
+        (agent-log--summarize-failures 0))
     (if-let* ((session (agent-log--find-session-by-id session-id)))
         (progn
           (if (agent-log--session-needs-summary-p session)
@@ -4047,8 +4098,7 @@ When SESSION-IDS is non-nil, write a targeted sweep form."
                   (accept-process-output nil 1)))
             (message "agent-log: session %s already has a current summary"
                      session-id))
-          (when agent-log--summarize-blocked-reason
-            (kill-emacs 1)))
+          (agent-log--batch-summarize-exit))
       (user-error "No session found for %s" session-id))))
 
 (defun agent-log--batch-summarize-pending (limit &optional session-ids)
@@ -4059,7 +4109,8 @@ sessions in the given order."
     (user-error "Package `gptel' is required for summary generation"))
   (let ((agent-log-auto-summarize-sessions t)
         (agent-log--summarize-active nil)
-        (agent-log--summarize-blocked-reason nil))
+        (agent-log--summarize-blocked-reason nil)
+        (agent-log--summarize-failures 0))
     (let* ((sessions (agent-log--read-all-sessions))
            (target-sessions
             (if session-ids
@@ -4084,8 +4135,13 @@ sessions in the given order."
                         agent-log--summarize-generation)
         (while agent-log--summarize-active
           (accept-process-output nil 1))
-        (when agent-log--summarize-blocked-reason
-          (kill-emacs 1))))))
+        (agent-log--batch-summarize-exit)))))
+
+(defun agent-log--batch-summarize-exit ()
+  "Exit batch Emacs with status 1 if the summary run failed or was blocked."
+  (when (or agent-log--summarize-blocked-reason
+            (> agent-log--summarize-failures 0))
+    (kill-emacs 1)))
 
 (defun agent-log--sessions-for-ids (sessions session-ids)
   "Return SESSIONS matching SESSION-IDS, preserving SESSION-IDS order."
@@ -4185,6 +4241,7 @@ nothing."
                  sid meta text conversation-hash jsonl-state
                  remaining done total gen))))
           (error
+           (cl-incf agent-log--summarize-failures)
            (message "Failed to summarize %s: %s"
                     sid (error-message-string err))
            ;; Brief delay before the next request to avoid hammering the
@@ -4281,6 +4338,7 @@ REMAINING, DONE, TOTAL, and GEN are chain-continuation state passed to
               (when (require 'agent-log-claude nil t)
                 (agent-log-claude--maybe-rename-session
                  sid (cdr parsed) previous-oneline))))
+        (cl-incf agent-log--summarize-failures)
         (message "Failed to parse summary for %s" sid)))
     (run-with-timer
      0.1 nil
@@ -4297,6 +4355,7 @@ after `agent-log--summarize-max-consecutive-failures' consecutive
 failures; otherwise logs the error and advances to the next session."
   (setq agent-log--summarize-request-id nil)
   (cl-incf agent-log--summarize-consecutive-failures)
+  (cl-incf agent-log--summarize-failures)
   (let* ((err-msg (agent-log--summarize-error-message info))
          (err-class (agent-log--summarize-classify-error info))
          (auth-error (eq err-class 'auth))

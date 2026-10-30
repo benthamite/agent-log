@@ -2373,7 +2373,10 @@ rereading every transcript."
                 ((symbol-function 'make-process)
                  (lambda (&rest args)
                    (setq command (plist-get args :command))
-                   (make-symbol "process"))))
+                   (make-symbol "process")))
+                ((symbol-function 'agent-log--summary-worker-key)
+                 (lambda () nil))
+                ((symbol-function 'process-send-string) #'ignore))
         (unwind-protect
             (progn
               (agent-log--auto-session-end-actions "s1")
@@ -2492,7 +2495,8 @@ rereading every transcript."
          (agent-log--summarize-active nil)
          (agent-log--summarize-blocked-reason nil)
          (orig-require (symbol-function 'require))
-         command)
+         command
+         stdin)
     (cl-letf (((symbol-function 'require)
                (lambda (feature &optional filename noerror)
                  (if (eq feature 'gptel)
@@ -2504,7 +2508,11 @@ rereading every transcript."
               ((symbol-function 'make-process)
                (lambda (&rest args)
                  (setq command (plist-get args :command))
-                 (make-symbol "process"))))
+                 (make-symbol "process")))
+              ((symbol-function 'agent-log--summary-worker-key)
+               (lambda () "secret-key"))
+              ((symbol-function 'process-send-string)
+               (lambda (_process string) (setq stdin string))))
       (unwind-protect
           (progn
             (agent-log--auto-summary-sweep)
@@ -2520,7 +2528,9 @@ rereading every transcript."
               (should state)
               (should (string-match-p
                        "agent-log--batch-summarize-pending 7"
-                       state))))
+                       state))
+              (should (equal stdin "secret-key\n"))
+              (should-not (string-match-p "secret-key" state))))
         (when-let* ((state-file (cadr (member "--load" command))))
           (when (file-exists-p state-file)
             (delete-file state-file)))))))
@@ -2631,6 +2641,46 @@ rereading every transcript."
       (should (eq (car captured) #'agent-log--summarize-next))
       (should (equal (mapcar #'car (cadr captured)) '("s3" "s1")))
       (should (= (nth 3 captured) 2)))))
+
+(ert-deftest agent-log-test-summary-worker-restore-backend/gives-key-to-summary-backend ()
+  "A worker gives the key read from stdin only to the summary backend."
+  (let (made)
+    (cl-letf (((symbol-function 'agent-log--summary-worker-require-backend)
+               #'ignore)
+              ((symbol-function 'gptel-make-openai)
+               (lambda (name &rest args) (push (cons name args) made))))
+      (agent-log--summary-worker-restore-backend
+       '(gptel-openai "summary" :host "a") "summary" "secret")
+      (agent-log--summary-worker-restore-backend
+       '(gptel-openai "other" :host "b") "summary" "secret")
+      (should (equal (plist-get (cdr (assoc "summary" made)) :key) "secret"))
+      (should-not (plist-member (cdr (assoc "other" made)) :key)))))
+
+(ert-deftest agent-log-test-batch-summarize-pending/failure-exits-nonzero ()
+  "A batch worker whose summaries failed exits with a non-zero status."
+  (let* ((sessions (list (list "s1")))
+         (index (make-hash-table :test #'equal))
+         (orig-require (symbol-function 'require))
+         exit-code)
+    (cl-letf (((symbol-function 'require)
+               (lambda (feature &optional filename noerror)
+                 (if (eq feature 'gptel)
+                     t
+                   (funcall orig-require feature filename noerror))))
+              ((symbol-function 'agent-log--read-all-sessions)
+               (lambda () sessions))
+              ((symbol-function 'agent-log--read-index)
+               (lambda () index))
+              ((symbol-function 'agent-log--sessions-needing-summary)
+               (lambda (&rest _) sessions))
+              ((symbol-function 'run-with-timer)
+               (lambda (&rest _)
+                 (cl-incf agent-log--summarize-failures)
+                 (setq agent-log--summarize-active nil)))
+              ((symbol-function 'kill-emacs)
+               (lambda (&optional arg) (setq exit-code arg))))
+      (agent-log--batch-summarize-pending 1)
+      (should (eql exit-code 1)))))
 
 (ert-deftest agent-log-test-update-session-end-hook/adds-codex-hook ()
   "Installs the Codex event handler when automatic actions are enabled."
