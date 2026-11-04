@@ -976,6 +976,117 @@ EXTRA is a plist of further top-level fields."
       (should (equal (plist-get metadata :project) "/p/desktop"))
       (should (equal (plist-get metadata :display) "Hello")))))
 
+;;;;;; Project attribution
+
+(defun agent-log-test--project-dir (name)
+  "Create and return directory NAME under the test directory, without a slash."
+  (let ((dir (expand-file-name name agent-log-test--dir)))
+    (make-directory dir t)
+    dir))
+
+(defun agent-log-test--session-project (backend session-id)
+  "Return the :project BACKEND lists for SESSION-ID."
+  (plist-get (cdr (assoc session-id (agent-log--read-sessions backend)))
+             :project))
+
+(ert-deftest agent-log-test-claude-project/newer-session-does-not-relabel ()
+  "A newer session with another CWD in the folder leaves older sessions alone."
+  (agent-log-test--with-claude-store
+    (let ((one (agent-log-test--project-dir "one"))
+          (two (agent-log-test--project-dir "two")))
+      (agent-log-test--write-transcript
+       "-folder" agent-log-test--uuid-a
+       (agent-log-test--transcript-line one "2026-01-01T00:00:00.000Z" "old"))
+      (agent-log-test--write-transcript
+       "-folder" agent-log-test--uuid-b
+       (agent-log-test--transcript-line two "2026-02-01T00:00:00.000Z" "new"))
+      (should (equal (agent-log-test--session-project
+                      backend agent-log-test--uuid-a)
+                     one))
+      (should (equal (agent-log-test--session-project
+                      backend agent-log-test--uuid-b)
+                     two))
+      (should (equal (sort (mapcar #'car
+                                   (agent-log--group-by-project
+                                    (agent-log--read-sessions backend)))
+                           #'string<)
+                     '("one" "two"))))))
+
+(ert-deftest agent-log-test-claude-project/resume-elsewhere-keeps-first-project ()
+  "A session later continued from another directory stays in its first project."
+  (agent-log-test--with-claude-store
+    (let ((one (agent-log-test--project-dir "one"))
+          (two (agent-log-test--project-dir "two")))
+      (agent-log-test--write-transcript
+       "-folder" agent-log-test--uuid-a
+       (agent-log-test--transcript-line one "2026-01-01T00:00:00.000Z" "first")
+       (agent-log-test--transcript-line two "2026-02-01T00:00:00.000Z" "later"))
+      (agent-log-test--write-history
+       (list :sessionId agent-log-test--uuid-a :project one :timestamp 1
+             :display "first")
+       (list :sessionId agent-log-test--uuid-a :project two :timestamp 2
+             :display "later"))
+      (should (equal (agent-log-test--session-project
+                      backend agent-log-test--uuid-a)
+                     one)))))
+
+(ert-deftest agent-log-test-claude-project/follows-a-rename ()
+  "A session whose recorded path is gone takes the folder's newest CWD."
+  (agent-log-test--with-claude-store
+    (let ((renamed (agent-log-test--project-dir "renamed"))
+          (gone (expand-file-name "gone" agent-log-test--dir)))
+      (agent-log-test--write-transcript
+       "-folder" agent-log-test--uuid-a
+       (agent-log-test--transcript-line gone "2026-01-01T00:00:00.000Z" "old"))
+      (agent-log-test--write-transcript
+       "-folder" agent-log-test--uuid-b
+       (agent-log-test--transcript-line
+        renamed "2026-02-01T00:00:00.000Z" "new"))
+      (should (equal (agent-log-test--session-project
+                      backend agent-log-test--uuid-a)
+                     renamed)))))
+
+(ert-deftest agent-log-test-claude-project/rename-seen-in-a-resumed-session ()
+  "A session resumed after the rename supplies its own newest CWD."
+  (agent-log-test--with-claude-store
+    (let ((renamed (agent-log-test--project-dir "renamed"))
+          (gone (expand-file-name "gone" agent-log-test--dir)))
+      (agent-log-test--write-transcript
+       "-folder" agent-log-test--uuid-a
+       (agent-log-test--transcript-line gone "2026-01-01T00:00:00.000Z" "old")
+       (agent-log-test--transcript-line
+        renamed "2026-02-01T00:00:00.000Z" "after the rename"))
+      (should (equal (agent-log-test--session-project
+                      backend agent-log-test--uuid-a)
+                     renamed)))))
+
+(ert-deftest agent-log-test-claude-project/missing-path-with-nothing-newer ()
+  "A recorded path that is gone is kept when the folder offers nothing else."
+  (agent-log-test--with-claude-store
+    (let ((gone (expand-file-name "gone" agent-log-test--dir)))
+      (agent-log-test--write-transcript
+       "-folder" agent-log-test--uuid-a
+       (agent-log-test--transcript-line gone "2026-01-01T00:00:00.000Z" "old"))
+      (should (equal (agent-log-test--session-project
+                      backend agent-log-test--uuid-a)
+                     gone)))))
+
+(ert-deftest agent-log-test-claude-project/history-fills-a-transcript-without-cwd ()
+  "The first history entry names the project of a transcript without a CWD."
+  (agent-log-test--with-claude-store
+    (let ((one (agent-log-test--project-dir "one")))
+      (agent-log-test--write-transcript
+       "-folder" agent-log-test--uuid-a
+       "{\"parentUuid\":null,\"type\":\"user\",\"timestamp\":\"2026-01-01T00:00:00Z\",\"message\":{\"role\":\"user\",\"content\":\"hi\"}}")
+      (agent-log-test--write-history
+       (list :sessionId agent-log-test--uuid-a :project one :timestamp 1
+             :display "first")
+       (list :sessionId agent-log-test--uuid-a :project "/elsewhere" :timestamp 2
+             :display "later"))
+      (should (equal (agent-log-test--session-project
+                      backend agent-log-test--uuid-a)
+                     one)))))
+
 ;;;;; Index management
 
 (ert-deftest agent-log-test-read-index/missing-file ()

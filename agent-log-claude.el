@@ -77,9 +77,7 @@ The return value is an alist of session-id to metadata, a plist
 :backend :source-file-state).  Sessions come from the project folders,
 because clients such as Claude Desktop never write `history.jsonl'.  The
 history supplies the display text and fills gaps a transcript leaves.
-The :project field reflects the most recent CWD among sessions sharing
-the same file directory, so it stays correct after project renames or
-profile migrations."
+See `agent-log-claude--session-project' for the :project field."
   (agent-log-claude--load-scan-cache)
   (when (zerop (hash-table-count agent-log-claude--scan-cache))
     (message "Agent Log: first scan of Claude Code transcripts..."))
@@ -121,13 +119,27 @@ the table from `agent-log-claude--folder-latest-cwds'."
                        "")
           :timestamp timestamp
           :updated-timestamp (or (plist-get scan :last-timestamp) timestamp)
-          :project (or (gethash dir latest-cwds)
-                       (plist-get record :project)
-                       "")
+          :project (agent-log-claude--session-project
+                    (or (plist-get scan :first-cwd)
+                        (plist-get record :project))
+                    (gethash dir latest-cwds))
           :file-dir dir
           :file file
           :backend backend
           :source-file-state (cons (file-attribute-size attributes) mtime-ms))))
+
+(defun agent-log-claude--session-project (recorded latest-in-folder)
+  "Return a session's project from its RECORDED one and LATEST-IN-FOLDER.
+A session keeps the project it first recorded, so a newer session with
+another working directory in the same transcript folder does not relabel
+it.  Only when RECORDED no longer exists has the project presumably been
+renamed, and then LATEST-IN-FOLDER, the folder's most recent working
+directory, follows the rename."
+  (let ((recorded (agent-log-claude--non-empty recorded)))
+    (or (and recorded (file-directory-p recorded) recorded)
+        latest-in-folder
+        recorded
+        "")))
 
 (defun agent-log-claude--folder-latest-cwds (transcripts)
   "Return a table of each transcript folder's most recent CWD.
