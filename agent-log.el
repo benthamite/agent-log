@@ -302,11 +302,11 @@ time only for backends that do not supply an activity timestamp."
 
 (defun agent-log--read-all-sessions (&optional strict)
   "Return merged sessions from all active backends, sorted most-recent-first.
-Each backend reports exactly the sessions its own native resume command
-offers, so Agent Log applies no membership filter of its own beyond
-`agent-log-ignored-project-regexps'.  When STRICT is non-nil, signal if
-any backend catalog cannot be read instead of returning an incomplete
-catalog."
+Each backend reports the sessions its own native resume command offers,
+apart from any exception it documents, so Agent Log applies no membership
+filter of its own beyond `agent-log-ignored-project-regexps'.  When
+STRICT is non-nil, signal if any backend catalog cannot be read instead
+of returning an incomplete catalog."
   (let ((all '()))
     (dolist (backend (agent-log--active-backend-instances))
       (condition-case err

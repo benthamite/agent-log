@@ -875,12 +875,7 @@ EXTRA is a plist of further top-level fields."
                  "/p" time "x" :sessionKind "daemon-worker"))
         (hidden (agent-log-test--transcript-line
                  "/p" time "<command-name>/loop</command-name> 5m check"))
-        (hidden "{\"type\":\"file-history-snapshot\",\"messageId\":\"m\"}")
-        (hidden (agent-log-test--transcript-line "/p" time "x")
-                (json-serialize (list :type "continued-in"
-                                      :timestamp time
-                                      :continuedInSessionId
-                                      agent-log-test--uuid-b))))
+        (hidden "{\"type\":\"file-history-snapshot\",\"messageId\":\"m\"}"))
       (agent-log-test--write-transcript
        "-p" "not-a-session-id"
        (agent-log-test--transcript-line "/p" time "x"))
@@ -894,28 +889,20 @@ EXTRA is a plist of further top-level fields."
       (should (equal (sort (agent-log-test--listed-ids backend) #'string<)
                      (list agent-log-test--uuid-a agent-log-test--uuid-b))))))
 
-(ert-deftest agent-log-test-claude-read-sessions/continuation-needs-a-successor ()
-  "A continued-in marker hides nothing without a successor holding messages."
+(ert-deftest agent-log-test-claude-read-sessions/keeps-continued-sessions ()
+  "A session continued in the background stays listed beside its successor."
   (agent-log-test--with-claude-store
-    (let ((time "2026-01-01T00:00:00.000Z")
-          (marker (json-serialize
-                   (list :type "continued-in" :timestamp "2026-01-01T00:00:00Z"
-                         :continuedInSessionId agent-log-test--uuid-b))))
+    (let ((time "2026-01-01T00:00:00.000Z"))
       (agent-log-test--write-transcript
        "-p" agent-log-test--uuid-a
-       (agent-log-test--transcript-line "/p" time "x") marker)
-      (should (equal (agent-log-test--listed-ids backend)
-                     (list agent-log-test--uuid-a)))
-      (agent-log-test--write-transcript
-       "-p" agent-log-test--uuid-c
        (agent-log-test--transcript-line "/p" time "x")
-       marker
-       (agent-log-test--transcript-line "/p" time "typed again"))
+       (json-serialize (list :type "continued-in" :timestamp time
+                             :continuedInSessionId agent-log-test--uuid-b)))
       (agent-log-test--write-transcript
        "-p" agent-log-test--uuid-b
        (agent-log-test--transcript-line "/p" time "successor"))
       (should (equal (sort (agent-log-test--listed-ids backend) #'string<)
-                     (list agent-log-test--uuid-b agent-log-test--uuid-c))))))
+                     (list agent-log-test--uuid-a agent-log-test--uuid-b))))))
 
 (ert-deftest agent-log-test-claude-read-sessions/agent-sdk-past-the-probe ()
   "An SDK entrypoint found only in the tail still hides the session."

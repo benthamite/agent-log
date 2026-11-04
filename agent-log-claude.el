@@ -72,12 +72,14 @@
 
 (cl-defmethod agent-log--read-sessions ((backend agent-log-claude))
   "Return the sessions Claude Code's own /resume would offer for BACKEND.
-The return value is an alist of session-id to metadata, a plist
-\(:display :timestamp :updated-timestamp :project :file :file-dir
-:backend :source-file-state).  Sessions come from the project folders,
-because clients such as Claude Desktop never write `history.jsonl'.  The
-history supplies the display text and fills gaps a transcript leaves.
-See `agent-log-claude--session-project' for the :project field."
+Sessions it hides for continuing in a background session stay listed; see
+`agent-log-claude--listed-p'.  The return value is an alist of session-id
+to metadata, a plist (:display :timestamp :updated-timestamp :project
+:file :file-dir :backend :source-file-state).  Sessions come from the
+project folders, because clients such as Claude Desktop never write
+`history.jsonl'.  The history supplies the display text and fills gaps a
+transcript leaves.  See `agent-log-claude--session-project' for the
+:project field."
   (agent-log-claude--load-scan-cache)
   (when (zerop (hash-table-count agent-log-claude--scan-cache))
     (message "Agent Log: first scan of Claude Code transcripts..."))
@@ -88,7 +90,7 @@ See `agent-log-claude--session-project' for the :project field."
                        in (agent-log-claude--list-transcripts directory)
                        for scan = (agent-log-claude--scan-transcript
                                    file attributes)
-                       when (agent-log-claude--resumable-p file scan)
+                       when (agent-log-claude--listed-p scan)
                        collect (list file attributes scan)))
          (latest-cwds (agent-log-claude--folder-latest-cwds transcripts))
          (known-directories (make-hash-table :test #'equal)))
@@ -314,9 +316,9 @@ ATTRIBUTES are FILE's attributes when the caller already has them.  See
   "Return what the session list needs from FILE, whose size is SIZE.
 Only bounded windows are read, so a transcript of any size costs about
 the same.  The result is a plist with :hidden, non-nil when /resume never
-offers the session; :continued-in, the session that superseded this one;
-:has-messages; :first-cwd and :last-cwd; :first-timestamp and
-:last-timestamp in epoch milliseconds; and :text, the first user text."
+offers the session; :has-messages; :first-cwd and :last-cwd;
+:first-timestamp and :last-timestamp in epoch milliseconds; and :text,
+the first user text."
   (let ((probe (agent-log-claude--read-window
                 file 0 agent-log-claude--probe-bytes)))
     (if (agent-log-claude--sdk-entrypoint-p
@@ -351,7 +353,6 @@ offers the session; :continued-in, the session that superseded this one;
              (tail-lines (agent-log-claude--window-lines tail cut nil))
              (first-cwd (plist-get fields :cwd)))
         (list :hidden (agent-log-claude--loop-session-p fields)
-              :continued-in (agent-log-claude--continued-in tail tail-lines)
               :has-messages (or message-p
                                 (and wide-p
                                      (or wide-cut
@@ -510,19 +511,6 @@ in the first few, and only those that may hold a wanted field are parsed."
   (when-let* ((prompt (plist-get fields :first-prompt)))
     (string-search "<command-name>/loop</command-name>" prompt)))
 
-(defun agent-log-claude--continued-in (tail tail-lines)
-  "Return the session this one continued in, per window TAIL, or nil.
-TAIL-LINES are TAIL's complete lines.  A conversation turn recorded after
-the marker cancels it."
-  (when (string-search "\"continuedInSessionId\":" tail)
-    (cl-loop
-     for line in (reverse tail-lines)
-     when (or (string-search "\"continuedInSessionId\":" line)
-              (string-match-p "\"type\": ?\"\\(?:user\\|assistant\\)\"" line))
-     do (when-let* ((entry (agent-log-claude--parse-line line)))
-          (cl-return (and (equal (plist-get entry :type) "continued-in")
-                          (plist-get entry :continuedInSessionId)))))))
-
 (defun agent-log-claude--last-cwd (tail-lines)
   "Return the last top-level CWD recorded in TAIL-LINES, or nil."
   (cl-loop
@@ -551,19 +539,13 @@ end is tried first, because nearly every transcript has one there."
       (setq start (match-end 0)))
     latest))
 
-(defun agent-log-claude--resumable-p (file scan)
-  "Return non-nil if /resume would offer FILE, whose scan is SCAN."
+(defun agent-log-claude--listed-p (scan)
+  "Return non-nil if a transcript whose scan is SCAN belongs in the list.
+This applies the filters of /resume except the one for a session continued
+in a background session.  The successor can hold only a compacted copy,
+so hiding the original could make a conversation impossible to find."
   (and (not (plist-get scan :hidden))
-       (plist-get scan :has-messages)
-       (not (agent-log-claude--superseded-p file scan))))
-
-(defun agent-log-claude--superseded-p (file scan)
-  "Return non-nil if SCAN of FILE names a successor holding messages."
-  (when-let* ((successor (plist-get scan :continued-in))
-              (successor-scan (agent-log-claude--scan-transcript
-                               (expand-file-name (concat successor ".jsonl")
-                                                 (file-name-directory file)))))
-    (plist-get successor-scan :has-messages)))
+       (plist-get scan :has-messages)))
 
 ;;;;;;; History records
 
