@@ -633,8 +633,12 @@ probing per session."
 
 (cl-defmethod agent-log--find-session-file ((backend agent-log-claude) session-id)
   "Find the JSONL file for SESSION-ID under the projects directory."
-  (let ((projects-dir (expand-file-name "projects"
-                                        (agent-log-backend-directory backend))))
+  (agent-log-claude--find-transcript
+   (agent-log-backend-directory backend) session-id))
+
+(defun agent-log-claude--find-transcript (directory session-id)
+  "Find the transcript of SESSION-ID under Claude's store DIRECTORY."
+  (let ((projects-dir (expand-file-name "projects" directory)))
     (when (file-directory-p projects-dir)
       (cl-block nil
         (dolist (dir (directory-files projects-dir t "^[^.]"))
@@ -825,10 +829,14 @@ Code, so this returns nil; the optional agent integration in
 
 (defun agent-log-claude--session-project-directory (session-id)
   "Return the project directory for SESSION-ID.
-Try the buffer-local variable first, then fall back to history.jsonl.
+Try the folder of the session's own transcript first, since the calling
+buffer may belong to any session, and `claude --resume' finds a transcript
+only from the directory its folder encodes.  Then try the buffer-local
+variable, the current buffer's source file, and history.jsonl.
 The return value always has a trailing slash to match the format
 returned by `claude-code--directory'."
-  (when-let* ((dir (or (and agent-log--session-project
+  (when-let* ((dir (or (agent-log-claude--transcript-project-directory session-id)
+                       (and agent-log--session-project
                             (not (string-empty-p agent-log--session-project))
                             (file-directory-p agent-log--session-project)
                             agent-log--session-project)
@@ -838,6 +846,37 @@ returned by `claude-code--directory'."
                               (file-directory-p project)
                               project)))))
     (file-name-as-directory dir)))
+
+(defun agent-log-claude--transcript-project-directory (session-id)
+  "Return the existing directory that SESSION-ID's transcript folder encodes.
+The encoding is lossy, so prefer a directory the transcript itself
+recorded, which needs no filesystem walk and cannot pick a look-alike."
+  (when-let* ((file (agent-log-claude--session-transcript session-id))
+              (encoded (file-name-nondirectory
+                        (directory-file-name (file-name-directory file)))))
+    (or (agent-log-claude--recorded-project-in-folder file encoded)
+        (agent-log-claude--find-existing-encoded-project encoded))))
+
+(defun agent-log-claude--session-transcript (session-id)
+  "Return the transcript of SESSION-ID, or nil.
+Use `agent-log--source-file' only if it is that session's own file."
+  (let ((source agent-log--source-file))
+    (if (and source
+             (equal (file-name-base source) session-id)
+             (file-exists-p source))
+        source
+      (agent-log-claude--find-transcript agent-log-directory session-id))))
+
+(defun agent-log-claude--recorded-project-in-folder (file encoded)
+  "Return a directory recorded in transcript FILE whose encoding is ENCODED."
+  (let ((scan (agent-log-claude--scan-transcript file)))
+    (seq-find (lambda (cwd)
+                (and cwd
+                     (file-directory-p cwd)
+                     (equal (agent-log-claude--encode-project-path cwd)
+                            encoded)))
+              (list (plist-get scan :first-cwd)
+                    (plist-get scan :last-cwd)))))
 
 (defun agent-log-claude--source-file-project-directory ()
   "Return the existing project directory implied by `agent-log--source-file'."
@@ -891,9 +930,9 @@ returned by `claude-code--directory'."
 
 (defun agent-log-claude--encode-project-path (directory)
   "Encode DIRECTORY as Claude Code does for its projects subdirectory.
-Replaces `/', `.', and space characters with `-'."
+Replaces every character other than an ASCII letter or digit with `-'."
   (replace-regexp-in-string
-   "[/. ]" "-"
+   "[^a-zA-Z0-9]" "-"
    (directory-file-name (expand-file-name directory))))
 
 (defun agent-log-claude--find-project-session-dir (directory)

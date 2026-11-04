@@ -560,6 +560,103 @@ SUMMARY defaults to ONELINE."
         (should (equal (agent-log-claude--session-project-directory "s1")
                        (file-name-as-directory project-dir)))))))
 
+(ert-deftest agent-log-test-encode-project-path/any-other-character ()
+  "Encodes every non-alphanumeric character, as Claude Code does."
+  (should (equal (agent-log-claude--encode-project-path "/home/my_user/a+b c.d")
+                 "-home-my-user-a-b-c-d")))
+
+(defmacro agent-log-test--with-resumable-session (&rest body)
+  "Run BODY in a store where `session' lives in the folder of existing `own'.
+`other' is another existing directory, for the caller's buffer to name."
+  (declare (indent 0) (debug t))
+  `(agent-log-test--with-temp-dir
+     (let* ((own (expand-file-name "own_project" agent-log-test--dir))
+            (other (expand-file-name "other" agent-log-test--dir))
+            (store (expand-file-name ".claude" agent-log-test--dir))
+            (agent-log-directory store)
+            (session "aaaaaaaa-0000-4000-8000-000000000001")
+            (encoded (agent-log-claude--encode-project-path own))
+            (agent-log-claude--scan-cache (make-hash-table :test #'equal))
+            (agent-log-claude--history-cache nil)
+            (transcript (agent-log-test--write-file
+                         (format ".claude/projects/%s/%s.jsonl" encoded session)
+                         "")))
+       (make-directory own t)
+       (make-directory other t)
+       (cl-letf (((symbol-function 'agent-log-claude--find-existing-encoded-project)
+                  (lambda (name) (and (equal name encoded) own))))
+         ,@body))))
+
+(ert-deftest agent-log-test-claude-session-project-directory/ignores-caller-project ()
+  "A buffer-local project from another session does not divert a resume."
+  (agent-log-test--with-resumable-session
+    (let ((agent-log--session-project other)
+          (agent-log--source-file nil))
+      (should (equal (agent-log-claude--session-project-directory session)
+                     (file-name-as-directory own))))))
+
+(ert-deftest agent-log-test-claude-session-project-directory/ignores-other-source ()
+  "The buffer's source file counts only if it is the session's own."
+  (agent-log-test--with-resumable-session
+    (let* ((other-file (agent-log-test--write-file
+                        (format ".claude/projects/%s/bbbb.jsonl"
+                                (agent-log-claude--encode-project-path other))
+                        ""))
+           (agent-log--session-project nil)
+           (agent-log--source-file other-file))
+      (should (equal (agent-log-claude--session-project-directory session)
+                     (file-name-as-directory own))))))
+
+(ert-deftest agent-log-test-claude-session-project-directory/uses-own-source ()
+  "The session's own source file is used even with a stale buffer project."
+  (agent-log-test--with-resumable-session
+    (let ((agent-log--session-project other)
+          (agent-log--source-file transcript)
+          (agent-log-directory (expand-file-name "no-store" agent-log-test--dir)))
+      (should (equal (agent-log-claude--session-project-directory session)
+                     (file-name-as-directory own))))))
+
+(ert-deftest agent-log-test-claude-session-project-directory/caller-project-fallback ()
+  "With no transcript for the session, the buffer's project is the fallback."
+  (agent-log-test--with-resumable-session
+    (let ((agent-log--session-project other)
+          (agent-log--source-file nil))
+      (should (equal (agent-log-claude--session-project-directory "no-such-session")
+                     (file-name-as-directory other))))))
+
+(ert-deftest agent-log-test-claude-session-project-directory/prefers-recorded-look-alike ()
+  "The transcript's recorded directory resolves an ambiguous folder name."
+  (agent-log-test--with-temp-dir
+    (let* ((recorded (expand-file-name "foo/bar" agent-log-test--dir))
+           (look-alike (expand-file-name "foo-bar" agent-log-test--dir))
+           (agent-log-directory (expand-file-name ".claude" agent-log-test--dir))
+           (agent-log-claude--scan-cache (make-hash-table :test #'equal))
+           (agent-log--session-project nil)
+           (agent-log--source-file nil)
+           (session "aaaaaaaa-0000-4000-8000-000000000001"))
+      (make-directory recorded t)
+      (make-directory look-alike t)
+      (agent-log-test--write-file
+       (format ".claude/projects/%s/%s.jsonl"
+               (agent-log-claude--encode-project-path recorded) session)
+       (concat (agent-log-test--transcript-line
+                recorded "2026-01-01T00:00:00.000Z" "x")
+               "\n"))
+      (cl-letf (((symbol-function 'agent-log-claude--find-existing-encoded-project)
+                 (lambda (_encoded) look-alike)))
+        (should (equal (agent-log-claude--session-project-directory session)
+                       (file-name-as-directory recorded)))))))
+
+(ert-deftest agent-log-test-claude-session-project-directory/finds-lossy-folder-by-walk ()
+  "A transcript without a usable recorded directory still resolves by walking."
+  (agent-log-test--with-temp-dir
+    (let* ((own (expand-file-name "my_project" agent-log-test--dir))
+           (encoded (agent-log-claude--encode-project-path own)))
+      (make-directory own t)
+      (should (equal (agent-log-claude--find-encoded-project-below
+                      agent-log-test--dir encoded 12)
+                     (file-name-as-directory own))))))
+
 (ert-deftest agent-log-test-metadata-from-file/claude-history-project-fallback ()
   "Uses Claude history when the JSONL lacks progress CWD metadata."
   (agent-log-test--with-temp-dir
