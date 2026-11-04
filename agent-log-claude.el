@@ -90,21 +90,24 @@ See `agent-log-claude--session-project' for the :project field."
                                    file attributes)
                        when (agent-log-claude--resumable-p file scan)
                        collect (list file attributes scan)))
-         (latest-cwds (agent-log-claude--folder-latest-cwds transcripts)))
+         (latest-cwds (agent-log-claude--folder-latest-cwds transcripts))
+         (known-directories (make-hash-table :test #'equal)))
     (agent-log-claude--save-scan-cache)
     (sort (cl-loop for (file attributes scan) in transcripts
                    collect (agent-log-claude--session-from-transcript
-                            backend file attributes scan history latest-cwds))
+                            backend file attributes scan history latest-cwds
+                            known-directories))
           (lambda (a b)
             (agent-log--timestamp> (plist-get (cdr a) :timestamp)
                                    (plist-get (cdr b) :timestamp))))))
 
 (defun agent-log-claude--session-from-transcript
-    (backend file attributes scan history latest-cwds)
+    (backend file attributes scan history latest-cwds known-directories)
   "Return the session entry of FILE for BACKEND.
 ATTRIBUTES are FILE's attributes and SCAN its transcript scan.  HISTORY
-is the table from `agent-log-claude--history-records' and LATEST-CWDS
-the table from `agent-log-claude--folder-latest-cwds'."
+is the table from `agent-log-claude--history-records', LATEST-CWDS the
+table from `agent-log-claude--folder-latest-cwds', and KNOWN-DIRECTORIES
+the table `agent-log-claude--session-project' memoizes into."
   (let* ((session-id (file-name-base file))
          (record (gethash session-id history))
          (dir (file-name-directory file))
@@ -122,24 +125,37 @@ the table from `agent-log-claude--folder-latest-cwds'."
           :project (agent-log-claude--session-project
                     (or (plist-get scan :first-cwd)
                         (plist-get record :project))
-                    (gethash dir latest-cwds))
+                    (gethash dir latest-cwds)
+                    known-directories)
           :file-dir dir
           :file file
           :backend backend
           :source-file-state (cons (file-attribute-size attributes) mtime-ms))))
 
-(defun agent-log-claude--session-project (recorded latest-in-folder)
+(defun agent-log-claude--session-project
+    (recorded latest-in-folder known-directories)
   "Return a session's project from its RECORDED one and LATEST-IN-FOLDER.
 A session keeps the project it first recorded, so a newer session with
 another working directory in the same transcript folder does not relabel
 it.  Only when RECORDED no longer exists has the project presumably been
 renamed, and then LATEST-IN-FOLDER, the folder's most recent working
-directory, follows the rename."
+directory, follows the rename.  KNOWN-DIRECTORIES remembers existence
+checks across one listing: most sessions share a few directories, and
+checking one on a network or synced drive is slow."
   (let ((recorded (agent-log-claude--non-empty recorded)))
-    (or (and recorded (file-directory-p recorded) recorded)
+    (or (and recorded
+             (agent-log-claude--directory-known-p recorded known-directories)
+             recorded)
         latest-in-folder
         recorded
         "")))
+
+(defun agent-log-claude--directory-known-p (directory known-directories)
+  "Return non-nil if DIRECTORY exists, consulting KNOWN-DIRECTORIES first."
+  (let ((known (gethash directory known-directories 'unchecked)))
+    (if (eq known 'unchecked)
+        (puthash directory (file-directory-p directory) known-directories)
+      known)))
 
 (defun agent-log-claude--folder-latest-cwds (transcripts)
   "Return a table of each transcript folder's most recent CWD.
