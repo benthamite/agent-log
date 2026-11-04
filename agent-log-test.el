@@ -651,6 +651,331 @@ BINDINGS may use `backend', `home' and `repairs', which BODY can also read."
         (when (process-live-p process)
           (delete-process process))))))
 
+;;;;; Claude session listing
+
+(defconst agent-log-test--uuid-a "aaaaaaaa-0000-4000-8000-000000000001")
+(defconst agent-log-test--uuid-b "bbbbbbbb-0000-4000-8000-000000000002")
+(defconst agent-log-test--uuid-c "cccccccc-0000-4000-8000-000000000003")
+
+(defmacro agent-log-test--with-claude-store (&rest body)
+  "Run BODY with `backend' and `store' bound to a temporary Claude store.
+The scan and history caches start empty and are restored afterwards."
+  (declare (indent 0) (debug t))
+  `(agent-log-test--with-temp-dir
+     (let* ((store (file-name-as-directory
+                    (expand-file-name ".claude" agent-log-test--dir)))
+            (agent-log-directory store)
+            (agent-log-rendered-directory
+             (expand-file-name "rendered" agent-log-test--dir))
+            (backend (agent-log--make-claude :name "Claude Code"
+                                             :key 'claude-code
+                                             :directory store))
+            (agent-log-claude--scan-cache (make-hash-table :test #'equal))
+            (agent-log-claude--history-cache nil))
+       (make-directory store t)
+       ,@body)))
+
+(defun agent-log-test--transcript-line (cwd timestamp text &rest extra)
+  "Return a transcript user line in CWD at TIMESTAMP saying TEXT.
+EXTRA is a plist of further top-level fields."
+  (json-serialize
+   (append (list :parentUuid :null :type "user" :cwd cwd
+                 :timestamp timestamp
+                 :message (list :role "user" :content text))
+           extra)))
+
+(defun agent-log-test--write-transcript (folder session-id &rest lines)
+  "Write LINES as SESSION-ID's transcript in the store's FOLDER."
+  (let ((coding-system-for-write 'utf-8-unix))
+    (agent-log-test--write-file
+     (format ".claude/projects/%s/%s.jsonl" folder session-id)
+     (concat (string-join lines "\n") "\n"))))
+
+(defun agent-log-test--write-history (&rest entries)
+  "Write ENTRIES, plists, as the store's history file."
+  (let ((coding-system-for-write 'utf-8-unix))
+    (agent-log-test--write-file
+     ".claude/history.jsonl"
+     (mapconcat (lambda (entry) (concat (json-serialize entry) "\n"))
+                entries ""))))
+
+(defun agent-log-test--listed-ids (backend)
+  "Return the session ids BACKEND lists."
+  (mapcar #'car (agent-log--read-sessions backend)))
+
+(ert-deftest agent-log-test-claude-read-sessions/lists-sessions-absent-from-history ()
+  "A Desktop transcript appears without a history entry, using its own text."
+  (agent-log-test--with-claude-store
+    (agent-log-test--write-transcript
+     "-p-desktop" agent-log-test--uuid-a
+     (agent-log-test--transcript-line
+      "/p/desktop" "2026-01-02T03:04:05.000Z" "Hello from Desktop"
+      :entrypoint "claude-desktop"))
+    (let* ((sessions (agent-log--read-sessions backend))
+           (session (assoc agent-log-test--uuid-a sessions)))
+      (should (= (length sessions) 1))
+      (should (equal (plist-get (cdr session) :display) "Hello from Desktop"))
+      (should (equal (plist-get (cdr session) :project) "/p/desktop"))
+      (should (= (plist-get (cdr session) :timestamp)
+                 (agent-log--iso-to-epoch-ms "2026-01-02T03:04:05.000Z"))))))
+
+(ert-deftest agent-log-test-claude-read-sessions/history-only-supplies-display ()
+  "History gives display text; membership and dates come from the transcript."
+  (agent-log-test--with-claude-store
+    (agent-log-test--write-transcript
+     "-p-cli" agent-log-test--uuid-a
+     (agent-log-test--transcript-line
+      "/p/cli" "2026-01-01T00:00:00.000Z" "first prompt")
+     (agent-log-test--transcript-line
+      "/p/cli" "2026-01-05T00:00:00.000Z" "later prompt"))
+    (agent-log-test--write-history
+     (list :sessionId agent-log-test--uuid-a :project "/p/cli"
+           :timestamp 1 :display "first prompt")
+     (list :sessionId agent-log-test--uuid-a :project "/p/cli"
+           :timestamp 2 :display "later prompt")
+     (list :sessionId agent-log-test--uuid-b :project "/p/gone"
+           :timestamp 3 :display "no transcript left"))
+    (let* ((sessions (agent-log--read-sessions backend))
+           (metadata (cdr (assoc agent-log-test--uuid-a sessions))))
+      (should (equal (mapcar #'car sessions) (list agent-log-test--uuid-a)))
+      (should (equal (plist-get metadata :display) "later prompt"))
+      (should (= (plist-get metadata :timestamp)
+                 (agent-log--iso-to-epoch-ms "2026-01-01T00:00:00.000Z")))
+      (should (= (plist-get metadata :updated-timestamp)
+                 (agent-log--iso-to-epoch-ms "2026-01-05T00:00:00.000Z"))))))
+
+(ert-deftest agent-log-test-claude-read-sessions/title-rewrite-is-not-activity ()
+  "A record without a timestamp, such as a title, does not count as activity."
+  (agent-log-test--with-claude-store
+    (let ((file (agent-log-test--write-transcript
+                 "-p" agent-log-test--uuid-a
+                 (agent-log-test--transcript-line
+                  "/p" "2026-01-01T00:00:00.000Z" "prompt"))))
+      (agent-log-claude--append-custom-title
+       file agent-log-test--uuid-a "A title" (make-hash-table :test #'equal))
+      (should (= (plist-get (cdar (agent-log--read-sessions backend))
+                            :updated-timestamp)
+                 (agent-log--iso-to-epoch-ms "2026-01-01T00:00:00.000Z"))))))
+
+(ert-deftest agent-log-test-claude-read-sessions/applies-resume-filters ()
+  "Each transcript `claude --resume' leaves out stays out of the list."
+  (agent-log-test--with-claude-store
+    (let ((time "2026-01-01T00:00:00.000Z")
+          (counter 0))
+      (cl-flet ((hidden (&rest lines)
+                  (apply #'agent-log-test--write-transcript "-p"
+                         (format "dddddddd-0000-4000-8000-%012d"
+                                 (cl-incf counter))
+                         lines)))
+        (dolist (entrypoint '("sdk-cli" "sdk-ts" "sdk-py"))
+          (hidden (agent-log-test--transcript-line
+                   "/p" time "x" :entrypoint entrypoint)))
+        (hidden (agent-log-test--transcript-line "/p" time "x" :isSidechain t))
+        (hidden (agent-log-test--transcript-line "/p" time "x" :teamName "team"))
+        (hidden (agent-log-test--transcript-line
+                 "/p" time "x" :sessionKind "daemon"))
+        (hidden (agent-log-test--transcript-line
+                 "/p" time "x" :sessionKind "daemon-worker"))
+        (hidden (agent-log-test--transcript-line
+                 "/p" time "<command-name>/loop</command-name> 5m check"))
+        (hidden "{\"type\":\"file-history-snapshot\",\"messageId\":\"m\"}")
+        (hidden (agent-log-test--transcript-line "/p" time "x")
+                (json-serialize (list :type "continued-in"
+                                      :timestamp time
+                                      :continuedInSessionId
+                                      agent-log-test--uuid-b))))
+      (agent-log-test--write-transcript
+       "-p" "not-a-session-id"
+       (agent-log-test--transcript-line "/p" time "x"))
+      (agent-log-test--write-transcript
+       "-p" agent-log-test--uuid-a
+       (agent-log-test--transcript-line "/p" time "cli"
+                                        :entrypoint "cli" :sessionKind "bg"))
+      (agent-log-test--write-transcript
+       "-p" agent-log-test--uuid-b
+       (agent-log-test--transcript-line "/p" time "successor"))
+      (should (equal (sort (agent-log-test--listed-ids backend) #'string<)
+                     (list agent-log-test--uuid-a agent-log-test--uuid-b))))))
+
+(ert-deftest agent-log-test-claude-read-sessions/continuation-needs-a-successor ()
+  "A continued-in marker hides nothing without a successor holding messages."
+  (agent-log-test--with-claude-store
+    (let ((time "2026-01-01T00:00:00.000Z")
+          (marker (json-serialize
+                   (list :type "continued-in" :timestamp "2026-01-01T00:00:00Z"
+                         :continuedInSessionId agent-log-test--uuid-b))))
+      (agent-log-test--write-transcript
+       "-p" agent-log-test--uuid-a
+       (agent-log-test--transcript-line "/p" time "x") marker)
+      (should (equal (agent-log-test--listed-ids backend)
+                     (list agent-log-test--uuid-a)))
+      (agent-log-test--write-transcript
+       "-p" agent-log-test--uuid-c
+       (agent-log-test--transcript-line "/p" time "x")
+       marker
+       (agent-log-test--transcript-line "/p" time "typed again"))
+      (agent-log-test--write-transcript
+       "-p" agent-log-test--uuid-b
+       (agent-log-test--transcript-line "/p" time "successor"))
+      (should (equal (sort (agent-log-test--listed-ids backend) #'string<)
+                     (list agent-log-test--uuid-b agent-log-test--uuid-c))))))
+
+(ert-deftest agent-log-test-claude-read-sessions/agent-sdk-past-the-probe ()
+  "An SDK entrypoint found only in the tail still hides the session."
+  (agent-log-test--with-claude-store
+    (let ((time "2026-01-01T00:00:00.000Z")
+          (padding (json-serialize
+                    (list :type "attachment"
+                          :content (make-string 70000 ?x)))))
+      (agent-log-test--write-transcript
+       "-p" agent-log-test--uuid-a
+       padding padding
+       (agent-log-test--transcript-line "/p" time "x" :entrypoint "sdk-cli"))
+      (should-not (agent-log-test--listed-ids backend)))))
+
+(ert-deftest agent-log-test-claude-scan/reads-only-bounded-windows ()
+  "A large transcript is read in windows, and a late first prompt is found."
+  (agent-log-test--with-claude-store
+    (let* ((padding (json-serialize
+                     (list :type "attachment"
+                           :content (make-string 70000 ?x))))
+           (file (apply #'agent-log-test--write-transcript
+                        "-p" agent-log-test--uuid-a
+                        (append
+                         (list padding
+                               (agent-log-test--transcript-line
+                                "/p" "2026-01-01T00:00:00.000Z" "late prompt"))
+                         (make-list 40 padding))))
+           (read-bytes 0)
+           (orig (symbol-function 'agent-log-claude--read-window)))
+      (should (> (file-attribute-size (file-attributes file))
+                 agent-log--metadata-head-bytes))
+      (cl-letf (((symbol-function 'agent-log-claude--read-window)
+                 (lambda (file beg end)
+                   (cl-incf read-bytes (- end beg))
+                   (funcall orig file beg end))))
+        (let ((metadata (cdar (agent-log--read-sessions backend))))
+          (should (equal (plist-get metadata :display) "late prompt"))
+          (should (equal (plist-get metadata :project) "/p"))))
+      (should (<= read-bytes
+                  (+ agent-log-claude--probe-bytes
+                     (* 2 agent-log-claude--resume-window-bytes)
+                     agent-log--metadata-head-bytes))))))
+
+(ert-deftest agent-log-test-claude-scan/rereads-only-changed-files ()
+  "An unchanged transcript is not read again; a changed one is."
+  (agent-log-test--with-claude-store
+    (let* ((time "2026-01-01T00:00:00.000Z")
+           (file (agent-log-test--write-transcript
+                  "-p" agent-log-test--uuid-a
+                  (agent-log-test--transcript-line "/p" time "x")))
+           (reads 0)
+           (orig (symbol-function 'agent-log-claude--read-window)))
+      (cl-letf (((symbol-function 'agent-log-claude--read-window)
+                 (lambda (&rest args)
+                   (cl-incf reads)
+                   (apply orig args))))
+        (agent-log--read-sessions backend)
+        (should (> reads 0))
+        (setq reads 0)
+        (agent-log--read-sessions backend)
+        (should (= reads 0))
+        (write-region (concat (agent-log-test--transcript-line
+                               "/p" "2026-02-01T00:00:00.000Z" "more")
+                              "\n")
+                      nil file t 'quiet)
+        (should (= (plist-get (cdar (agent-log--read-sessions backend))
+                              :updated-timestamp)
+                   (agent-log--iso-to-epoch-ms "2026-02-01T00:00:00.000Z")))
+        (should (> reads 0))))))
+
+(ert-deftest agent-log-test-claude-scan-cache/survives-a-restart ()
+  "Saved scans satisfy the next session without reading transcripts."
+  (agent-log-test--with-claude-store
+    (let ((agent-log-claude--scan-cache-dirty nil)
+          (agent-log-claude--scan-cache-saved-at 0))
+      (agent-log-test--write-transcript
+       "-p" agent-log-test--uuid-a
+       (agent-log-test--transcript-line
+        "/p" "2026-01-01T00:00:00.000Z" "héllo"))
+      (let ((before (agent-log--read-sessions backend)))
+        (should agent-log-claude--scan-cache-dirty)
+        (agent-log-claude--write-scan-cache-file)
+        (should-not agent-log-claude--scan-cache-dirty)
+        (clrhash agent-log-claude--scan-cache)
+        (agent-log-claude--read-scan-cache-file)
+        (cl-letf (((symbol-function 'agent-log-claude--read-window)
+                   (lambda (&rest _) (error "Transcript was read again"))))
+          (should (equal (plist-get (cdar (agent-log--read-sessions backend))
+                                    :display)
+                         (plist-get (cdar before) :display))))
+        (should (equal (plist-get (cdar before) :display) "héllo"))))))
+
+(ert-deftest agent-log-test-claude-scan-cache/ignores-bad-files ()
+  "A corrupt or foreign saved file leaves the cache empty without an error."
+  (agent-log-test--with-claude-store
+    (dolist (content '("not (closed" "(0 (\"x\" 1 2))"))
+      (make-directory agent-log-rendered-directory t)
+      (with-temp-file (agent-log-claude--scan-cache-file)
+        (insert content))
+      (cl-letf (((symbol-function 'message) #'ignore))
+        (agent-log-claude--read-scan-cache-file))
+      (should (zerop (hash-table-count agent-log-claude--scan-cache))))))
+
+(ert-deftest agent-log-test-claude-read-sessions/tolerates-missing-history ()
+  "A store without a history file still lists its transcripts."
+  (agent-log-test--with-claude-store
+    (agent-log-test--write-transcript
+     "-p" agent-log-test--uuid-a
+     (agent-log-test--transcript-line "/p" "2026-01-01T00:00:00.000Z" "x"))
+    (should (equal (agent-log-test--listed-ids backend)
+                   (list agent-log-test--uuid-a)))))
+
+(ert-deftest agent-log-test-claude-history/parses-only-appended-lines ()
+  "Appended history merges in, and a torn last line waits for its newline."
+  (agent-log-test--with-claude-store
+    (let ((file (agent-log-test--write-history
+                 (list :sessionId "s1" :project "/first" :timestamp 1
+                       :display "héllo"))))
+      (should (equal (plist-get (gethash "s1" (agent-log-claude--history-records
+                                               store))
+                                :last-display)
+                     "héllo"))
+      (write-region "{\"sessionId\":\"s1\",\"project\":\"/second\",\"display\":\"tw"
+                    nil file t 'quiet)
+      (should (equal (plist-get (gethash "s1" (agent-log-claude--history-records
+                                               store))
+                                :last-display)
+                     "héllo"))
+      (write-region "o\"}\n" nil file t 'quiet)
+      (let ((record (gethash "s1" (agent-log-claude--history-records store))))
+        (should (equal (plist-get record :last-display) "two"))
+        (should (equal (plist-get record :display) "héllo"))
+        (should (equal (plist-get record :project) "/first"))))))
+
+(ert-deftest agent-log-test-claude-history/rereads-a-replaced-file ()
+  "A history file that shrank is read again from the start."
+  (agent-log-test--with-claude-store
+    (agent-log-test--write-history
+     (list :sessionId "old" :display "a long enough first history entry"))
+    (agent-log-claude--history-records store)
+    (agent-log-test--write-history (list :sessionId "new" :display "b"))
+    (let ((records (agent-log-claude--history-records store)))
+      (should (gethash "new" records))
+      (should-not (gethash "old" records)))))
+
+(ert-deftest agent-log-test-metadata-from-file/claude-without-history ()
+  "A transcript without history or progress metadata still has its project."
+  (agent-log-test--with-claude-store
+    (let* ((file (agent-log-test--write-transcript
+                  "-p" agent-log-test--uuid-a
+                  (agent-log-test--transcript-line
+                   "/p/desktop" "2026-01-01T00:00:00.000Z" "Hello")))
+           (metadata (agent-log--metadata-from-file
+                      file agent-log-test--claude-backend)))
+      (should (equal (plist-get metadata :project) "/p/desktop"))
+      (should (equal (plist-get metadata :display) "Hello")))))
+
 ;;;;; Index management
 
 (ert-deftest agent-log-test-read-index/missing-file ()
