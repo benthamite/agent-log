@@ -208,9 +208,24 @@ session browsing never starts or waits for Codex app-server."
             (remhash home agent-log-codex--catalog-repairs))
           indexed)
       (agent-log-codex--maybe-start-catalog-repair home)
-      (unless indexed
+      (when (and (null indexed) (agent-log-codex--catalog-repair-running-p home))
         (message "Agent Log: Codex catalog cache is initializing in the background"))
       indexed)))
+
+(defun agent-log-codex--catalog-repair-running-p (home)
+  "Return non-nil if a catalog repair process for HOME is alive."
+  (let ((process (plist-get (gethash home agent-log-codex--catalog-repairs)
+                            :process)))
+    (and (processp process) (process-live-p process))))
+
+(cl-defmethod agent-log--backend-browser-notice ((backend agent-log-codex))
+  "Return why BACKEND's session list may be incomplete, or nil.
+The session browser shows this because a failed catalog repair otherwise
+leaves Codex sessions missing with no sign of the cause."
+  (when-let* ((home (agent-log-codex--effective-home backend))
+              (failure (plist-get (gethash home agent-log-codex--catalog-repairs)
+                                  :error)))
+    (format "Codex sessions may be missing: %s" failure)))
 
 (defun agent-log-codex--activity-newer-than-cache-p (home threads)
   "Return non-nil if a transcript in THREADS changed after HOME's cache."
@@ -282,8 +297,7 @@ Repeated browses do not restart a repair for the same newest rollout
 until `agent-log-codex-catalog-repair-cooldown' has elapsed."
   (let* ((rollout (or (agent-log-codex--newest-rollout-id home) 'empty))
          (state (gethash home agent-log-codex--catalog-repairs))
-         (active (and (processp (plist-get state :process))
-                      (process-live-p (plist-get state :process))))
+         (active (agent-log-codex--catalog-repair-running-p home))
          (same-rollout (equal rollout (plist-get state :rollout)))
          (recent (< (- (float-time) (or (plist-get state :started) 0))
                     agent-log-codex-catalog-repair-cooldown)))
@@ -291,10 +305,12 @@ until `agent-log-codex-catalog-repair-cooldown' has elapsed."
       (condition-case err
           (agent-log-codex--start-catalog-repair home rollout)
         (error
-         (puthash home (list :rollout rollout :started (float-time))
-                  agent-log-codex--catalog-repairs)
-         (message "Agent Log Codex catalog repair could not start: %s"
-                  (error-message-string err)))))))
+         (let ((failure (error-message-string err)))
+           (puthash home (list :rollout rollout :started (float-time)
+                               :error failure)
+                    agent-log-codex--catalog-repairs)
+           (message "Agent Log Codex catalog repair could not start: %s"
+                    failure)))))))
 
 (defun agent-log-codex--start-catalog-repair (home rollout)
   "Start an asynchronous catalog repair for HOME and newest ROLLOUT.
@@ -304,7 +320,7 @@ interactive Emacs never receives archive scan output and does not
 enforce the deadline from its event loop."
   (let* ((timeout-program
           (or (executable-find "timeout") (executable-find "gtimeout")
-              (error "Agent Log requires timeout or gtimeout for Codex catalog repair")))
+              (error "catalog repair needs timeout or gtimeout; install coreutils")))
          (helper (expand-file-name
                   "agent-log-codex-repair.el"
                   (file-name-directory
@@ -383,7 +399,10 @@ enforce the deadline from its event loop."
           (stderr-buffer (process-get process 'repair-stderr-buffer)))
       (when (eq process (plist-get (gethash home agent-log-codex--catalog-repairs)
                                    :process))
-        (puthash home (list :rollout rollout :started (float-time))
+        (puthash home (append (list :rollout rollout :started (float-time))
+                              (and error-data
+                                   (list :error (format "catalog repair failed: %s"
+                                                        error-data))))
                  agent-log-codex--catalog-repairs))
       (agent-log-codex--stop-catalog-process process stderr-buffer)
       (when error-data

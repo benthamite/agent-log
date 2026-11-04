@@ -581,6 +581,76 @@ SUMMARY defaults to ONELINE."
                        "Hello project"))
         (should (numberp (plist-get metadata :timestamp)))))))
 
+(defmacro agent-log-test--with-codex-without-timeout (bindings &rest body)
+  "Run BODY with BINDINGS and a stale Codex home where repair cannot start.
+BINDINGS may use `backend', `home' and `repairs', which BODY can also read."
+  (declare (indent 1) (debug t))
+  `(agent-log-test--with-temp-dir
+     (let* ((home (file-name-as-directory agent-log-test--dir))
+            (backend (agent-log--make-codex :name "Codex" :key 'codex
+                                            :directory home))
+            (repairs (make-hash-table :test #'equal))
+            (agent-log-codex--catalog-repairs repairs)
+            ,@bindings)
+       (cl-letf (((symbol-function 'agent-log-codex--effective-home)
+                  (lambda (_backend) home))
+                 ((symbol-function 'agent-log-codex--newest-rollout-id)
+                  (lambda (_home) "newest"))
+                 ((symbol-function 'executable-find) (lambda (_name) nil))
+                 ((symbol-function 'agent-log--active-backend-instances)
+                  (lambda () (list backend))))
+         ,@body))))
+
+(ert-deftest agent-log-test-codex-missing-timeout/browser-shows-failure ()
+  "A repair that cannot start is shown in the browser, not called initializing."
+  (agent-log-test--with-codex-without-timeout ((messages nil)
+                                               (prompts nil))
+    (cl-letf (((symbol-function 'message)
+               (lambda (format-string &rest args)
+                 (push (apply #'format format-string args) messages)))
+              ((symbol-function 'agent-log--completing-read)
+               (lambda (prompt _collection)
+                 (push prompt prompts)
+                 (throw 'chose nil)))
+              ((symbol-function 'agent-log--maybe-start-auto-summary-sweep-for-sessions)
+               #'ignore))
+      (should-not (agent-log--read-sessions backend))
+      (catch 'chose (agent-log--browse-flat nil))
+      (catch 'chose (agent-log--browse-grouped nil))
+      (should (= (length prompts) 2))
+      (dolist (prompt prompts)
+        (should (string-match-p "Codex sessions may be missing" prompt))
+        (should (string-match-p "needs timeout or gtimeout" prompt)))
+      (should-not (seq-some (lambda (text)
+                              (string-match-p "initializing" text))
+                            messages)))))
+
+(ert-deftest agent-log-test-codex-missing-timeout/notice-clears-after-repair ()
+  "The browser notice goes away once a repair has started successfully."
+  (agent-log-test--with-codex-without-timeout ()
+    (agent-log--read-sessions backend)
+    (should (agent-log--backend-browser-notice backend))
+    (puthash home (list :rollout "newest" :started (float-time)) repairs)
+    (should-not (agent-log--backend-browser-notice backend))
+    (should (equal (agent-log--browser-prompt "Session: ") "Session: "))))
+
+(ert-deftest agent-log-test-codex-catalog-repair-failure/browser-shows-failure ()
+  "A repair that starts and then fails is reported in the browser too."
+  (agent-log-test--with-codex-without-timeout ()
+    (let ((process (make-process :name "agent-log-test-repair"
+                                 :command '("true") :noquery t)))
+      (unwind-protect
+          (progn
+            (process-put process 'repair-active t)
+            (process-put process 'repair-home home)
+            (puthash home (list :process process) repairs)
+            (agent-log-codex--finish-catalog-repair process "exited abnormally")
+            (should (string-match-p
+                     "catalog repair failed: exited abnormally"
+                     (agent-log--backend-browser-notice backend))))
+        (when (process-live-p process)
+          (delete-process process))))))
+
 ;;;;; Index management
 
 (ert-deftest agent-log-test-read-index/missing-file ()

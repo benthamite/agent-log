@@ -156,6 +156,11 @@ Returns a plist with :project and :date.")
   (:method ((_backend null) _file) nil)
   (:method ((_backend agent-log-backend) _file) nil))
 
+(cl-defgeneric agent-log--backend-browser-notice (backend)
+  "Return a short notice about BACKEND for the session browser, or nil.
+Use it to report a problem that leaves BACKEND's session list incomplete."
+  (:method ((_backend agent-log-backend)) nil))
+
 (cl-defgeneric agent-log--summarize-tool-input-by-name (backend name input)
   "Return a one-line summary for tool NAME with INPUT plist for BACKEND.")
 
@@ -2172,21 +2177,36 @@ METADATA is a plist with :file, :timestamp, :project, :display."
   "Present all SESSIONS in a single `completing-read'."
   (agent-log--maybe-start-auto-summary-sweep-for-sessions sessions)
   (let* ((candidates (agent-log--build-candidates sessions))
-         (selected (agent-log--completing-read "Session: " candidates))
+         (selected (agent-log--completing-read
+                    (agent-log--browser-prompt "Session: ") candidates))
          (value (alist-get selected candidates nil nil #'equal))
          (session-id (car value))
          (metadata (cdr value)))
     (agent-log--open-rendered session-id metadata)))
 
+(defun agent-log--browser-prompt (prompt)
+  "Return PROMPT preceded by any active backend's browser notice.
+The prompt carries the notice because the minibuffer hides echo-area
+messages for as long as the user is choosing."
+  (let ((notices (delq nil (mapcar #'agent-log--backend-browser-notice
+                                   (agent-log--active-backend-instances)))))
+    (if notices
+        (concat (propertize (format "[%s] " (string-join notices "; "))
+                            'face 'warning)
+                prompt)
+      prompt)))
+
 (defun agent-log--browse-grouped (sessions)
   "Present SESSIONS grouped by project: first pick project, then session."
   (let* ((grouped (agent-log--group-by-project sessions))
          (project-names (mapcar #'car grouped))
-         (project (agent-log--completing-read "Project: " project-names))
+         (project (agent-log--completing-read
+                   (agent-log--browser-prompt "Project: ") project-names))
          (project-sessions (alist-get project grouped nil nil #'equal)))
     (agent-log--maybe-start-auto-summary-sweep-for-sessions project-sessions)
     (let* ((candidates (agent-log--build-candidates project-sessions))
-           (selected (agent-log--completing-read "Session: " candidates))
+           (selected (agent-log--completing-read
+                      (agent-log--browser-prompt "Session: ") candidates))
            (value (alist-get selected candidates nil nil #'equal))
            (session-id (car value))
            (metadata (cdr value)))
