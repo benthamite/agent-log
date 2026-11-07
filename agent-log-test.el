@@ -6245,6 +6245,21 @@ when the buffer already knows which session it holds."
 
 ;;;;; Redaction
 
+(ert-deftest agent-log-test-redact-session-end-handler/passes-stop-on ()
+  "A stop event still reaches the `claude-code-event-hook' functions after it.
+The hook runs until a function returns non-nil, so a scheduled scrub must
+not stop agent.el from seeing that the turn ended."
+  (let ((agent-log-auto-redact-sessions t)
+        (claude-code-event-hook nil)
+        seen)
+    (cl-letf (((symbol-function 'run-with-timer) (lambda (&rest _) 'timer)))
+      (add-hook 'claude-code-event-hook
+                (lambda (message) (setq seen (plist-get message :type)) nil))
+      (add-hook 'claude-code-event-hook #'agent-log-redact--session-end-handler)
+      (should-not (run-hook-with-args-until-success
+                   'claude-code-event-hook '(:type stop)))
+      (should (eq seen 'stop)))))
+
 (ert-deftest agent-log-test-redact-rebuild-all/uses-canonical-sessions ()
   "Rebuilds only sessions in each provider's canonical catalog."
   (let (cleared sync-args)

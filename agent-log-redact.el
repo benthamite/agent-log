@@ -197,7 +197,11 @@ MESSAGE is a Claude Code event plist.  Fires only on `:type' `stop'.
 Defers the spawn by `agent-log-redact-active-session-seconds' plus 30
 seconds so the just-ended session file ages past the active window,
 then launches `agent-log-redact-scrub-jsonl' in an `emacs --batch'
-subprocess so the running Emacs stays responsive."
+subprocess so the running Emacs stays responsive.
+
+Return nil.  Claude Code runs `claude-code-event-hook' until a function
+returns non-nil, so returning the timer would hide every stop event from
+the functions after this one."
   (when (and agent-log-auto-redact-sessions
              (eq (plist-get message :type) 'stop))
     (run-with-timer
@@ -206,7 +210,8 @@ subprocess so the running Emacs stays responsive."
        (condition-case err
            (agent-log-redact--spawn-scrubber)
          (error (message "agent-log-redact: scheduled scrub failed: %s"
-                         (error-message-string err))))))))
+                         (error-message-string err)))))))
+  nil)
 
 (defun agent-log-redact--update-session-end-hook ()
   "Install or remove the session-end scrub hook based on the user option."
