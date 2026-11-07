@@ -434,7 +434,7 @@ a heading, `visible' shows them expanded."
   "Whether to watch the JSONL file for live updates."
   :type 'boolean)
 
-(defcustom agent-log-group-by-project t
+(defcustom agent-log-group-by-project nil
   "Whether to group sessions by project in the browser.
 When non-nil, `agent-log-browse-sessions' first prompts for a
 project, then for a session within that project."
