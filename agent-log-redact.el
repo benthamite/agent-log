@@ -43,8 +43,12 @@
 
 ;;; Code:
 
-(require 'agent-log)
 (require 'cl-lib)
+
+;; `agent-log' loads this library, so requiring it back would be circular.
+;; Everything used from it is called at run time.
+(declare-function agent-log-sync-sessions "agent-log")
+(defvar agent-log-rendered-directory)
 
 (defgroup agent-log-redact nil
   "Redact secrets from rendered agent-log Markdown."
@@ -220,19 +224,6 @@ the functions after this one."
                 #'agent-log-redact--session-end-handler)
     (remove-hook 'claude-code-event-hook
                  #'agent-log-redact--session-end-handler)))
-
-(defcustom agent-log-auto-redact-sessions nil
-  "When non-nil, run `agent-log-redact-scrub-jsonl' after a session ends.
-Hooks into Claude Code's event mechanism via `claude-code-event-hook'.
-Scrubbing is deferred by `agent-log-redact-active-session-seconds'
-plus a small buffer so the just-ended session's JSONL ages past the
-active-session window and gets scrubbed on the same run.  Requires
-the `claude-code' package.  Codex has no equivalent event hook, so
-Codex sessions are only scrubbed by manual invocation."
-  :type 'boolean
-  :set (lambda (sym val)
-         (set-default sym val)
-         (agent-log-redact--update-session-end-hook)))
 
 (defun agent-log-redact--hash (secret)
   "Return first 8 hex chars of sha256 of SECRET plus the configured salt."

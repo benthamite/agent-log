@@ -470,6 +470,34 @@ When nil, defaults to `gptel-model'."
   "Maximum characters of conversation text sent to the LLM for summarization."
   :type 'integer)
 
+(declare-function agent-log-redact--update-session-end-hook "agent-log-redact")
+
+(defun agent-log--update-redact-session-end-hook ()
+  "Apply `agent-log-auto-redact-sessions', loading `agent-log-redact' if on.
+That library installs the scrub hook as it loads.  Wait for `agent-log'
+to finish loading first, since this runs from the option's setter."
+  (cond ((featurep 'agent-log-redact)
+         (agent-log-redact--update-session-end-hook))
+        ((bound-and-true-p agent-log-auto-redact-sessions)
+         (with-eval-after-load 'agent-log
+           (require 'agent-log-redact)))))
+
+(defcustom agent-log-auto-redact-sessions nil
+  "When non-nil, run `agent-log-redact-scrub-jsonl' after a session ends.
+Hooks into Claude Code's event mechanism via `claude-code-event-hook'.
+Scrubbing is deferred by `agent-log-redact-active-session-seconds'
+plus a small buffer so the just-ended session's JSONL ages past the
+active-session window and gets scrubbed on the same run.  Requires
+the `claude-code' package.  Codex has no equivalent event hook, so
+Codex sessions are only scrubbed by manual invocation.
+
+Turning this on loads `agent-log-redact' once `agent-log' has loaded, so
+renders are redacted and the scrub runs from startup."
+  :type 'boolean
+  :set (lambda (sym val)
+         (set-default sym val)
+         (agent-log--update-redact-session-end-hook)))
+
 (defun agent-log--session-end-hook-needed-p ()
   "Return non-nil if either auto-sync or auto-summarize is enabled."
   (or (bound-and-true-p agent-log-auto-sync-sessions)
@@ -480,29 +508,32 @@ When nil, defaults to `gptel-model'."
   (agent-log--update-claude-session-end-hook)
   (agent-log--update-codex-session-end-hook))
 
+(autoload 'agent-log-claude--session-end-handler "agent-log-claude")
+(autoload 'agent-log-codex--install-hooks "agent-log-codex")
+
 (defun agent-log--update-claude-session-end-hook ()
-  "Install or remove the Claude Code session-end hook."
-  (if (featurep 'agent-log-claude)
-      (if (agent-log--session-end-hook-needed-p)
-          (add-hook 'claude-code-event-hook
-                    #'agent-log-claude--session-end-handler)
-        (remove-hook 'claude-code-event-hook
-                     #'agent-log-claude--session-end-handler))
-    (when (agent-log--session-end-hook-needed-p)
-      (eval-after-load 'agent-log-claude
-        '(when (agent-log--session-end-hook-needed-p)
-           (add-hook 'claude-code-event-hook
-                     #'agent-log-claude--session-end-handler))))))
+  "Install or remove the Claude Code session-end hook.
+The handler is autoloaded, so installing it loads nothing and works from
+startup; `agent-log-claude' loads on the first event.  Waiting for that
+library to load instead left the automatic actions off until something
+else happened to load it."
+  (if (agent-log--session-end-hook-needed-p)
+      (add-hook 'claude-code-event-hook
+                #'agent-log-claude--session-end-handler)
+    (remove-hook 'claude-code-event-hook
+                 #'agent-log-claude--session-end-handler)))
 
 (defun agent-log--update-codex-session-end-hook ()
-  "Install or remove the Codex session-end hook."
-  (if (featurep 'agent-log-codex)
+  "Install or remove the Codex session-end hook.
+Install it once `agent-log' has loaded, loading `agent-log-codex' if
+needed, so the automatic actions work from startup.  An option's setter
+can run while `agent-log' is still loading, and `agent-log-codex'
+requires it."
+  (when (or (featurep 'agent-log-codex)
+            (agent-log--session-end-hook-needed-p))
+    (with-eval-after-load 'agent-log
       (agent-log-codex--install-hooks
-       (agent-log--session-end-hook-needed-p))
-    (when (agent-log--session-end-hook-needed-p)
-      (eval-after-load 'agent-log-codex
-        '(when (agent-log--session-end-hook-needed-p)
-           (agent-log-codex--install-hooks t))))))
+       (agent-log--session-end-hook-needed-p)))))
 
 (defvar agent-log--auto-summary-sweep-timer nil
   "Timer used to periodically sweep for unsummarized sessions.")

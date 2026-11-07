@@ -6245,6 +6245,41 @@ when the buffer already knows which session it holds."
 
 ;;;;; Redaction
 
+;; Startup
+
+(ert-deftest agent-log-test-startup/installs-session-end-handlers ()
+  "Loading `agent-log' with the automatic options on installs every handler.
+The handlers once waited for their libraries to load, which left the
+automatic actions, and the redaction of renders, off in a fresh Emacs
+until something else loaded them.  A fresh process shows that."
+  (let* ((form
+          '(progn
+             (customize-set-variable 'agent-log-auto-sync-sessions t)
+             (customize-set-variable 'agent-log-auto-redact-sessions t)
+             (require 'agent-log)
+             (prin1 (list (and (memq 'agent-log-claude--session-end-handler
+                                     claude-code-event-hook)
+                               t)
+                          (and (memq 'agent-log-redact--session-end-handler
+                                     claude-code-event-hook)
+                               t)
+                          (and (advice-member-p 'agent-log-redact--filter-return
+                                                'agent-log--render-entry)
+                               t)))))
+         (output
+          (with-temp-buffer
+            (let ((process-environment
+                   (cons (concat "EMACSLOADPATH="
+                                 (mapconcat #'identity load-path
+                                            path-separator))
+                         process-environment)))
+              (call-process (expand-file-name invocation-name
+                                              invocation-directory)
+                            nil t nil "-Q" "--batch" "--eval"
+                            (prin1-to-string form)))
+            (buffer-string))))
+    (should (string-suffix-p "(t t t)" (string-trim output)))))
+
 (ert-deftest agent-log-test-redact-session-end-handler/passes-stop-on ()
   "A stop event still reaches the `claude-code-event-hook' functions after it.
 The hook runs until a function returns non-nil, so a scheduled scrub must
