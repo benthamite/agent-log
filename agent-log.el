@@ -470,6 +470,48 @@ When nil, defaults to `gptel-model'."
   "Maximum characters of conversation text sent to the LLM for summarization."
   :type 'integer)
 
+(defcustom agent-log-summary-method 'gptel
+  "How agent-log generates session summaries.
+The value is one of these symbols:
+
+`gptel'      Send the request through gptel, as configured by
+             `agent-log-summary-backend' and `agent-log-summary-model'.
+`agent-cli'  Run an agent command-line tool you are already logged in
+             to, so no API key is needed: Claude Code (`claude -p' with
+             the Haiku model) when it is installed and logged in,
+             otherwise Codex (`codex exec' with low reasoning effort).
+             When neither is usable, no summary is generated and the
+             reason is reported once.
+`claude'     Run Claude Code only.
+`codex'      Run Codex only.
+
+The command-line runs save no transcript of their own, so they never
+appear as sessions to browse or summarize."
+  :type '(choice (const :tag "gptel" gptel)
+                 (const :tag "Claude Code, else Codex" agent-cli)
+                 (const :tag "Claude Code" claude)
+                 (const :tag "Codex" codex)))
+
+(defcustom agent-log-summary-claude-program "claude"
+  "The Claude Code executable used when summaries run through Claude Code."
+  :type 'string)
+
+(defcustom agent-log-summary-codex-program "codex"
+  "The Codex executable used when summaries run through Codex."
+  :type 'string)
+
+(defcustom agent-log-summary-codex-model nil
+  "The Codex model for summaries, as a model name string.
+When nil, Codex uses its built-in default model.  This applies only when
+`agent-log-summary-method' runs Codex."
+  :type '(choice (const :tag "Codex default" nil)
+                 (string :tag "Model name")))
+
+(defcustom agent-log-summary-cli-timeout 120
+  "Seconds a command-line summary run may take before it is stopped.
+A run that is stopped counts as a failed summary."
+  :type 'number)
+
 (declare-function agent-log-redact--update-session-end-hook "agent-log-redact")
 
 (defun agent-log--update-redact-session-end-hook ()
@@ -3645,8 +3687,7 @@ excluded from search until their logs settle."
   "Generate AI summaries for all sessions lacking a current one.
 If summary generation is already in progress, stop it instead."
   (interactive)
-  (unless (require 'gptel nil t)
-    (user-error "Package `gptel' is required for summary generation"))
+  (agent-log--require-summary-method)
   (cond
    (agent-log--summarize-active
     (agent-log-stop-summarize-sessions))
@@ -3678,8 +3719,7 @@ These summaries are explicitly marked in the index as recovered from
 rendered Markdown.  With prefix argument LIMIT, recover at most that
 many sessions."
   (interactive "P")
-  (unless (require 'gptel nil t)
-    (user-error "Package `gptel' is required for summary recovery"))
+  (agent-log--require-summary-method)
   (cond
    (agent-log--rendered-summary-active
     (cl-incf agent-log--rendered-summary-generation)
@@ -3747,29 +3787,40 @@ DONE, TOTAL, and GEN are chain-continuation state."
 
 (defun agent-log--summarize-rendered-one
     (sid file text remaining done total gen)
-  "Send a gptel request to summarize rendered Markdown for SID."
-  (let* ((prompt (agent-log--build-summary-prompt text))
-         (resolved (agent-log--resolve-summary-backend-and-model))
-         (gptel-backend (car resolved))
-         (gptel-model (cdr resolved))
-         (gptel-use-tools nil)
-         (request-id (cl-gensym "rendered-summary-")))
+  "Request a summary of rendered Markdown for SID.
+FILE is the rendered Markdown source, and TEXT is its conversation text.
+REMAINING, DONE, TOTAL, and GEN are chain-continuation state for
+`agent-log--summarize-rendered-next'."
+  (let ((prompt (agent-log--build-summary-prompt text))
+        (request-id (cl-gensym "rendered-summary-")))
     (message "Recovering rendered-only summary %d/%d with %s: %s"
-             (1+ done) total gptel-model
+             (1+ done) total (agent-log--summary-method-label)
              (agent-log--truncate-string file 70))
     (setq agent-log--rendered-summary-request-id request-id)
-    (gptel-request prompt
-      :system agent-log--summary-system-message
-      :callback
-      (lambda (response _info)
-        (when (and (eq agent-log--rendered-summary-request-id request-id)
-                   (or (stringp response) (null response)))
-          (setq agent-log--rendered-summary-request-id nil)
-          (if (stringp response)
-              (agent-log--summarize-rendered-handle-success
-               response sid file text remaining done total gen)
-            (agent-log--summarize-rendered-handle-failure
-             sid remaining done total gen)))))))
+    (agent-log--summary-request
+     prompt
+     (lambda (response info)
+       (when (and (eq agent-log--rendered-summary-request-id request-id)
+                  (or (stringp response) (null response)))
+         (setq agent-log--rendered-summary-request-id nil)
+         (cond
+          ((stringp response)
+           (agent-log--summarize-rendered-handle-success
+            response sid file text remaining done total gen))
+          ((plist-get info :unavailable)
+           (agent-log--summarize-rendered-stop-unavailable info))
+          (t
+           (agent-log--summarize-rendered-handle-failure
+            sid remaining done total gen))))))))
+
+(defun agent-log--summarize-rendered-stop-unavailable (info)
+  "Stop rendered-only summary recovery because no summary tool is usable.
+INFO is the failure plist, whose `:error' says why."
+  (cl-incf agent-log--rendered-summary-generation)
+  (setq agent-log--rendered-summary-active nil
+        agent-log--rendered-summary-stop nil)
+  (message "Rendered-only summary recovery stopped: %s"
+           (plist-get info :error)))
 
 (defun agent-log--summarize-rendered-handle-success
     (response sid file text remaining done total gen)
@@ -3836,15 +3887,19 @@ not call it as a fallback."
   "Summarize SESSION in a background process when configured."
   (when (and agent-log-auto-summarize-sessions
              (not agent-log--summarize-blocked-reason))
-    (agent-log--spawn-summary-worker (car session))))
+    (agent-log--summary-method-ready
+     (lambda ()
+       (agent-log--spawn-summary-worker (car session))))))
 
 (defun agent-log--auto-summary-sweep (&optional session-ids)
   "Start a background worker that summarizes a bounded pending backlog.
 When SESSION-IDS is non-nil, the worker prioritizes those sessions."
   (when (agent-log--auto-summarize-ready-p)
-    (agent-log--spawn-summary-sweep-worker
-     agent-log-auto-summarize-sweep-limit
-     session-ids)))
+    (agent-log--summary-method-ready
+     (lambda ()
+       (agent-log--spawn-summary-sweep-worker
+        agent-log-auto-summarize-sweep-limit
+        session-ids)))))
 
 (defun agent-log--maybe-start-auto-summary-sweep (&optional sessions)
   "Start a background summary sweep if automatic backlog work is idle.
@@ -3877,7 +3932,7 @@ session set instead of spending the sweep limit on the whole archive."
   "Return non-nil when automatic summary generation may start."
   (and agent-log-auto-summarize-sessions
        (not agent-log--summarize-blocked-reason)
-       (require 'gptel nil t)
+       (agent-log--summary-method-loadable-p)
        (not agent-log--summarize-active)))
 
 (defun agent-log--session-needs-summary-p (session)
@@ -3998,28 +4053,29 @@ When SESSION-IDS is non-nil, write a targeted sweep form."
         (prin1
          `(unwind-protect
               (progn
-                (setq load-path ',load-path)
-                (require 'gptel)
+                (setq load-path ',load-path
+                      exec-path ',exec-path)
                 (require 'agent-log)
                 (setq agent-log-directory ,agent-log-directory
                       agent-log-backends ',agent-log-backends
                       agent-log-active-backends ',agent-log-active-backends
                       agent-log-auto-rename-sessions
                       ,agent-log-auto-rename-sessions
+                      agent-log-summary-method ',agent-log-summary-method
                       agent-log-summary-backend ',agent-log-summary-backend
                       agent-log-summary-model ',agent-log-summary-model
                       agent-log-summary-max-content-length
                       ,agent-log-summary-max-content-length
-                      gptel-model ',(and (boundp 'gptel-model) gptel-model))
-                (let* ((key-backend
-                        ',(agent-log--summary-worker-summary-backend-name))
-                       (key (agent-log--summary-worker-read-key key-backend)))
-                  (dolist (spec ',(agent-log--summary-worker-backend-specs))
-                    (agent-log--summary-worker-restore-backend
-                     spec key-backend key)))
-                (when-let* ((backend-name
-                             ',(agent-log--summary-worker-default-backend-name)))
-                  (setq gptel-backend (gptel-get-backend backend-name)))
+                      agent-log-summary-claude-program
+                      ,agent-log-summary-claude-program
+                      agent-log-summary-codex-program
+                      ,agent-log-summary-codex-program
+                      agent-log-summary-codex-model
+                      ',agent-log-summary-codex-model
+                      agent-log-summary-cli-timeout
+                      ,agent-log-summary-cli-timeout)
+                ,@(and (eq agent-log-summary-method 'gptel)
+                       (agent-log--summary-worker-gptel-forms))
                 ,form)
             (when (and load-file-name (file-exists-p load-file-name))
               (delete-file load-file-name)))
@@ -4028,9 +4084,28 @@ When SESSION-IDS is non-nil, write a targeted sweep form."
     (set-file-modes file #o600)
     file))
 
+(defun agent-log--summary-worker-gptel-forms ()
+  "Return the forms that set up gptel in a summary worker.
+The forms load gptel, restore its backends and give the summary backend
+the API key the worker reads from its standard input."
+  `((require 'gptel)
+    (setq gptel-model ',(and (boundp 'gptel-model) gptel-model))
+    (let* ((key-backend
+            ',(agent-log--summary-worker-summary-backend-name))
+           (key (agent-log--summary-worker-read-key key-backend)))
+      (dolist (spec ',(agent-log--summary-worker-backend-specs))
+        (agent-log--summary-worker-restore-backend
+         spec key-backend key)))
+    (when-let* ((backend-name
+                 ',(agent-log--summary-worker-default-backend-name)))
+      (setq gptel-backend (gptel-get-backend backend-name)))))
+
 (defun agent-log--summary-worker-summary-backend ()
-  "Return the gptel backend used for summaries, or nil."
-  (when (boundp 'gptel--known-backends)
+  "Return the gptel backend used for summaries, or nil.
+Return nil when summaries do not go through gptel, so that no API key
+is looked up or sent to a worker."
+  (when (and (eq agent-log-summary-method 'gptel)
+             (boundp 'gptel--known-backends))
     (car (agent-log--resolve-summary-backend-and-model))))
 
 (defun agent-log--summary-worker-summary-backend-name ()
@@ -4134,8 +4209,7 @@ When the backend is named KEY-BACKEND and KEY is non-nil, give it KEY."
 
 (defun agent-log--batch-summarize-session (session-id)
   "Summarize SESSION-ID and wait for completion in batch Emacs."
-  (unless (require 'gptel nil t)
-    (user-error "Package `gptel' is required for summary generation"))
+  (agent-log--require-summary-method)
   (let ((agent-log-auto-summarize-sessions t)
         (agent-log--summarize-active nil)
         (agent-log--summarize-blocked-reason nil)
@@ -4156,8 +4230,7 @@ When the backend is named KEY-BACKEND and KEY is non-nil, give it KEY."
   "Summarize up to LIMIT pending sessions and wait for completion.
 When SESSION-IDS is non-nil, restrict the pending set to those
 sessions in the given order."
-  (unless (require 'gptel nil t)
-    (user-error "Package `gptel' is required for summary generation"))
+  (agent-log--require-summary-method)
   (let ((agent-log-auto-summarize-sessions t)
         (agent-log--summarize-active nil)
         (agent-log--summarize-blocked-reason nil)
@@ -4304,32 +4377,27 @@ nothing."
 
 (defun agent-log--summarize-one
     (sid meta text conversation-hash jsonl-state remaining done total gen)
-  "Send a gptel request to summarize session SID.
+  "Request a summary of session SID.
 META is the session metadata plist.  TEXT is the extracted
 conversation text.  CONVERSATION-HASH fingerprints the full
 conversation.  JSONL-STATE is the source file state summarized.
 REMAINING, DONE, TOTAL, and GEN are chain-continuation state for
 `agent-log--summarize-next'."
-  (let* ((prompt (agent-log--build-summary-prompt text))
-         (resolved (agent-log--resolve-summary-backend-and-model))
-         (gptel-backend (car resolved))
-         (gptel-model (cdr resolved))
-         (gptel-use-tools nil)
-         (request-id (cl-gensym "summarize-"))
-         (display (agent-log--summarize-display-name meta text sid)))
+  (let ((prompt (agent-log--build-summary-prompt text))
+        (request-id (cl-gensym "summarize-"))
+        (display (agent-log--summarize-display-name meta text sid)))
     (message
      "Summarizing pending update %d/%d (archive: %d sessions) with %s: %s..."
      (1+ done) total (or agent-log--summarize-archive-total total)
-     gptel-model
+     (agent-log--summary-method-label)
      (agent-log--truncate-string display 70))
     (setq agent-log--summarize-request-id request-id)
-    (gptel-request prompt
-      :system agent-log--summary-system-message
-      :callback
-      (lambda (response info)
-        (agent-log--summarize-callback
-         response info request-id sid conversation-hash jsonl-state
-         remaining done total gen)))))
+    (agent-log--summary-request
+     prompt
+     (lambda (response info)
+       (agent-log--summarize-callback
+        response info request-id sid conversation-hash jsonl-state
+        remaining done total gen)))))
 
 (defun agent-log--summarize-display-name (meta text sid)
   "Return a human-readable display name from META, TEXT, or SID."
@@ -4341,6 +4409,344 @@ REMAINING, DONE, TOTAL, and GEN are chain-continuation state for
             (match-string 1 text)
           sid)
       display)))
+
+(defun agent-log--summary-request (prompt callback)
+  "Request a summary of PROMPT through `agent-log-summary-method'.
+Call CALLBACK with RESPONSE and INFO, as `gptel-request' does: RESPONSE
+is the model's reply, or nil on failure, when the plist INFO has an
+`:error' saying why.  INFO also has a non-nil `:unavailable' when no
+command-line tool that the method allows can be used."
+  (if (eq agent-log-summary-method 'gptel)
+      (agent-log--summary-request-gptel prompt callback)
+    (agent-log--summary-request-cli prompt callback)))
+
+(defun agent-log--summary-request-gptel (prompt callback)
+  "Send PROMPT to the gptel summary model and call CALLBACK with the reply.
+Tools are disabled so that globally configured ones, such as MCP
+servers, are not included in the request."
+  (let* ((resolved (agent-log--resolve-summary-backend-and-model))
+         (gptel-backend (car resolved))
+         (gptel-model (cdr resolved))
+         (gptel-use-tools nil))
+    (gptel-request prompt
+      :system agent-log--summary-system-message
+      :callback callback)))
+
+(defun agent-log--summary-request-cli (prompt callback)
+  "Summarize PROMPT with the first usable agent command-line tool.
+Call CALLBACK as `agent-log--summary-request' describes."
+  (agent-log--summary-cli-select
+   (lambda (cli program reason)
+     (if cli
+         (agent-log--summary-cli-run cli program prompt callback)
+       (funcall callback nil (list :error reason :unavailable t))))))
+
+(defun agent-log--summary-method-label ()
+  "Return a short description of what generates summaries, for messages."
+  (pcase agent-log-summary-method
+    ('gptel (format "%s" (cdr (agent-log--resolve-summary-backend-and-model))))
+    ('agent-cli "Claude Code or Codex")
+    ('claude "Claude Code")
+    ('codex "Codex")
+    (method (format "%s" method))))
+
+(defun agent-log--require-summary-method ()
+  "Signal a user error unless `agent-log-summary-method' can be used."
+  (unless (agent-log--summary-method-loadable-p)
+    (user-error "Package `gptel' is required for summary generation \
+unless `agent-log-summary-method' names an agent CLI")))
+
+(defun agent-log--summary-method-loadable-p ()
+  "Return non-nil unless summaries need gptel and it cannot be loaded."
+  (or (not (eq agent-log-summary-method 'gptel))
+      (require 'gptel nil t)))
+
+(defun agent-log--summary-method-ready (callback)
+  "Call CALLBACK once `agent-log-summary-method' can generate summaries.
+For gptel, call it at once.  For a command-line method, first look,
+without waiting, for a tool that is installed and logged in, and call
+CALLBACK with `agent-log-summary-method' bound to that tool, so that a
+worker started by CALLBACK uses it.  When no tool is usable, suspend
+automatic summaries and say why."
+  (if (eq agent-log-summary-method 'gptel)
+      (funcall callback)
+    (agent-log--summary-cli-select
+     (lambda (cli _program reason)
+       (if cli
+           (let ((agent-log-summary-method cli))
+             (funcall callback))
+         (agent-log--summary-suspend reason))))))
+
+(defun agent-log--summary-suspend (reason)
+  "Suspend automatic summaries because of REASON and report it.
+Do nothing when automatic summaries are already suspended, so the
+reason is reported once."
+  (unless agent-log--summarize-blocked-reason
+    (setq agent-log--summarize-blocked-reason reason)
+    (message "agent-log: automatic summaries suspended: %s; fix this and \
+run M-x agent-log-summarize-sessions to retry"
+             reason)))
+
+;;;;; Command-line summaries
+
+(defun agent-log--summary-cli-select (callback)
+  "Find the first summary tool that is installed and logged in.
+Call CALLBACK with CLI, the tool's symbol, PROGRAM, its executable, and
+nil.  When no tool that `agent-log-summary-method' allows is usable, call
+it with nil, nil and REASON, a string saying why.  Login checks run as
+subprocesses, so this returns before CALLBACK is called."
+  (agent-log--summary-cli-select-from
+   (agent-log--summary-cli-candidates) nil callback))
+
+(defun agent-log--summary-cli-candidates ()
+  "Return the tools `agent-log-summary-method' allows, most preferred first."
+  (pcase agent-log-summary-method
+    ('agent-cli '(claude codex))
+    ('claude '(claude))
+    ('codex '(codex))))
+
+(defun agent-log--summary-cli-select-from (candidates reasons callback)
+  "Call CALLBACK with the first usable tool among CANDIDATES.
+REASONS lists, latest first, why earlier candidates were unusable.  See
+`agent-log--summary-cli-select' for CALLBACK."
+  (if (null candidates)
+      (funcall callback nil nil
+               (agent-log--summary-cli-unavailable-reason (reverse reasons)))
+    (let* ((cli (car candidates))
+           (name (agent-log--summary-cli-program-name cli))
+           (program (executable-find name))
+           (next (lambda (reason)
+                   (agent-log--summary-cli-select-from
+                    (cdr candidates) (cons reason reasons) callback))))
+      (if (null program)
+          (funcall next (format "%s is not installed" name))
+        (agent-log--summary-cli-start
+         (cons program (agent-log--summary-cli-status-args cli))
+         nil
+         (lambda (result)
+           (if (eql (plist-get result :exit) 0)
+               (funcall callback cli program nil)
+             (funcall next
+                      (agent-log--summary-cli-login-reason cli result)))))))))
+
+(defun agent-log--summary-cli-unavailable-reason (reasons)
+  "Return why no summary tool can be used, given each tool's REASONS."
+  (if reasons
+      (format "no agent CLI can generate summaries: %s"
+              (string-join reasons "; "))
+    (format "`agent-log-summary-method' is %S, which names no agent CLI"
+            agent-log-summary-method)))
+
+(defun agent-log--summary-cli-login-reason (cli result)
+  "Return why CLI is unusable after its login check ended with RESULT."
+  (let ((name (agent-log--summary-cli-program-name cli)))
+    (if (plist-get result :exit)
+        (format "%s is not logged in (run `%s')"
+                name (string-join (cons name (agent-log--summary-cli-login-args
+                                              cli))
+                                  " "))
+      (format "could not check whether %s is logged in: %s"
+              name (agent-log--summary-cli-error-detail result)))))
+
+(defun agent-log--summary-cli-program-name (cli)
+  "Return the executable name configured for CLI."
+  (pcase cli
+    ('claude agent-log-summary-claude-program)
+    ('codex agent-log-summary-codex-program)))
+
+(defun agent-log--summary-cli-status-args (cli)
+  "Return the arguments that make CLI exit with status 0 when logged in."
+  (pcase cli
+    ('claude '("auth" "status"))
+    ('codex '("login" "status"))))
+
+(defun agent-log--summary-cli-login-args (cli)
+  "Return the arguments that log in to CLI."
+  (pcase cli
+    ('claude '("auth" "login"))
+    ('codex '("login"))))
+
+(defun agent-log--summary-cli-run (cli program prompt callback)
+  "Summarize PROMPT by running CLI's PROGRAM, then call CALLBACK.
+CALLBACK receives RESPONSE and INFO as `agent-log--summary-request'
+describes."
+  (agent-log--summary-cli-start
+   (agent-log--summary-cli-command cli program)
+   (agent-log--summary-cli-input cli prompt)
+   (lambda (result)
+     (let ((outcome (agent-log--summary-cli-response cli result)))
+       (funcall callback (car outcome) (cdr outcome))))))
+
+(defun agent-log--summary-cli-command (cli program)
+  "Return the command that makes CLI's PROGRAM summarize its standard input.
+Neither command saves a transcript, so a summary run never becomes a
+session itself.  Claude Code runs the Haiku model in safe mode, which
+skips hooks, MCP servers and memory files, and with no tools.  Codex runs
+with low reasoning effort and read-only access, and ignores the user's
+configuration file, whose hooks and notification programs would
+otherwise run."
+  (pcase cli
+    ('claude
+     (list program "--print" "--model" "haiku"
+           "--no-session-persistence" "--safe-mode" "--tools" ""
+           "--output-format" "text"
+           "--system-prompt" agent-log--summary-system-message))
+    ('codex
+     (append (list program "exec" "--ephemeral" "--ignore-user-config"
+                   "--skip-git-repo-check" "--sandbox" "read-only"
+                   "--color" "never"
+                   "--config" "model_reasoning_effort=\"low\"")
+             (and agent-log-summary-codex-model
+                  (list "--model" agent-log-summary-codex-model))
+             (list "-")))))
+
+(defun agent-log--summary-cli-input (cli prompt)
+  "Return the standard input that asks CLI to summarize PROMPT.
+Claude Code receives the summary instructions as its system prompt.
+Codex has no such option, so the instructions precede PROMPT."
+  (if (eq cli 'codex)
+      (concat agent-log--summary-system-message "\n\n" prompt)
+    prompt))
+
+(defun agent-log--summary-cli-response (cli result)
+  "Return (RESPONSE . INFO) for a summary run of CLI that ended with RESULT.
+RESPONSE is the run's output when it succeeded.  Otherwise it is nil,
+and INFO is a plist whose `:error' says why."
+  (let ((name (agent-log--summary-cli-program-name cli))
+        (output (string-trim (or (plist-get result :stdout) "")))
+        (exit (plist-get result :exit)))
+    (cond
+     ((plist-get result :timed-out)
+      (agent-log--summary-cli-failure
+       "%s did not finish within %s seconds"
+       name agent-log-summary-cli-timeout))
+     ((null exit)
+      (agent-log--summary-cli-failure
+       "%s did not finish: %s"
+       name (agent-log--summary-cli-error-detail result)))
+     ((/= exit 0)
+      (agent-log--summary-cli-failure
+       "%s exited with status %d: %s"
+       name exit (agent-log--summary-cli-error-detail result)))
+     ((string-empty-p output)
+      (agent-log--summary-cli-failure "%s returned no output" name))
+     (t (cons output nil)))))
+
+(defun agent-log--summary-cli-failure (format-string &rest args)
+  "Return a failed (nil . INFO) outcome whose error is FORMAT-STRING with ARGS."
+  (cons nil (list :error (apply #'format format-string args))))
+
+(defun agent-log--summary-cli-error-detail (result)
+  "Return the last line of standard error in RESULT, or a placeholder."
+  (or (car (last (split-string (or (plist-get result :stderr) "")
+                               "\n" t "[ \t\r]+")))
+      "no error output"))
+
+(defun agent-log--summary-cli-start (command input callback)
+  "Run COMMAND without waiting for it, feeding it INPUT on standard input.
+When INPUT is nil, close standard input at once.  When the run ends,
+call CALLBACK with a plist of `:exit', the exit status, or nil when the
+process did not exit by itself; `:stdout' and `:stderr', its output; and
+`:timed-out', non-nil when it was stopped after
+`agent-log-summary-cli-timeout' seconds.  The run starts in the
+directory named by the variable `temporary-file-directory', so no
+project's instructions or settings apply to it.  Return the process,
+or nil when it could not start, in which case CALLBACK still runs, from
+a timer."
+  (let ((default-directory temporary-file-directory)
+        (stdout (generate-new-buffer " *agent-log-summary-cli*" t))
+        (stderr (generate-new-buffer " *agent-log-summary-cli-stderr*" t))
+        stderr-pipe
+        process)
+    (condition-case err
+        (progn
+          (setq stderr-pipe (make-pipe-process
+                             :name "agent-log-summary-cli-stderr"
+                             :buffer stderr
+                             :coding 'utf-8-unix
+                             :noquery t
+                             :sentinel #'ignore)
+                process (make-process
+                         :name "agent-log-summary-cli"
+                         :buffer stdout
+                         :stderr stderr-pipe
+                         :command command
+                         :connection-type 'pipe
+                         :coding 'utf-8-unix
+                         :noquery t
+                         :sentinel #'agent-log--summary-cli-sentinel))
+          (process-put process 'agent-log-callback callback)
+          (process-put process 'agent-log-stderr stderr-pipe)
+          (process-put process 'agent-log-timer
+                       (run-at-time agent-log-summary-cli-timeout nil
+                                    #'agent-log--summary-cli-stop process))
+          (when input
+            (process-send-string process input))
+          (process-send-eof process)
+          process)
+      (error
+       (if (processp process)
+           (progn
+             (process-put process 'agent-log-callback nil)
+             (agent-log--summary-cli-cleanup process)
+             (delete-process process))
+         (when (processp stderr-pipe)
+           (delete-process stderr-pipe))
+         (kill-buffer stdout)
+         (kill-buffer stderr))
+       (run-at-time 0 nil callback
+                    (list :exit nil :stdout ""
+                          :stderr (format "%s: %s" (car command)
+                                          (error-message-string err))))
+       nil))))
+
+(defun agent-log--summary-cli-sentinel (process _event)
+  "Pass the result of summary PROCESS to its callback once it has ended."
+  (when-let* (((memq (process-status process) '(exit signal)))
+              (callback (process-get process 'agent-log-callback)))
+    (process-put process 'agent-log-callback nil)
+    (let ((result (agent-log--summary-cli-result process)))
+      (agent-log--summary-cli-cleanup process)
+      (funcall callback result))))
+
+(defun agent-log--summary-cli-result (process)
+  "Return the result plist of ended summary PROCESS.
+Read what is left on its standard error pipe first, without waiting."
+  (let ((stderr-pipe (process-get process 'agent-log-stderr)))
+    (while (and (process-live-p stderr-pipe)
+                (accept-process-output stderr-pipe 0 nil t)))
+    (list :exit (and (eq (process-status process) 'exit)
+                     (process-exit-status process))
+          :stdout (agent-log--summary-cli-buffer-text (process-buffer process))
+          :stderr (agent-log--summary-cli-buffer-text
+                   (process-buffer stderr-pipe))
+          :timed-out (process-get process 'agent-log-timed-out))))
+
+(defun agent-log--summary-cli-buffer-text (buffer)
+  "Return the text of BUFFER, or the empty string when it is gone."
+  (if (buffer-live-p buffer)
+      (with-current-buffer buffer
+        (buffer-string))
+    ""))
+
+(defun agent-log--summary-cli-cleanup (process)
+  "Release the timer, standard error pipe and buffers of summary PROCESS."
+  (when-let* ((timer (process-get process 'agent-log-timer)))
+    (cancel-timer timer))
+  (when-let* ((stderr-pipe (process-get process 'agent-log-stderr)))
+    (let ((buffer (process-buffer stderr-pipe)))
+      (delete-process stderr-pipe)
+      (when (buffer-live-p buffer)
+        (kill-buffer buffer))))
+  (let ((buffer (process-buffer process)))
+    (when (buffer-live-p buffer)
+      (kill-buffer buffer))))
+
+(defun agent-log--summary-cli-stop (process)
+  "Kill summary PROCESS, which outlived `agent-log-summary-cli-timeout'."
+  (when (process-live-p process)
+    (process-put process 'agent-log-timed-out t)
+    (kill-process process)))
 
 (defun agent-log--summarize-callback
     (response info request-id sid conversation-hash jsonl-state
@@ -4403,13 +4809,15 @@ INFO is the gptel callback info plist with `:status' and `:error'
 fields.  REMAINING, DONE, TOTAL, and GEN are chain-continuation
 state.  Aborts the run on auth errors (and blocks auto-restart) or
 after `agent-log--summarize-max-consecutive-failures' consecutive
-failures; otherwise logs the error and advances to the next session."
+failures; otherwise logs the error and advances to the next session.
+A missing or logged-out summary command-line tool blocks like an auth
+error."
   (setq agent-log--summarize-request-id nil)
   (cl-incf agent-log--summarize-consecutive-failures)
   (cl-incf agent-log--summarize-failures)
   (let* ((err-msg (agent-log--summarize-error-message info))
          (err-class (agent-log--summarize-classify-error info))
-         (auth-error (eq err-class 'auth))
+         (auth-error (memq err-class '(auth unavailable)))
          (too-many (>= agent-log--summarize-consecutive-failures
                        agent-log--summarize-max-consecutive-failures)))
     (cond
@@ -4450,13 +4858,15 @@ DONE and TOTAL are progress counters used in the abort message."
 
 (defun agent-log--summarize-classify-error (info)
   "Classify the error described by gptel callback INFO plist.
-Returns one of: `auth' for HTTP 400/401/403 (won't resolve without
-user action), `rate-limit' for 429, `server' for 5xx, `client' for
-other 4xx, or nil when no HTTP status is available."
+Returns one of: `unavailable' when no summary command-line tool can
+be used, `auth' for HTTP 400/401/403 (won't resolve without user
+action), `rate-limit' for 429, `server' for 5xx, `client' for other
+4xx, or nil when no HTTP status is available."
   (let* ((status (plist-get info :status))
          (code (when (stringp status)
                  (string-to-number status))))
     (cond
+     ((plist-get info :unavailable) 'unavailable)
      ((or (null code) (zerop code)) nil)
      ((memq code '(400 401 403)) 'auth)
      ((= code 429) 'rate-limit)

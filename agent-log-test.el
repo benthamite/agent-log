@@ -3334,6 +3334,363 @@ session."
                "pending update 1/20 (archive: 2571 sessions)"
                (car messages))))))
 
+;;;;; Command-line summaries
+
+(defvar agent-log-test--cli-commands nil
+  "Commands the fake summary CLIs were started with, latest first.
+Each element is (COMMAND . INPUT).")
+
+(defmacro agent-log-test--with-summary-clis (spec &rest body)
+  "Run BODY with fake summary command-line tools described by SPEC.
+SPEC is an alist from a program name, \"claude\" or \"codex\", to a
+plist: `:logged-in', non-nil when its login check succeeds, and
+`:reply', the result plist its summary run reports.  A program absent
+from SPEC is not installed.  Each started command and its input are
+collected in `agent-log-test--cli-commands'."
+  (declare (indent 1) (debug t))
+  `(let ((agent-log-test--cli-commands nil)
+         (agent-log-summary-claude-program "claude")
+         (agent-log-summary-codex-program "codex")
+         (clis ,spec))
+     (cl-letf (((symbol-function 'executable-find)
+                (lambda (name &optional _remote)
+                  (and (assoc name clis) (concat "/fake/" name))))
+               ((symbol-function 'agent-log--summary-cli-start)
+                (lambda (command input callback)
+                  (push (cons command input) agent-log-test--cli-commands)
+                  (let ((props (cdr (assoc (file-name-nondirectory
+                                            (car command))
+                                           clis))))
+                    (funcall callback
+                             (if (member (cadr command) '("auth" "login"))
+                                 (list :exit (if (plist-get props :logged-in)
+                                                 0
+                                               1)
+                                       :stdout "" :stderr "")
+                               (plist-get props :reply))))
+                  'process)))
+       ,@body)))
+
+(defun agent-log-test--select-summary-cli (method)
+  "Return what `agent-log--summary-cli-select' reports for METHOD."
+  (let ((agent-log-summary-method method)
+        selected)
+    (agent-log--summary-cli-select
+     (lambda (&rest args) (setq selected args)))
+    selected))
+
+(ert-deftest agent-log-test-summary-cli-select/prefers-logged-in-claude ()
+  "The agent CLI method uses Claude Code when it is installed and logged in."
+  (agent-log-test--with-summary-clis '(("claude" :logged-in t)
+                                       ("codex" :logged-in t))
+    (should (equal (agent-log-test--select-summary-cli 'agent-cli)
+                   '(claude "/fake/claude" nil)))
+    (should (equal (mapcar #'car agent-log-test--cli-commands)
+                   '(("/fake/claude" "auth" "status"))))))
+
+(ert-deftest agent-log-test-summary-cli-select/falls-back-to-codex ()
+  "Codex is used when Claude Code is missing or logged out."
+  (dolist (claude '(nil (("claude" :logged-in nil))))
+    (agent-log-test--with-summary-clis (append claude
+                                               '(("codex" :logged-in t)))
+      (should (equal (agent-log-test--select-summary-cli 'agent-cli)
+                     '(codex "/fake/codex" nil)))
+      (should (equal (caar agent-log-test--cli-commands)
+                     '("/fake/codex" "login" "status"))))))
+
+(ert-deftest agent-log-test-summary-cli-select/neither-usable ()
+  "With no usable tool, selection gives nothing and says why for each."
+  (agent-log-test--with-summary-clis '(("codex" :logged-in nil))
+    (pcase-let ((`(,cli ,program ,reason)
+                 (agent-log-test--select-summary-cli 'agent-cli)))
+      (should-not cli)
+      (should-not program)
+      (should (equal reason
+                     (concat "no agent CLI can generate summaries: "
+                             "claude is not installed; codex is not "
+                             "logged in (run `codex login')"))))))
+
+(ert-deftest agent-log-test-summary-cli-select/single-tool-method ()
+  "The `claude' and `codex' methods never fall back to the other tool."
+  (agent-log-test--with-summary-clis '(("claude" :logged-in nil)
+                                       ("codex" :logged-in t))
+    (should-not (car (agent-log-test--select-summary-cli 'claude)))
+    (should (eq (car (agent-log-test--select-summary-cli 'codex)) 'codex))))
+
+(ert-deftest agent-log-test-summary-cli-command/claude ()
+  "Claude Code runs Haiku in print mode with the summary system prompt."
+  (let ((command (agent-log--summary-cli-command 'claude "/bin/claude")))
+    (should (equal (seq-take command 4)
+                   '("/bin/claude" "--print" "--model" "haiku")))
+    (should (member "--safe-mode" command))
+    (should (equal (cadr (member "--tools" command)) ""))
+    (should (equal (cadr (member "--system-prompt" command))
+                   agent-log--summary-system-message))
+    (should (equal (agent-log--summary-cli-input 'claude "PROMPT")
+                   "PROMPT"))))
+
+(ert-deftest agent-log-test-summary-cli-command/codex ()
+  "Codex runs non-interactively with low effort and an optional model."
+  (let* ((agent-log-summary-codex-model nil)
+         (command (agent-log--summary-cli-command 'codex "/bin/codex")))
+    (should (equal (seq-take command 2) '("/bin/codex" "exec")))
+    (should (equal (cadr (member "--config" command))
+                   "model_reasoning_effort=\"low\""))
+    (should (equal (cadr (member "--sandbox" command)) "read-only"))
+    (should-not (member "--model" command))
+    (should (equal (car (last command)) "-")))
+  (let ((agent-log-summary-codex-model "some-model"))
+    (should (equal (cadr (member "--model"
+                                 (agent-log--summary-cli-command
+                                  'codex "/bin/codex")))
+                   "some-model")))
+  (let ((input (agent-log--summary-cli-input 'codex "PROMPT")))
+    (should (string-prefix-p agent-log--summary-system-message input))
+    (should (string-suffix-p "\n\nPROMPT" input))))
+
+(ert-deftest agent-log-test-summary-cli-command/saves-no-transcript ()
+  "Summary runs save no transcript, so they cannot become sessions."
+  (should (member "--no-session-persistence"
+                  (agent-log--summary-cli-command 'claude "claude")))
+  (should (member "--ephemeral"
+                  (agent-log--summary-cli-command 'codex "codex"))))
+
+(ert-deftest agent-log-test-claude-read-sessions/hides-print-mode-runs ()
+  "A transcript left by a `claude -p' run is not listed as a session.
+Summary runs save none, but a print-mode transcript records the
+\"sdk-cli\" entrypoint, which keeps it out of the list regardless."
+  (agent-log-test--with-claude-store
+    (agent-log-test--write-transcript
+     "-tmp" agent-log-test--uuid-a
+     (agent-log-test--transcript-line
+      "/tmp" "2026-01-01T00:00:00.000Z"
+      (agent-log--build-summary-prompt "User: hello")
+      :entrypoint "sdk-cli"))
+    (should-not (agent-log-test--listed-ids backend))))
+
+(ert-deftest agent-log-test-summary-cli-response/success-parses-like-gptel ()
+  "A run's output is the response, parsed as a gptel reply would be."
+  (let* ((json "{\"oneline\":\"Fix the parser\",\"summary\":\"It was fixed.\"}")
+         (outcome (agent-log--summary-cli-response
+                   'claude (list :exit 0 :stdout (concat "\n" json "\n")
+                                 :stderr "Warning: sign-in ends soon"))))
+    (should (equal (car outcome) json))
+    (should-not (cdr outcome))
+    (should (equal (agent-log--parse-summary-response (car outcome))
+                   '("It was fixed." . "Fix the parser")))))
+
+(ert-deftest agent-log-test-summary-cli-response/failures ()
+  "Non-zero exits, timeouts, empty output and failed starts are failures."
+  (let ((agent-log-summary-claude-program "claude")
+        (agent-log-summary-cli-timeout 5))
+    (pcase-dolist (`(,result ,error)
+                   '(((:exit 2 :stdout "" :stderr "boom\nAPI down\n")
+                      "claude exited with status 2: API down")
+                     ((:exit nil :stdout "{}" :stderr "" :timed-out t)
+                      "claude did not finish within 5 seconds")
+                     ((:exit 0 :stdout "  \n" :stderr "")
+                      "claude returned no output")
+                     ((:exit nil :stdout "" :stderr "")
+                      "claude did not finish: no error output")))
+      (let ((outcome (agent-log--summary-cli-response 'claude result)))
+        (should-not (car outcome))
+        (should (equal (plist-get (cdr outcome) :error) error))))))
+
+(defun agent-log-test--cli-start-and-wait (command input)
+  "Start COMMAND with INPUT as a summary run and return its result plist."
+  (let ((deadline (+ (float-time) 10))
+        result)
+    (agent-log--summary-cli-start command input
+                                  (lambda (value) (setq result value)))
+    (while (and (not result) (< (float-time) deadline))
+      (accept-process-output nil 0.05))
+    result))
+
+(defun agent-log-test--summary-cli-leftovers ()
+  "Return live summary-run buffers and processes."
+  (append
+   (seq-filter (lambda (buffer)
+                 (string-prefix-p " *agent-log-summary-cli"
+                                  (buffer-name buffer)))
+               (buffer-list))
+   (seq-filter (lambda (process)
+                 (string-prefix-p "agent-log-summary-cli"
+                                  (process-name process)))
+               (process-list))))
+
+(ert-deftest agent-log-test-summary-cli-start/passes-input-and-output ()
+  "A run receives its input and reports output, errors and exit status."
+  (let ((result (agent-log-test--cli-start-and-wait
+                 '("sh" "-c" "cat; echo warning >&2") "héllo")))
+    (should (eql (plist-get result :exit) 0))
+    (should (equal (plist-get result :stdout) "héllo"))
+    (should (string-match-p "warning" (plist-get result :stderr)))
+    (should-not (plist-get result :timed-out))
+    (should-not (agent-log-test--summary-cli-leftovers))))
+
+(ert-deftest agent-log-test-summary-cli-start/non-zero-exit ()
+  "A failing run reports its exit status and standard error."
+  (let ((result (agent-log-test--cli-start-and-wait
+                 '("sh" "-c" "echo 'not logged in' >&2; exit 3") nil)))
+    (should (eql (plist-get result :exit) 3))
+    (should (string-match-p "not logged in" (plist-get result :stderr)))))
+
+(ert-deftest agent-log-test-summary-cli-start/timeout ()
+  "A run that outlives the timeout is killed and reported as timed out."
+  (let* ((agent-log-summary-cli-timeout 0.2)
+         (start (float-time))
+         (result (agent-log-test--cli-start-and-wait '("sleep" "30") nil)))
+    (should (plist-get result :timed-out))
+    (should-not (plist-get result :exit))
+    (should (< (- (float-time) start) 5))
+    (should-not (agent-log-test--summary-cli-leftovers))))
+
+(ert-deftest agent-log-test-summary-cli-start/missing-program ()
+  "A program that cannot start still reports a failure to the callback."
+  (let ((result (agent-log-test--cli-start-and-wait
+                 '("/nonexistent/agent-log-summary-tool") nil)))
+    (should-not (plist-get result :exit))
+    (should (string-match-p "agent-log-summary-tool"
+                            (plist-get result :stderr)))
+    (should-not (agent-log-test--summary-cli-leftovers))))
+
+(ert-deftest agent-log-test-summarize-one/cli-stores-summary ()
+  "A command-line summary is stored as a gptel one is, then the run goes on."
+  (agent-log-test--with-temp-dir
+    (let* ((agent-log-rendered-directory agent-log-test--dir)
+           (agent-log-summary-method 'agent-cli)
+           (agent-log-auto-rename-sessions nil)
+           (agent-log--summarize-active t)
+           (agent-log--summarize-generation 3)
+           (agent-log--summarize-request-id nil)
+           (json "{\"oneline\":\"Greet the assistant\",\"summary\":\"The user said hello.\"}")
+           next)
+      (agent-log--write-index (make-hash-table :test #'equal))
+      (agent-log-test--with-summary-clis
+          `(("claude" :logged-in t
+             :reply (:exit 0 :stdout ,json :stderr "")))
+        (cl-letf (((symbol-function 'run-with-timer)
+                   (lambda (_secs _repeat fn &rest args)
+                     (setq next (cons fn args)))))
+          (agent-log--summarize-one
+           "s1" '(:display "Example") "User: hello" "hash" '(10 . 20.0)
+           (list (list "s1") (list "s2")) 0 2 3))
+        (should (equal (cdar agent-log-test--cli-commands)
+                       (agent-log--build-summary-prompt "User: hello"))))
+      (let ((entry (gethash "s1" (agent-log--read-index))))
+        (should (equal (plist-get entry :summary-oneline)
+                       "Greet the assistant"))
+        (should (equal (plist-get entry :summary) "The user said hello."))
+        (should (equal (plist-get entry :summary-conversation-hash) "hash"))
+        (should (equal (plist-get entry :summary-jsonl-size) 10)))
+      (should (eq (car next) #'agent-log--summarize-next))
+      (should (equal (mapcar #'car (cadr next)) '("s2"))))))
+
+(ert-deftest agent-log-test-summarize-next/cli-respects-max-content-length ()
+  "The text a command-line run receives is capped like a gptel request."
+  (agent-log-test--with-temp-dir
+    (let* ((long (make-string 5000 ?x))
+           (content (concat "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\""
+                            long "\"}}\n"))
+           (jsonl-path (agent-log-test--write-file "s1.jsonl" content))
+           (session (list "s1" :file jsonl-path
+                          :backend agent-log-test--claude-backend))
+           (agent-log-rendered-directory agent-log-test--dir)
+           (agent-log-summary-method 'claude)
+           (agent-log-summary-max-content-length 200)
+           (agent-log--summarize-active t)
+           (agent-log--summarize-generation 7))
+      (agent-log--write-index (make-hash-table :test #'equal))
+      (agent-log-test--with-summary-clis
+          '(("claude" :logged-in t :reply (:exit 0 :stdout "" :stderr "")))
+        (cl-letf (((symbol-function 'run-with-timer) #'ignore))
+          (agent-log--summarize-next (list session) 0 1 7))
+        (let ((input (cdar agent-log-test--cli-commands)))
+          (should (string-prefix-p "Summarize this conversation" input))
+          (should (<= (length input)
+                      (length (agent-log--build-summary-prompt
+                               (make-string 200 ?x))))))))))
+
+(ert-deftest agent-log-test-summarize-one/cli-unavailable-blocks-once ()
+  "With no usable tool, the run stops, auto-summaries pause, and why is said once."
+  (let ((agent-log-summary-method 'agent-cli)
+        (agent-log--summarize-active t)
+        (agent-log--summarize-generation 3)
+        (agent-log--summarize-request-id nil)
+        (agent-log--summarize-blocked-reason nil)
+        (agent-log--summarize-consecutive-failures 0)
+        (agent-log--summarize-failures 0)
+        messages)
+    (agent-log-test--with-summary-clis nil
+      (cl-letf (((symbol-function 'message)
+                 (lambda (format-string &rest args)
+                   (push (apply #'format-message format-string args)
+                         messages)))
+                ((symbol-function 'run-with-timer)
+                 (lambda (&rest _) (ert-fail "summary run continued"))))
+        (agent-log--summarize-one
+         "s1" nil "User: hi" "hash" '(1 . 2)
+         (list (list "s1") (list "s2")) 0 2 3)))
+    (should-not agent-log--summarize-active)
+    (should (string-match-p "claude is not installed; codex is not installed"
+                            agent-log--summarize-blocked-reason))
+    (should (= 1 (seq-count (lambda (text)
+                              (string-match-p "not installed" text))
+                            messages)))))
+
+(ert-deftest agent-log-test-summary-method-ready/binds-selected-cli ()
+  "Automatic workers start with the method bound to the usable tool."
+  (let ((agent-log-summary-method 'agent-cli)
+        (agent-log--summarize-blocked-reason nil)
+        seen)
+    (agent-log-test--with-summary-clis '(("codex" :logged-in t))
+      (agent-log--summary-method-ready
+       (lambda () (setq seen agent-log-summary-method))))
+    (should (eq seen 'codex))
+    (should-not agent-log--summarize-blocked-reason)))
+
+(ert-deftest agent-log-test-summary-method-ready/suspends-and-reports-once ()
+  "Without a usable tool, automatic summaries pause and say why once."
+  (let ((agent-log-summary-method 'agent-cli)
+        (agent-log--summarize-blocked-reason nil)
+        messages
+        called)
+    (agent-log-test--with-summary-clis '(("claude" :logged-in nil))
+      (cl-letf (((symbol-function 'message)
+                 (lambda (format-string &rest args)
+                   (push (apply #'format-message format-string args)
+                         messages))))
+        (dotimes (_ 2)
+          (agent-log--summary-method-ready (lambda () (setq called t))))))
+    (should-not called)
+    (should (string-match-p
+             "claude is not logged in (run `claude auth login')"
+             agent-log--summarize-blocked-reason))
+    (should (= (length messages) 1))))
+
+(ert-deftest agent-log-test-summary-method-ready/gptel-runs-at-once ()
+  "The gptel method starts work immediately, without checking any CLI."
+  (let ((agent-log-summary-method 'gptel)
+        called)
+    (cl-letf (((symbol-function 'agent-log--summary-cli-start)
+               (lambda (&rest _) (ert-fail "checked a CLI"))))
+      (agent-log--summary-method-ready (lambda () (setq called t))))
+    (should called)))
+
+(ert-deftest agent-log-test-summary-worker-state/cli-method-skips-gptel ()
+  "A command-line worker loads no gptel and receives no API key."
+  (let* ((agent-log-summary-method 'claude)
+         (file (agent-log--summary-worker-state-file "s1")))
+    (unwind-protect
+        (let ((state (with-temp-buffer
+                       (insert-file-contents file)
+                       (buffer-string))))
+          (should-not (string-match-p "(require 'gptel)" state))
+          (should (string-match-p "agent-log-summary-method 'claude" state))
+          (should-not (agent-log--summary-worker-key))
+          (should-not (agent-log--require-summary-method)))
+      (delete-file file))))
+
 (ert-deftest agent-log-test-search/startup-does-not-upgrade-v1 ()
   "Does not refresh legacy summaries synchronously before search."
   (agent-log-test--with-temp-dir
