@@ -266,7 +266,7 @@ subprocess so the running Emacs stays responsive.
 Return nil.  Claude Code runs `claude-code-event-hook' until a function
 returns non-nil, so returning the timer would hide every stop event from
 the functions after this one."
-  (when (and agent-log-auto-redact-sessions
+  (when (and (bound-and-true-p agent-log-auto-redact-sessions)
              (eq (plist-get message :type) 'stop))
     (run-with-timer
      (+ agent-log-redact-active-session-seconds 30) nil
@@ -278,8 +278,10 @@ the functions after this one."
   nil)
 
 (defun agent-log-redact--update-session-end-hook ()
-  "Install or remove the session-end scrub hook based on the user option."
-  (if agent-log-auto-redact-sessions
+  "Install or remove the session-end scrub hook based on the user option.
+The option lives in `agent-log', so it is unbound when this library is
+loaded alone, as by `agent-remote'; unbound means its default, off."
+  (if (bound-and-true-p agent-log-auto-redact-sessions)
       (add-hook 'claude-code-event-hook
                 #'agent-log-redact--session-end-handler)
     (remove-hook 'claude-code-event-hook

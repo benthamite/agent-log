@@ -6637,6 +6637,35 @@ until something else loaded them.  A fresh process shows that."
             (buffer-string))))
     (should (string-suffix-p "(t t t)" (string-trim output)))))
 
+(ert-deftest agent-log-test-startup/redact-loads-alone ()
+  "`agent-log-redact' loads without `agent-log', and redacts.
+`agent-remote' loads it alone to redact the phone's transcripts; it once
+failed there because it read `agent-log-auto-redact-sessions', which only
+`agent-log' defines.  A fresh process shows that."
+  (let* ((form
+          '(progn
+             (require 'agent-log-redact)
+             (prin1 (list (featurep 'agent-log)
+                          (and (memq 'agent-log-redact--session-end-handler
+                                     (bound-and-true-p claude-code-event-hook))
+                               t)
+                          (string-search
+                           "ghp_" (agent-log-redact-text
+                                   (concat "x ghp_" (make-string 40 ?a))))))))
+         (output
+          (with-temp-buffer
+            (let ((process-environment
+                   (cons (concat "EMACSLOADPATH="
+                                 (mapconcat #'identity load-path
+                                            path-separator))
+                         process-environment)))
+              (call-process (expand-file-name invocation-name
+                                              invocation-directory)
+                            nil t nil "-Q" "--batch" "--eval"
+                            (prin1-to-string form)))
+            (buffer-string))))
+    (should (string-suffix-p "(nil nil nil)" (string-trim output)))))
+
 (ert-deftest agent-log-test-redact-session-end-handler/passes-stop-on ()
   "A stop event still reaches the `claude-code-event-hook' functions after it.
 The hook runs until a function returns non-nil, so a scheduled scrub must
