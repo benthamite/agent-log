@@ -6665,6 +6665,24 @@ not stop agent.el from seeing that the turn ended."
       (should (functionp (car sync-args)))
       (should-not (cadr sync-args)))))
 
+(ert-deftest agent-log-test-redact-text/long-unterminated-private-key ()
+  "Scan a long private-key header with no footer without regexp overflow.
+The body pattern once used an alternation group, which pushes a backtrack
+point per character and overflowed the matcher on long JSONL lines."
+  (let* ((marker (concat "PRIV" "ATE KEY-----"))
+         (text (concat "-----BEG" "IN RSA " marker
+                       (make-string 2000000 ?a))))
+    (should (equal (agent-log-redact-text text) text))))
+
+(ert-deftest agent-log-test-redact-text/private-key-block ()
+  "Redact a complete multi-line private-key block."
+  (let* ((marker (concat "PRIV" "ATE KEY-----"))
+         (block (concat "-----BEG" "IN RSA " marker "\nabc\ndef\n"
+                        "-----EN" "D RSA " marker)))
+    (should (string-match-p
+             "\\`x \\[REDACTED:private-key:[^]]+\\] y\\'"
+             (agent-log-redact-text (concat "x " block " y"))))))
+
 (ert-deftest agent-log-test-redact-jsonl-line/preserves-opaque-values ()
   "Leaves opaque JSON values byte-identical when only they match."
   (let* ((secret (concat "sk-" (make-string 24 ?a)))

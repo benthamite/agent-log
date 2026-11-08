@@ -73,7 +73,7 @@
      . "db-password")
     ("\"client_secret\"[[:space:]]*:[[:space:]]*\"\\([A-Za-z0-9_-]\\{20,\\}\\)\""
      . "google-oauth-secret")
-    ("-----BEGIN \\(?:RSA \\|EC \\|OPENSSH \\|DSA \\)?PRIVATE KEY-----\\(?:.\\|\n\\)*?-----END [A-Z ]*?PRIVATE KEY-----"
+    ("-----BEGIN \\(?:RSA \\|EC \\|OPENSSH \\|DSA \\)?PRIVATE KEY-----[[:ascii:][:nonascii:]]*?-----END [A-Z ]*?PRIVATE KEY-----"
      . "private-key")
     ("\\(?:api[_-]?key\\|api[_-]?secret\\|secret[_-]?key\\|access[_-]?token\\|auth[_-]?token\\|password\\)[[:space:]]*[=:][[:space:]]*[\"']\\([A-Za-z0-9/+=_-]\\{24,\\}\\)[\"']"
      . "hardcoded-secret"))

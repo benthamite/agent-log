@@ -513,6 +513,8 @@ After enabling for the first time, run ~agent-log-redact-rebuild-all~ to re-rend
 
 The built-in pattern list (~agent-log-redact-patterns~) covers AWS access keys, GitHub tokens (classic, =ghs_=, and fine-grained PATs), GitLab personal access tokens, Slack tokens, generic =sk-= API keys (with a more specific =sk-ant-= rule for Anthropic keys that fires first), Google API keys (=AIza...=), JSON Web Tokens, database connection strings with embedded credentials (=postgres=, =mysql=, =mongodb=, etc.), Google OAuth client secrets, PEM private-key blocks, and generic =api_key= / =password= / =token= assignments with high-entropy values.  Add site-specific patterns via ~agent-log-redact-extra-patterns~ (same =(REGEX . LABEL)= alist format); suppress known-safe matches via ~agent-log-redact-allowlist~ (a list of literal strings).
 
+Patterns run against whole JSONL lines, which can be megabytes long.  To match across newlines, use a character class such as =[[:ascii:][:nonascii:]]*?= rather than an alternation such as =\(?:.\|\n\)*?=: the alternation pushes one backtrack point per character, and on a long line Emacs aborts the whole scrub with "Stack overflow in regexp matcher".
+
 ** Integration
 :PROPERTIES:
 :CUSTOM_ID: h:redaction-integration
