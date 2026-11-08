@@ -162,19 +162,27 @@ a non-elpaca mechanism)."
                                      agent-log-redact--source-directory)))
     (and (file-directory-p candidate) candidate)))
 
+(defconst agent-log-redact--scrubber-buffer-name " *agent-log-redact-scrub*"
+  "Name of the buffer that collects the background scrubber's output.")
+
 (defun agent-log-redact--spawn-scrubber ()
   "Start an `emacs --batch' subprocess that scrubs JSONL out of process.
 Non-blocking: returns immediately.  The subprocess inherits no state
 from the running Emacs other than the elpaca builds load-path, which
-is reconstructed from this file's location."
-  (let ((builds (agent-log-redact--elpaca-builds-directory)))
+is reconstructed from this file's location.  Its output goes to the
+buffer named by `agent-log-redact--scrubber-buffer-name', and it exits
+with status 1 when any file failed to scrub."
+  (let ((builds (agent-log-redact--elpaca-builds-directory))
+        (buffer (get-buffer-create agent-log-redact--scrubber-buffer-name)))
     (unless builds
       (user-error
        "agent-log-redact: cannot locate elpaca builds directory from %s"
        agent-log-redact--source-directory))
+    (with-current-buffer buffer
+      (erase-buffer))
     (make-process
      :name "agent-log-redact-scrub"
-     :buffer nil
+     :buffer buffer
      :noquery t
      :connection-type 'pipe
      :command
@@ -183,17 +191,41 @@ is reconstructed from this file's location."
            "--eval"
            (format "(dolist (d (file-expand-wildcards %S)) (add-to-list 'load-path d))"
                    (concat builds "*/"))
+           "--eval" "(setq backtrace-on-error-noninteractive nil)"
            "--eval" "(require 'agent-log)"
            "--eval" "(require 'agent-log-redact)"
-           "--eval" "(agent-log-redact-scrub-jsonl)")
+           "--eval" "(kill-emacs (if (agent-log-redact-scrub-jsonl) 1 0))")
      :sentinel #'agent-log-redact--scrubber-sentinel)))
 
 (defun agent-log-redact--scrubber-sentinel (proc event)
-  "Log completion of the background scrubber PROC with EVENT string."
+  "Report completion of the background scrubber PROC with EVENT string.
+On success, kill the output buffer.  Otherwise keep it and name it in
+the message, together with the last line the scrubber printed."
   (when (memq (process-status proc) '(exit signal))
-    (let ((status (process-exit-status proc)))
-      (message "agent-log-redact: background scrub finished (exit %d, %s)"
-               status (string-trim event)))))
+    (let ((status (process-exit-status proc))
+          (buffer (process-buffer proc)))
+      (if (and (eq (process-status proc) 'exit) (zerop status))
+          (progn
+            (message "agent-log-redact: background scrub finished: %s"
+                     (agent-log-redact--last-output-line buffer))
+            (when (buffer-live-p buffer)
+              (kill-buffer buffer)))
+        (message "agent-log-redact: background scrub failed (exit %d, %s): %s; full output in buffer %S"
+                 status (string-trim event)
+                 (agent-log-redact--last-output-line buffer)
+                 (buffer-name buffer))))))
+
+(defun agent-log-redact--last-output-line (buffer)
+  "Return the last non-empty line of BUFFER, or \"no output\"."
+  (or (and (buffer-live-p buffer)
+           (with-current-buffer buffer
+             (save-excursion
+               (goto-char (point-max))
+               (skip-chars-backward " \t\n")
+               (let ((line (buffer-substring-no-properties
+                            (line-beginning-position) (point))))
+                 (unless (string-empty-p line) line)))))
+      "no output"))
 
 (defun agent-log-redact--session-end-handler (message)
   "Spawn the background scrubber on Claude Code session end.
@@ -342,9 +374,14 @@ JSON object keys are never redacted, and values whose keys are listed
 in `agent-log-redact-opaque-json-keys' are preserved byte-for-byte.
 Lines that fail to parse as JSON are written through unchanged.  The
 source .jsonl is the ground truth for session-resume functionality, so
-redaction must not alter authenticated ciphertext or signature fields."
+redaction must not alter authenticated ciphertext or signature fields.
+
+A file whose scrub signals an error is reported and left unchanged,
+and the walk continues with the next file.  Return the list of files
+that failed, so a caller such as the background scrubber can exit
+with a failure status."
   (interactive)
-  (let ((total 0) (scanned 0) (skipped 0) (changed 0))
+  (let ((total 0) (scanned 0) (skipped 0) (changed 0) (failed nil))
     (dolist (root agent-log-redact-jsonl-roots)
       (let ((dir (expand-file-name root)))
         (when (file-directory-p dir)
@@ -354,10 +391,24 @@ redaction must not alter authenticated ciphertext or signature fields."
                  file agent-log-redact-active-session-seconds)
                 (cl-incf skipped)
               (cl-incf scanned)
-              (when (agent-log-redact--scrub-jsonl-file file)
-                (cl-incf changed)))))))
-    (message "agent-log-redact: total=%d scanned=%d skipped=%d changed=%d"
-             total scanned skipped changed)))
+              (pcase (agent-log-redact--try-scrub-jsonl-file file)
+                ('changed (cl-incf changed))
+                ('failed (push file failed))))))))
+    (message "agent-log-redact: total=%d scanned=%d skipped=%d changed=%d failed=%d"
+             total scanned skipped changed (length failed))
+    (nreverse failed)))
+
+(defun agent-log-redact--try-scrub-jsonl-file (file)
+  "Scrub FILE and return `changed', `unchanged' or `failed'.
+An error is reported with FILE's name and turned into `failed', so one
+unscrubbable file does not stop the scrub of the files after it."
+  (condition-case err
+      (if (agent-log-redact--scrub-jsonl-file file) 'changed 'unchanged)
+    (error
+     (message "agent-log-redact: failed to scrub %s: %s"
+              file (truncate-string-to-width
+                    (error-message-string err) 300 nil nil "..."))
+     'failed)))
 
 (defun agent-log-redact--file-recent-p (file seconds)
   "Return non-nil if FILE was modified within the last SECONDS."

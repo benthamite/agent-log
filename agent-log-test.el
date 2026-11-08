@@ -6674,6 +6674,72 @@ point per character and overflowed the matcher on long JSONL lines."
                        (make-string 2000000 ?a))))
     (should (equal (agent-log-redact-text text) text))))
 
+(ert-deftest agent-log-test-redact-scrub-jsonl/continues-past-failed-file ()
+  "Scrub the files after one that errors and return the failed one."
+  (let* ((root (make-temp-file "agent-log-redact-" t))
+         (bad (expand-file-name "a.jsonl" root))
+         (good (expand-file-name "b.jsonl" root))
+         (secret (concat "sk-" (make-string 24 ?a)))
+         (agent-log-redact-jsonl-roots (list root))
+         (agent-log-redact-active-session-seconds 0)
+         (inhibit-message t))
+    (unwind-protect
+        (progn
+          (with-temp-file bad (insert "{}\n"))
+          (with-temp-file good
+            (insert (format "{\"text\":\"%s\"}\n" secret)))
+          (cl-letf* ((orig (symbol-function
+                            'agent-log-redact--scrub-jsonl-file))
+                     ((symbol-function 'agent-log-redact--scrub-jsonl-file)
+                      (lambda (file)
+                        (if (equal file bad)
+                            (error "Boom")
+                          (funcall orig file)))))
+            (should (equal (agent-log-redact-scrub-jsonl) (list bad))))
+          (should-not (string-match-p
+                       (regexp-quote secret)
+                       (with-temp-buffer
+                         (insert-file-contents good)
+                         (buffer-string)))))
+      (delete-directory root t))))
+
+(ert-deftest agent-log-test-redact-scrubber-sentinel/keeps-output-on-failure ()
+  "Name the last output line and keep the buffer when the scrub fails."
+  (let ((buffer (generate-new-buffer " *scrub-test*"))
+        (messages nil))
+    (unwind-protect
+        (progn
+          (with-current-buffer buffer
+            (insert "agent-log-redact: failed to scrub x.jsonl: Boom\n"
+                    "agent-log-redact: total=2 failed=1\n"))
+          (cl-letf (((symbol-function 'process-status) (lambda (_) 'exit))
+                    ((symbol-function 'process-exit-status) (lambda (_) 1))
+                    ((symbol-function 'process-buffer) (lambda (_) buffer))
+                    ((symbol-function 'message)
+                     (lambda (fmt &rest args)
+                       (push (apply #'format fmt args) messages))))
+            (agent-log-redact--scrubber-sentinel 'proc "exited abnormally with code 1\n"))
+          (should (buffer-live-p buffer))
+          (should (string-match-p "scrub failed (exit 1.*total=2 failed=1"
+                                  (car messages))))
+      (kill-buffer buffer))))
+
+(ert-deftest agent-log-test-redact-scrubber-sentinel/kills-buffer-on-success ()
+  "Report the summary line and kill the buffer when the scrub succeeds."
+  (let ((buffer (generate-new-buffer " *scrub-test*"))
+        (messages nil))
+    (with-current-buffer buffer
+      (insert "agent-log-redact: total=2 failed=0\n"))
+    (cl-letf (((symbol-function 'process-status) (lambda (_) 'exit))
+              ((symbol-function 'process-exit-status) (lambda (_) 0))
+              ((symbol-function 'process-buffer) (lambda (_) buffer))
+              ((symbol-function 'message)
+               (lambda (fmt &rest args)
+                 (push (apply #'format fmt args) messages))))
+      (agent-log-redact--scrubber-sentinel 'proc "finished\n"))
+    (should-not (buffer-live-p buffer))
+    (should (string-match-p "scrub finished: .*failed=0" (car messages)))))
+
 (ert-deftest agent-log-test-redact-text/private-key-block ()
   "Redact a complete multi-line private-key block."
   (let* ((marker (concat "PRIV" "ATE KEY-----"))
