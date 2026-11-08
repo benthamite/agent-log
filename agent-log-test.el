@@ -6682,6 +6682,8 @@ point per character and overflowed the matcher on long JSONL lines."
          (secret (concat "sk-" (make-string 24 ?a)))
          (agent-log-redact-jsonl-roots (list root))
          (agent-log-redact-active-session-seconds 0)
+         (agent-log-redact-scrub-state-file
+          (expand-file-name "state.eld" root))
          (inhibit-message t))
     (unwind-protect
         (progn
@@ -6702,6 +6704,106 @@ point per character and overflowed the matcher on long JSONL lines."
                          (insert-file-contents good)
                          (buffer-string)))))
       (delete-directory root t))))
+
+(defmacro agent-log-test--with-scrub-root (&rest body)
+  "Run BODY with the scrubber pointed at a fresh temporary root.
+BODY can refer to `root' and `scanned', the list of files the scrubber
+tried, most recent first."
+  (declare (indent 0))
+  `(let* ((root (make-temp-file "agent-log-redact-" t))
+          (agent-log-redact-jsonl-roots (list root))
+          (agent-log-redact-active-session-seconds 0)
+          (agent-log-redact-scrub-state-file
+           (expand-file-name "state.eld" root))
+          (inhibit-message t)
+          (scanned nil))
+     (unwind-protect
+         (cl-letf* ((orig (symbol-function 'agent-log-redact--scrub-jsonl-file))
+                    ((symbol-function 'agent-log-redact--scrub-jsonl-file)
+                     (lambda (file)
+                       (push file scanned)
+                       (funcall orig file))))
+           ,@body)
+       (delete-directory root t))))
+
+(defun agent-log-test--write-jsonl (file age)
+  "Create FILE with one JSONL line, last modified AGE seconds ago."
+  (with-temp-file file (insert "{}\n"))
+  (set-file-times file (time-subtract nil age)))
+
+(ert-deftest agent-log-test-redact-scrub-jsonl/scans-only-changed-files ()
+  "Skip files last modified before the previous run's cutoff."
+  (agent-log-test--with-scrub-root
+    (let ((old (expand-file-name "old.jsonl" root))
+          (new (expand-file-name "new.jsonl" root)))
+      (agent-log-test--write-jsonl old 100)
+      (agent-log-redact-scrub-jsonl)
+      (should (equal scanned (list old)))
+      (setq scanned nil)
+      (agent-log-test--write-jsonl new 0)
+      (agent-log-redact-scrub-jsonl)
+      (should (equal scanned (list new))))))
+
+(ert-deftest agent-log-test-redact-scrub-jsonl/rescans-after-settings-change ()
+  "Scan every file again when the redaction patterns change."
+  (agent-log-test--with-scrub-root
+    (let ((old (expand-file-name "old.jsonl" root)))
+      (agent-log-test--write-jsonl old 100)
+      (agent-log-redact-scrub-jsonl)
+      (setq scanned nil)
+      (let ((agent-log-redact-extra-patterns '(("zzz" . "test"))))
+        (agent-log-redact-scrub-jsonl))
+      (should (equal scanned (list old))))))
+
+(ert-deftest agent-log-test-redact-scrub-jsonl/full-scans-everything ()
+  "Scan every file when FULL is non-nil."
+  (agent-log-test--with-scrub-root
+    (let ((old (expand-file-name "old.jsonl" root)))
+      (agent-log-test--write-jsonl old 100)
+      (agent-log-redact-scrub-jsonl)
+      (setq scanned nil)
+      (agent-log-redact-scrub-jsonl t)
+      (should (equal scanned (list old))))))
+
+(ert-deftest agent-log-test-redact-scrub-jsonl/retries-failed-files ()
+  "Retry a file that failed even when it has not changed since."
+  (agent-log-test--with-scrub-root
+    (let ((bad (expand-file-name "bad.jsonl" root)))
+      (agent-log-test--write-jsonl bad 100)
+      (cl-letf (((symbol-function 'agent-log-redact--scrub-jsonl-line)
+                 (lambda (_) (error "Boom"))))
+        (should (equal (agent-log-redact-scrub-jsonl) (list bad))))
+      (setq scanned nil)
+      (should-not (agent-log-redact-scrub-jsonl))
+      (should (equal scanned (list bad)))
+      (setq scanned nil)
+      (agent-log-redact-scrub-jsonl)
+      (should-not scanned))))
+
+(ert-deftest agent-log-test-redact-request-scrub/runs-one-at-a-time ()
+  "Queue a request made during a run and start it when the run ends."
+  (let ((spawned 0)
+        (agent-log-redact--scrubber-process nil)
+        (agent-log-redact--scrubber-rerun nil)
+        (live t))
+    (cl-letf (((symbol-function 'agent-log-redact--spawn-scrubber)
+               (lambda () (cl-incf spawned) 'proc))
+              ((symbol-function 'process-live-p) (lambda (_) live))
+              ((symbol-function 'process-status) (lambda (_) 'exit))
+              ((symbol-function 'process-exit-status) (lambda (_) 0))
+              ((symbol-function 'process-buffer) (lambda (_) nil))
+              ((symbol-function 'message) #'ignore))
+      (setq live nil)
+      (agent-log-redact--request-scrub)
+      (setq live t)
+      (agent-log-redact--request-scrub)
+      (agent-log-redact--request-scrub)
+      (should (= spawned 1))
+      (should agent-log-redact--scrubber-rerun)
+      (setq live nil)
+      (agent-log-redact--scrubber-sentinel 'proc "finished\n")
+      (should (= spawned 2))
+      (should-not agent-log-redact--scrubber-rerun))))
 
 (ert-deftest agent-log-test-redact-scrubber-sentinel/keeps-output-on-failure ()
   "Name the last output line and keep the buffer when the scrub fails."

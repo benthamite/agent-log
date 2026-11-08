@@ -118,6 +118,15 @@ Prevents racing with an active Claude Code or Codex session that may
 still be appending to its log file."
   :type 'number)
 
+(defcustom agent-log-redact-scrub-state-file
+  "~/.claude/agent-log-redact-scrub-state.eld"
+  "File where the JSONL scrubber records its last completed run.
+It holds the run's cutoff time, a hash of the redaction settings and
+the files that failed.  A later run scans only files modified after
+the cutoff, plus those failed files, and rescans everything when the
+settings hash differs.  Deleting the file forces a full rescan."
+  :type 'file)
+
 (defcustom agent-log-redact-opaque-json-keys
   '("encrypted_content" "signature" "ciphertext" "nonce" "mac" "tag")
   "JSON object keys whose string values must never be source-redacted.
@@ -164,6 +173,23 @@ a non-elpaca mechanism)."
 
 (defconst agent-log-redact--scrubber-buffer-name " *agent-log-redact-scrub*"
   "Name of the buffer that collects the background scrubber's output.")
+
+(defvar agent-log-redact--scrubber-process nil
+  "The running background scrubber process, or nil.")
+
+(defvar agent-log-redact--scrubber-rerun nil
+  "Non-nil when a scrub was requested while one was already running.")
+
+(defun agent-log-redact--request-scrub ()
+  "Start the background scrubber, or queue one run if it is running.
+At most one scrubber runs at a time.  A request that arrives during a
+run is remembered, and a single new run starts when the current one
+ends, so it covers files that changed during the run."
+  (if (process-live-p agent-log-redact--scrubber-process)
+      (setq agent-log-redact--scrubber-rerun t)
+    (setq agent-log-redact--scrubber-rerun nil)
+    (setq agent-log-redact--scrubber-process
+          (agent-log-redact--spawn-scrubber))))
 
 (defun agent-log-redact--spawn-scrubber ()
   "Start an `emacs --batch' subprocess that scrubs JSONL out of process.
@@ -213,7 +239,9 @@ the message, together with the last line the scrubber printed."
         (message "agent-log-redact: background scrub failed (exit %d, %s): %s; full output in buffer %S"
                  status (string-trim event)
                  (agent-log-redact--last-output-line buffer)
-                 (buffer-name buffer))))))
+                 (buffer-name buffer)))
+      (when agent-log-redact--scrubber-rerun
+        (agent-log-redact--request-scrub)))))
 
 (defun agent-log-redact--last-output-line (buffer)
   "Return the last non-empty line of BUFFER, or \"no output\"."
@@ -244,7 +272,7 @@ the functions after this one."
      (+ agent-log-redact-active-session-seconds 30) nil
      (lambda ()
        (condition-case err
-           (agent-log-redact--spawn-scrubber)
+           (agent-log-redact--request-scrub)
          (error (message "agent-log-redact: scheduled scrub failed: %s"
                          (error-message-string err)))))))
   nil)
@@ -361,14 +389,20 @@ any new content through the advice-based redactor."
              scanned changed)))
 
 ;;;###autoload
-(defun agent-log-redact-scrub-jsonl ()
-  "Redact secrets in every source .jsonl file under the configured roots.
+(defun agent-log-redact-scrub-jsonl (&optional full)
+  "Redact secrets in source .jsonl files under the configured roots.
 Walks every directory listed in `agent-log-redact-jsonl-roots'
 recursively, parses each JSONL line, redacts non-opaque string values
 via `agent-log-redact-text', and rewrites the file atomically if
 anything changed.  Files modified within the last
 `agent-log-redact-active-session-seconds' seconds are skipped to avoid
 racing with an active session.
+
+Only files modified since the last completed run, plus the files that
+run failed on, are scanned; `agent-log-redact-scrub-state-file' holds
+that record.  With FULL non-nil (interactively, a prefix argument), or
+when the redaction settings changed since that run, every file is
+scanned.
 
 JSON object keys are never redacted, and values whose keys are listed
 in `agent-log-redact-opaque-json-keys' are preserved byte-for-byte.
@@ -380,23 +414,69 @@ A file whose scrub signals an error is reported and left unchanged,
 and the walk continues with the next file.  Return the list of files
 that failed, so a caller such as the background scrubber can exit
 with a failure status."
-  (interactive)
-  (let ((total 0) (scanned 0) (skipped 0) (changed 0) (failed nil))
+  (interactive "P")
+  (let* ((started (float-time))
+         (state (unless full (agent-log-redact--read-scrub-state)))
+         (cutoff (plist-get state :cutoff))
+         (retry (plist-get state :failed))
+         (total 0) (scanned 0) (skipped 0) (changed 0) (failed nil))
     (dolist (root agent-log-redact-jsonl-roots)
       (let ((dir (expand-file-name root)))
         (when (file-directory-p dir)
           (dolist (file (directory-files-recursively dir "\\.jsonl\\'"))
             (cl-incf total)
-            (if (agent-log-redact--file-recent-p
-                 file agent-log-redact-active-session-seconds)
+            (if (or (agent-log-redact--file-recent-p
+                     file agent-log-redact-active-session-seconds)
+                    (and cutoff
+                         (not (member file retry))
+                         (agent-log-redact--file-older-p file cutoff)))
                 (cl-incf skipped)
               (cl-incf scanned)
               (pcase (agent-log-redact--try-scrub-jsonl-file file)
                 ('changed (cl-incf changed))
                 ('failed (push file failed))))))))
+    (agent-log-redact--write-scrub-state
+     (- started agent-log-redact-active-session-seconds) failed)
     (message "agent-log-redact: total=%d scanned=%d skipped=%d changed=%d failed=%d"
              total scanned skipped changed (length failed))
     (nreverse failed)))
+
+(defun agent-log-redact--settings-hash ()
+  "Return a hash of every setting that decides what the scrubber redacts."
+  (secure-hash 'sha256
+               (prin1-to-string
+                (list agent-log-redact-patterns
+                      agent-log-redact-extra-patterns
+                      agent-log-redact-allowlist
+                      agent-log-redact-opaque-json-keys
+                      agent-log-redact-opaque-source-types))))
+
+(defun agent-log-redact--read-scrub-state ()
+  "Return the last run's state plist, or nil when it does not apply.
+The state does not apply when the file is missing or unreadable, or
+when it was recorded under different redaction settings."
+  (let ((file (expand-file-name agent-log-redact-scrub-state-file)))
+    (when (file-readable-p file)
+      (let ((state (condition-case nil
+                       (with-temp-buffer
+                         (insert-file-contents file)
+                         (read (current-buffer)))
+                     (error nil))))
+        (when (and (listp state)
+                   (equal (plist-get state :settings)
+                          (agent-log-redact--settings-hash)))
+          state)))))
+
+(defun agent-log-redact--write-scrub-state (cutoff failed)
+  "Record a completed run with CUTOFF time and the FAILED file list."
+  (let ((file (expand-file-name agent-log-redact-scrub-state-file))
+        (create-lockfiles nil))
+    (make-directory (file-name-directory file) t)
+    (with-temp-file file
+      (prin1 (list :cutoff cutoff
+                   :settings (agent-log-redact--settings-hash)
+                   :failed failed)
+             (current-buffer)))))
 
 (defun agent-log-redact--try-scrub-jsonl-file (file)
   "Scrub FILE and return `changed', `unchanged' or `failed'.
@@ -414,6 +494,11 @@ unscrubbable file does not stop the scrub of the files after it."
   "Return non-nil if FILE was modified within the last SECONDS."
   (let ((mtime (file-attribute-modification-time (file-attributes file))))
     (< (- (float-time) (float-time mtime)) seconds)))
+
+(defun agent-log-redact--file-older-p (file time)
+  "Return non-nil if FILE was last modified before TIME, in float seconds."
+  (< (float-time (file-attribute-modification-time (file-attributes file)))
+     time))
 
 (defun agent-log-redact--scrub-jsonl-file (file)
   "Rewrite FILE with every JSON string value redacted.
