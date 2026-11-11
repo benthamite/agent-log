@@ -4102,7 +4102,7 @@ When SESSION-IDS is non-nil, write a targeted sweep form."
             (when (and load-file-name (file-exists-p load-file-name))
               (delete-file load-file-name)))
          (current-buffer))
-        (terpri)))
+        (terpri (current-buffer))))
     (set-file-modes file #o600)
     file))
 

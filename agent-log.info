@@ -970,16 +970,17 @@ sends it to the worker on standard input.  With a command-line method,
 no key exists or is sent; the running Emacs first checks,
 asynchronously, which tool is installed and logged in, and the worker
 uses that tool.  Starting a worker is logged to the ‘*Messages*’ buffer
-only, and successful workers finish silently; a worker in which any
-session's summary failed exits with a non-zero status, which is reported
-in the echo area.  If auto-sync is also enabled, the background
-summarizer is launched after sync completes.  If the event cannot be
-resolved to a specific session, automatic summarization is skipped
-quietly.  Workers start from ‘temporary-file-directory’ rather than the
-current buffer's directory, because they address their state file
-absolutely and never use the working directory; this keeps summarization
-working after a project directory has been deleted or renamed, which
-would otherwise stop the worker from starting at all.
+only and leaves the echo area untouched, and successful workers finish
+silently; a worker in which any session's summary failed exits with a
+non-zero status, which is reported in the echo area.  If auto-sync is
+also enabled, the background summarizer is launched after sync
+completes.  If the event cannot be resolved to a specific session,
+automatic summarization is skipped quietly.  Workers start from
+‘temporary-file-directory’ rather than the current buffer's directory,
+because they address their state file absolutely and never use the
+working directory; this keeps summarization working after a project
+directory has been deleted or renamed, which would otherwise stop the
+worker from starting at all.
 
    If older index entries point at files under the ‘unknown’ rendered
 project, run ‘M-x agent-log-repair-rendered-index’.  The command
@@ -1987,7 +1988,7 @@ File: agent-log.info,  Node: Function index,  Next: Variable index,  Up: Indices
 * agent-log-refresh-session-onelines:    Agent integration.    (line 75)
 * agent-log-rename-sessions:             Session rename.       (line  6)
 * agent-log-repair-rendered-index:       Automatic sync and summarization on session end.
-                                                               (line 54)
+                                                               (line 55)
 * agent-log-resume-session:              Session resumption.   (line  6)
 * agent-log-search:                      AI search.            (line  6)
 * agent-log-search-follow-link:          AI search.            (line  6)
@@ -2101,35 +2102,35 @@ Node: Section visibility37930
 Node: Copying38802
 Node: Summary generation39280
 Node: Automatic sync and summarization on session end42923
-Node: Session rename49187
-Node: AI search51283
-Node: Session resumption54767
-Node: Agent integration57309
-Node: Secret redaction64081
-Node: Coverage65248
-Node: Integration66530
-Node: Commands (1)68405
-Node: User options (1)72197
-Node: agent-log-mode76227
-Node: agent-log-search-mode78294
-Node: Transient menu79156
-Node: How it works80768
-Node: Backend architecture81035
-Node: Data sources83063
-Node: Claude Code83337
-Node: Codex86235
-Node: Rendered directory structure89184
-Node: Rendering pipeline91610
-Node: Live update mechanism93721
-Node: Troubleshooting94433
-Node: No sessions found94662
-Node: Rendered files not updating95174
-Node: Live updates not working95687
-Node: Development96141
-Node: License96438
-Node: Indices96566
-Node: Function index96703
-Node: Variable index99194
+Node: Session rename49222
+Node: AI search51318
+Node: Session resumption54802
+Node: Agent integration57344
+Node: Secret redaction64116
+Node: Coverage65283
+Node: Integration66565
+Node: Commands (1)68440
+Node: User options (1)72232
+Node: agent-log-mode76262
+Node: agent-log-search-mode78329
+Node: Transient menu79191
+Node: How it works80803
+Node: Backend architecture81070
+Node: Data sources83098
+Node: Claude Code83372
+Node: Codex86270
+Node: Rendered directory structure89219
+Node: Rendering pipeline91645
+Node: Live update mechanism93756
+Node: Troubleshooting94468
+Node: No sessions found94697
+Node: Rendered files not updating95209
+Node: Live updates not working95722
+Node: Development96176
+Node: License96473
+Node: Indices96601
+Node: Function index96738
+Node: Variable index99229
 
 End Tag Table
 

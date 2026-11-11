@@ -3691,6 +3691,27 @@ Summary runs save none, but a print-mode transcript records the
           (should-not (agent-log--require-summary-method)))
       (delete-file file))))
 
+(ert-deftest agent-log-test-summary-worker-state/writes-nothing-to-echo-area ()
+  "Writing a state file prints nothing to the echo area.
+A stream-less `terpri' printed a lone newline there, which left the
+echo area two lines tall."
+  (let* ((agent-log-summary-method 'claude)
+         (printed nil)
+         (file (cl-letf* ((orig (symbol-function 'terpri))
+                          ((symbol-function 'terpri)
+                           (lambda (&optional stream ensure)
+                             (unless (or stream (not (eq standard-output t)))
+                               (setq printed t))
+                             (funcall orig stream ensure))))
+                 (agent-log--summary-worker-state-file "s1"))))
+    (unwind-protect
+        (progn
+          (should-not printed)
+          (should (string-suffix-p ")\n" (with-temp-buffer
+                                            (insert-file-contents file)
+                                            (buffer-string)))))
+      (delete-file file))))
+
 (ert-deftest agent-log-test-search/startup-does-not-upgrade-v1 ()
   "Does not refresh legacy summaries synchronously before search."
   (agent-log-test--with-temp-dir
