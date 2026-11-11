@@ -1091,9 +1091,29 @@ owner.  Signal on the first conflict; return non-nil otherwise."
 (defun agent-log--sync-session (session &optional callback)
   "Render SESSION asynchronously if it is unrendered or stale.
 When CALLBACK is non-nil, call it with no arguments after the
-session has been checked."
-  (message "Syncing session %s..." (car session))
-  (agent-log--sync-next (list session) 0 1 callback))
+session has been checked.  Return the render process.
+
+This is automatic session-end work, so only a failure the user may need
+to act on reaches the echo area.  A render rejected because the session
+was still writing its log is expected while a session runs, and a later
+sync renders it, so it goes only to the *Messages* buffer."
+  (agent-log--render-session-async
+   session nil nil
+   (lambda (err)
+     (cond ((null err))
+           ((eq (car err) 'agent-log--source-changed)
+            (agent-log--log-quietly "agent-log: %s still writing; render deferred"
+                                    (car session)))
+           (t (message "Failed to render %s: %s"
+                       (car session) (error-message-string err))))
+     (when callback (funcall callback)))))
+
+(defun agent-log--log-quietly (format-string &rest args)
+  "Log FORMAT-STRING with ARGS to the *Messages* buffer only.
+Use it for automatic background work that the user did not start and
+need not act on, which would otherwise fill the echo area."
+  (let ((inhibit-message t))
+    (apply #'message format-string args)))
 
 (defun agent-log--pending-sessions (sessions index)
   "Return sessions from SESSIONS that need rendering per INDEX."
@@ -1155,6 +1175,8 @@ when non-nil, receives each successfully rendered session."
   "Latest render token for each rendered directory and session ID.")
 
 (define-error 'agent-log--index-changed "Session index changed during rendering")
+
+(define-error 'agent-log--source-changed "Session source changed during rendering")
 
 (defun agent-log--render-session-async
     (session index defer-index-write callback)
@@ -1343,7 +1365,7 @@ INDEX-STATE is the disk index state captured before starting the worker."
     (unless (equal state
                    (agent-log--render-source-state
                     (plist-get (cdr session) :file)))
-      (error "Session source changed during rendering"))
+      (signal 'agent-log--source-changed nil))
     (when (and defer-index-write
                (not (equal
                      (agent-log--rendered-summary-text (car session) worker-index)
@@ -3984,8 +4006,8 @@ that has been deleted or renamed."
             (agent-log--summary-worker-send-key process api-key)
             (puthash session-id (cons process state-file)
                      agent-log--summary-workers)
-            (message "agent-log: summarizing session %s in background"
-                     session-id))
+            (agent-log--log-quietly
+             "agent-log: summarizing session %s in background" session-id))
         (error
          (when (file-exists-p state-file)
            (delete-file state-file))

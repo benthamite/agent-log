@@ -4630,6 +4630,28 @@ Summary runs save none, but a print-mode transcript records the
         (when (and process (process-live-p process))
           (delete-process process))))))
 
+(ert-deftest agent-log-test-sync-session/quiet-unless-failure ()
+  "Automatic sync echoes only failures the user may need to act on."
+  (dolist (case '((nil nil nil)
+                  ((agent-log--source-changed) t "still writing")
+                  ((error "Boom") nil "Failed to render s: Boom")))
+    (let ((messages nil)
+          (called nil))
+      (cl-letf (((symbol-function 'agent-log--render-session-async)
+                 (lambda (_session _index _defer callback)
+                   (funcall callback (car case))))
+                ((symbol-function 'message)
+                 (lambda (fmt &rest args)
+                   (push (cons inhibit-message (apply #'format fmt args))
+                         messages))))
+        (agent-log--sync-session '("s" :file "/x") (lambda () (setq called t))))
+      (should called)
+      (if (null (nth 2 case))
+          (should-not messages)
+        (should (= (length messages) 1))
+        (should (eq (car (car messages)) (nth 1 case)))
+        (should (string-match-p (nth 2 case) (cdr (car messages))))))))
+
 (ert-deftest agent-log-test-render-async/publication-conflicts ()
   "Reject new target owners, changed summaries and superseded renders."
   (dolist (conflict '(owner summary superseded worker-error index))
@@ -6866,10 +6888,12 @@ tried, most recent first."
               ((symbol-function 'process-buffer) (lambda (_) buffer))
               ((symbol-function 'message)
                (lambda (fmt &rest args)
-                 (push (apply #'format fmt args) messages))))
+                 (push (cons inhibit-message (apply #'format fmt args))
+                       messages))))
       (agent-log-redact--scrubber-sentinel 'proc "finished\n"))
     (should-not (buffer-live-p buffer))
-    (should (string-match-p "scrub finished: .*failed=0" (car messages)))))
+    (should (car (car messages)))
+    (should (string-match-p "scrub finished: .*failed=0" (cdr (car messages))))))
 
 (ert-deftest agent-log-test-redact-text/private-key-block ()
   "Redact a complete multi-line private-key block."

@@ -225,15 +225,18 @@ with status 1 when any file failed to scrub."
 
 (defun agent-log-redact--scrubber-sentinel (proc event)
   "Report completion of the background scrubber PROC with EVENT string.
-On success, kill the output buffer.  Otherwise keep it and name it in
-the message, together with the last line the scrubber printed."
+On success, log the scrubber's summary line to the *Messages* buffer
+only, since the scrub runs after every session end, and kill the output
+buffer.  On failure, show the summary line in the echo area, naming
+the kept output buffer."
   (when (memq (process-status proc) '(exit signal))
     (let ((status (process-exit-status proc))
           (buffer (process-buffer proc)))
       (if (and (eq (process-status proc) 'exit) (zerop status))
           (progn
-            (message "agent-log-redact: background scrub finished: %s"
-                     (agent-log-redact--last-output-line buffer))
+            (let ((inhibit-message t))
+              (message "agent-log-redact: background scrub finished: %s"
+                       (agent-log-redact--last-output-line buffer)))
             (when (buffer-live-p buffer)
               (kill-buffer buffer)))
         (message "agent-log-redact: background scrub failed (exit %d, %s): %s; full output in buffer %S"
