@@ -1239,7 +1239,9 @@ standalone behavior exactly.
      hours behind.
    • Resuming a session that is already live switches to its existing
      buffer, with a message naming its state, instead of starting a
-     duplicate process on the same conversation.
+     duplicate process on the same conversation.  The buffer goes to the
+     window already showing it, or else replaces the selected window, as
+     agent's session switcher does; it never splits the frame.
    • Resuming an inactive session is routed through
      ‘agent-start-session’, so the resumed process gets ‘agent’'s
      account handling, lifecycle registration, teardown, and state
@@ -1985,7 +1987,7 @@ File: agent-log.info,  Node: Function index,  Next: Variable index,  Up: Indices
 * agent-log-redact-rebuild-all:          Commands (1).         (line  6)
 * agent-log-redact-scrub-jsonl:          Commands (1).         (line 21)
 * agent-log-refresh:                     Sync and rendering.   (line  6)
-* agent-log-refresh-session-onelines:    Agent integration.    (line 75)
+* agent-log-refresh-session-onelines:    Agent integration.    (line 77)
 * agent-log-rename-sessions:             Session rename.       (line  6)
 * agent-log-repair-rendered-index:       Automatic sync and summarization on session end.
                                                                (line 55)
@@ -1994,7 +1996,7 @@ File: agent-log.info,  Node: Function index,  Next: Variable index,  Up: Indices
 * agent-log-search-follow-link:          AI search.            (line  6)
 * agent-log-search-mode:                 agent-log-search-mode.
                                                                (line  6)
-* agent-log-session-oneline:             Agent integration.    (line 75)
+* agent-log-session-oneline:             Agent integration.    (line 77)
 * agent-log-stop-summarize-sessions:     Summary generation.   (line  6)
 * agent-log-summarize-sessions:          Summary generation.   (line  6)
 * agent-log-sync-sessions:               Sync and rendering.   (line  6)
@@ -2032,7 +2034,7 @@ File: agent-log.info,  Node: Variable index,  Prev: Function index,  Up: Indices
 * agent-log-live-update:                 Live updates.         (line  6)
 * agent-log-max-tool-input-length:       Tool output limits.   (line  6)
 * agent-log-max-tool-result-length:      Tool output limits.   (line  6)
-* agent-log-oneline-refresh-idle-delay:  Agent integration.    (line 75)
+* agent-log-oneline-refresh-idle-delay:  Agent integration.    (line 77)
 * agent-log-project-column-max-width:    Session browser options.
                                                                (line  6)
 * agent-log-redact-active-session-seconds: User options (1).   (line 39)
@@ -2106,31 +2108,31 @@ Node: Session rename49222
 Node: AI search51318
 Node: Session resumption54802
 Node: Agent integration57344
-Node: Secret redaction64116
-Node: Coverage65283
-Node: Integration66565
-Node: Commands (1)68440
-Node: User options (1)72232
-Node: agent-log-mode76262
-Node: agent-log-search-mode78329
-Node: Transient menu79191
-Node: How it works80803
-Node: Backend architecture81070
-Node: Data sources83098
-Node: Claude Code83372
-Node: Codex86270
-Node: Rendered directory structure89219
-Node: Rendering pipeline91645
-Node: Live update mechanism93756
-Node: Troubleshooting94468
-Node: No sessions found94697
-Node: Rendered files not updating95209
-Node: Live updates not working95722
-Node: Development96176
-Node: License96473
-Node: Indices96601
-Node: Function index96738
-Node: Variable index99229
+Node: Secret redaction64276
+Node: Coverage65443
+Node: Integration66725
+Node: Commands (1)68600
+Node: User options (1)72392
+Node: agent-log-mode76422
+Node: agent-log-search-mode78489
+Node: Transient menu79351
+Node: How it works80963
+Node: Backend architecture81230
+Node: Data sources83258
+Node: Claude Code83532
+Node: Codex86430
+Node: Rendered directory structure89379
+Node: Rendering pipeline91805
+Node: Live update mechanism93916
+Node: Troubleshooting94628
+Node: No sessions found94857
+Node: Rendered files not updating95369
+Node: Live updates not working95882
+Node: Development96336
+Node: License96633
+Node: Indices96761
+Node: Function index96898
+Node: Variable index99389
 
 End Tag Table
 

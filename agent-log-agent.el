@@ -214,10 +214,13 @@ point the exact-path advice covers."
   "Switch to SESSION-ID's live buffer; return non-nil when it was live.
 BACKEND-KEY names the backend whose live sessions are searched.  This
 is the duplicate guard: resuming a session that already has a live
-buffer would start a second process on the same conversation."
+buffer would start a second process on the same conversation.  The
+buffer goes to the window already showing it, else to the selected
+window, as agent's session switcher does, never to a new split."
   (when-let* ((live (agent-log-agent--session-info backend-key session-id))
               (buffer (plist-get live :buffer)))
-    (pop-to-buffer buffer)
+    (pop-to-buffer buffer '((display-buffer-reuse-window
+                             display-buffer-same-window)))
     (message "Session %s is already live (%s); switched to its buffer"
              session-id (plist-get live :state))
     t))

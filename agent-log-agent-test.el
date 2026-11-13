@@ -87,6 +87,32 @@ and this test would then pass against whatever that stale file said."
     (should (memq #'agent-log-agent--session-annotation
                   agent-session-annotation-functions))))
 
+(ert-deftest agent-log-agent-test-switch-to-live/shows-buffer-in-place ()
+  "A live session takes the selected window, or the window showing it.
+Popping it to another window split the frame, while resuming a session
+that is not live replaces the log window."
+  (save-window-excursion
+    (delete-other-windows)
+    (let ((log (generate-new-buffer " *agent-log-test-log*"))
+          (session (generate-new-buffer " *agent-log-test-session*")))
+      (unwind-protect
+          (cl-letf (((symbol-function 'agent-log-agent--session-info)
+                     (lambda (_backend _id) (list :buffer session :state 'idle))))
+            (switch-to-buffer log)
+            (should (agent-log-agent--switch-to-live 'claude-code "id"))
+            (should (one-window-p))
+            (should (eq (window-buffer (selected-window)) session))
+            (switch-to-buffer log)
+            (let ((log-window (selected-window))
+                  (other (split-window)))
+              (set-window-buffer other session)
+              (agent-log-agent--switch-to-live 'claude-code "id")
+              (should (eq (selected-window) other))
+              (should (eq (window-buffer log-window) log))
+              (should (= (length (window-list)) 2))))
+        (kill-buffer log)
+        (kill-buffer session)))))
+
 (provide 'agent-log-agent-test)
 ;;; agent-log-agent-test.el ends here
 
